@@ -29,7 +29,8 @@ def main():
     if original.count(PREVIEW_BUNDLE) != 1 or 'native-preview' not in original:
         raise ValueError('Expected the checked-in preview app identity')
     formal = original.replace(PREVIEW_BUNDLE, FORMAL_BUNDLE)
-    formal = formal.replace('native-preview', 'native')
+    # 正式包版本名去掉预览后缀：0.4.4-native-preview -> 0.4.4
+    formal = formal.replace('-native-preview', '')
     environment = dict(os.environ)
     environment.setdefault('DEVECO_SDK_HOME', '/Applications/DevEco-Studio.app/Contents/sdk')
     environment.setdefault('JAVA_HOME',

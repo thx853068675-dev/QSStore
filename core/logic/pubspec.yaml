@@ -1,0 +1,20 @@
+name: signing_core
+description: 轻启签名与侧载端到端核心（纯 Dart，无 Flutter 依赖）
+publish_to: none
+version: 0.1.0
+
+environment:
+  # 下界对齐鸿蒙 Flutter 工具链（Dart 2.19.6）；
+  # 上界放宽到 4.0.0 以便 App 依赖本包时也能用官方 Flutter 3.x 构建。
+  sdk: '>=2.19.6 <4.0.0'
+
+dependencies:
+  # 版本与现有 quietstart_signing 包保持一致，避免解析到不同实现
+  archive: ^3.4.10
+  crypto: ^3.0.3
+  # AccumulatorSink（流式哈希收集）来自 convert
+  convert: ^3.1.0
+  path: ^1.8.2
+
+dev_dependencies:
+  test: ^1.24.0

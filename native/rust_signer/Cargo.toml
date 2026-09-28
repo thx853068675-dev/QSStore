@@ -1,0 +1,17 @@
+[package]
+name = "qingqi_signer_bridge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+qingqi-hdc-transport = { path = "../hdc_transport/hdc" }
+hapsigner = { git = "https://github.com/harmony-contrib/hapsigner-rs.git", rev = "519783fd0002603bf518ff8f96a757517fccc00d", default-features = false }
+memmap2 = "0.9"
+zeroize = "1"
+p256 = { version = "0.13.2", features = ["pkcs8"] }
+x509-cert = "0.2.5"
+serde_json = "1"

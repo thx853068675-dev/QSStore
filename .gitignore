@@ -1,0 +1,12 @@
+# 构建产物
+app/build/
+app/ohos/build/
+app/.dart_tool/
+app/plugins/*/ohos/build/
+core/logic/.dart_tool/
+native/entry/build/
+native/.hvigor/
+native/ohos/
+**/oh_modules/
+**/node_modules/
+.DS_Store

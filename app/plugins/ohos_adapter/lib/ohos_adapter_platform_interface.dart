@@ -1,0 +1,89 @@
+import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+
+import 'ohos_adapter_method_channel.dart';
+
+abstract class OhosAdapterPlatform extends PlatformInterface {
+  /// Constructs a OhosAdapterPlatform.
+  OhosAdapterPlatform() : super(token: _token);
+
+  static final Object _token = Object();
+
+  static OhosAdapterPlatform _instance = MethodChannelOhosAdapter();
+
+  /// The default instance of [OhosAdapterPlatform] to use.
+  ///
+  /// Defaults to [MethodChannelOhosAdapter].
+  static OhosAdapterPlatform get instance => _instance;
+
+  /// Platform-specific implementations should set this with their own
+  /// platform-specific class that extends [OhosAdapterPlatform] when
+  /// they register themselves.
+  static set instance(OhosAdapterPlatform instance) {
+    PlatformInterface.verifyToken(instance, _token);
+    _instance = instance;
+  }
+
+  Future<String?> getPlatformVersion() {
+    throw UnimplementedError('platformVersion() has not been implemented.');
+  }
+
+  /// 写系统日志（hilog）
+
+  Future<void> log(String msg) {
+    throw UnimplementedError('log() has not been implemented.');
+  }
+
+  Future<Map<String, dynamic>?> getHuaweiProfile({bool force = false}) async {
+    return null;
+  }
+
+  /// 通用 startAbility（bundle + ability + uri + viewData）
+  Future<bool> startWant(String bundle, String ability, String uri) async {
+    throw UnimplementedError('startWant() has not been implemented.');
+  }
+
+  Future<bool> openInstalledApp(String bundleName,
+      {String abilityName = '', String moduleName = ''}) async {
+    throw UnimplementedError('openInstalledApp() has not been implemented.');
+  }
+
+  Future<void> openUrl(String url) {
+    throw UnimplementedError('openUrl() has not been implemented.');
+  }
+
+  Future<String?> selectFile(List<String> filter) async {
+    throw UnimplementedError('selectFile() has not been implemented.');
+  }
+
+  bool get isOhos => false;
+
+  Future<String?> tempDir() async {
+    return null;
+  }
+
+  Future<String?> appDir() async {
+    return null;
+  }
+  Future<String?> hdcCmd(String cmd) async {
+    return null;
+  }
+
+  Future<String?> signCmd(String cmd) async {
+    return null;
+  }
+
+  Future<String?> deviceType() async {
+    return null;
+  }
+  Future<bool?> hasJit() async {
+    return null;
+  }
+
+  Future<void> startServer() async {}
+
+  Future<void> setLocalKey(String key, String value) async {}
+  Future<String?> getLocalKey(String key) async {
+    return null;
+
+  }
+}

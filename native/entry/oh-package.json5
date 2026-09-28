@@ -1,0 +1,7 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "dependencies": {
+    "libhap_core.so": "file:./src/main/cpp/types/libhap_core"
+  }
+}

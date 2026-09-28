@@ -1,0 +1,17 @@
+[package]
+name = "hdc-protocol"
+description = "Protocol primitives shared by the Muka Rust HDC host and daemon"
+version = "0.1.0"
+edition = "2021"
+authors = ["Attect"]
+license = "MIT"
+repository = "https://github.com/Attect/muka_rust_hdc"
+
+[dependencies]
+thiserror = "1.0"
+tracing = "0.1"
+bytes = "1.7"
+aes-gcm = "0.10"
+rand = "0.8"
+
+[dev-dependencies]

@@ -1,0 +1,6 @@
+{
+  "name": "libhap_core.so",
+  "version": "1.0.0",
+  "description": "Bounded HAP metadata reader",
+  "main": "index.d.ts"
+}

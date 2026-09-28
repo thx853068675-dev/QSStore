@@ -1,0 +1,124 @@
+import { common } from '@kit.AbilityKit';
+import { preferences } from '@kit.ArkData';
+import { fileIo } from '@kit.CoreFileKit';
+import { hdcCommand } from 'libhap_core.so';
+import { NativeDeviceBridge } from './NativeJobRuntime';
+
+// All commands share one in-process Rust HDC host. Serialize install and
+// verification so a second UI action cannot overtake an active transfer.
+export class HdcDeviceBridge implements NativeDeviceBridge {
+  private static queue: Promise<void> = Promise.resolve();
+  private context: common.UIAbilityContext;
+
+  constructor(context: common.UIAbilityContext) {
+    this.context = context;
+  }
+
+  private async command(operation: number, parameter: string = ''): Promise<string> {
+    const previous = HdcDeviceBridge.queue;
+    let release: () => void = () => {};
+    HdcDeviceBridge.queue = new Promise<void>((resolve: () => void) => { release = resolve; });
+    await previous;
+    try {
+      return await hdcCommand(this.context.filesDir, operation, parameter);
+    } finally {
+      release();
+    }
+  }
+
+  private async savedPort(): Promise<number> {
+    const store = await preferences.getPreferences(this.context, 'wireless-debug');
+    return Number(await store.get('port', 0));
+  }
+
+  private async rememberPort(port: number): Promise<void> {
+    const store = await preferences.getPreferences(this.context, 'wireless-debug');
+    await store.put('port', port);
+    await store.flush();
+  }
+
+  private async liveUdid(): Promise<string> {
+    const output = await this.command(2);
+    if (output.includes('[Fail]')) return '';
+    const match = /\b[0-9a-fA-F]{40,128}\b/.exec(output);
+    return match ? match[0] : '';
+  }
+
+  async connected(): Promise<boolean> {
+    try {
+      if ((await this.liveUdid()).length > 0) return true;
+      const port = await this.savedPort();
+      if (port <= 0) return false;
+      return await this.connect(port, false);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async connect(port: number, persist: boolean = true): Promise<boolean> {
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      throw new Error('请输入无线调试页显示的端口号');
+    }
+    for (const host of ['127.0.0.1', 'localhost']) {
+      for (let attempt = 0; attempt < (host === '127.0.0.1' ? 2 : 1); attempt++) {
+        await this.command(1, host + ':' + port);
+        if ((await this.liveUdid()).length > 0) {
+          if (persist) await this.rememberPort(port);
+          return true;
+        }
+        // A first connection can finish while the system trust decision is
+        // still being committed. Retry that same port once without asking the
+        // user to press Connect again.
+        if (attempt === 0 && host === '127.0.0.1') {
+          await new Promise<void>((resolve: () => void) => setTimeout(resolve, 700));
+        }
+      }
+    }
+    return false;
+  }
+
+  async udid(): Promise<string> {
+    if (!await this.connected()) throw new Error('无线调试尚未连接');
+    const value = await this.liveUdid();
+    if (value.length === 0) throw new Error('无法读取设备 UDID');
+    return value;
+  }
+
+  async installedVersion(bundleName: string): Promise<number> {
+    if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) {
+      throw new Error('应用包名无效');
+    }
+    if (!await this.connected()) throw new Error('无线调试已断开');
+    const output = await this.command(3, bundleName);
+    const firstBrace = output.indexOf('{');
+    if (firstBrace < 0) return 0;
+    try {
+      const row = JSON.parse(output.substring(firstBrace)) as Record<string, Object>;
+      return Number(row['versionCode'] ?? 0);
+    } catch (_) {
+      throw new Error('无法确认设备上的已安装版本');
+    }
+  }
+
+  async install(signedHapPath: string): Promise<void> {
+    if (!fileIo.accessSync(signedHapPath) || !signedHapPath.startsWith(this.context.filesDir + '/')) {
+      throw new Error('签名包不在应用工作目录中');
+    }
+    if (!await this.connected()) throw new Error('无线调试已断开');
+    const output = await this.command(4, signedHapPath);
+    if (output.includes('[Fail]')) {
+      throw new Error(output.trim().length > 0 ? output.trim() : '设备未确认安装结果');
+    }
+    // The Rust HDC client can report only "AppMod finish". JobRunner queries
+    // the device's installed version after this command; text is never proof.
+  }
+
+  async openWirelessSettings(): Promise<void> {
+    await this.context.startAbility({
+      bundleName: 'com.huawei.hmos.settings',
+      abilityName: 'com.huawei.hmos.settings.MainAbility',
+      action: 'ohos.want.action.viewData',
+      uri: 'system_wireless_commissioning'
+    });
+  }
+}

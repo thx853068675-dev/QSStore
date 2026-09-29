@@ -80,6 +80,20 @@ class StoreFeaturesTest(unittest.TestCase):
         db.set_publisher(app_id, "uid-b", "Bob")
         self.assertEqual(db.get_app(app_id)["publisher_name"], "Alice")
 
+    def test_repo_ownership_state_drives_duplicate_rejection(self):
+        app_id = db.upsert_app("owner/repo", display_name="Actual App")
+        # 采集进来但没人上架的仓库仍按首次上架处理
+        self.assertEqual(app._repo_owner_state("owner/repo", "uid-a")["state"], "new")
+        db.set_publisher(app_id, "uid-a", "Alice")
+        self.assertEqual(app._repo_owner_state("owner/repo", "uid-a")["state"], "mine")
+        self.assertEqual(app._repo_owner_state("owner/repo", "uid-b")["state"], "other")
+        self.assertEqual(app._repo_owner_state("nobody/else", "uid-a")["state"], "new")
+        # 别人的仓库直接拒绝，不再走一次 GitHub 采集
+        app._reject_foreign_repo("owner/repo", "uid-a")
+        with self.assertRaises(app.ApiError) as denied:
+            app._reject_foreign_repo("owner/repo", "uid-b")
+        self.assertEqual(denied.exception.status, 403)
+
     def test_only_publisher_can_remove_public_listing(self):
         app_id = db.upsert_app("owner/repo", display_name="Actual App")
         db.set_publisher(app_id, "uid-a", "Alice")
@@ -108,6 +122,30 @@ class StoreFeaturesTest(unittest.TestCase):
         self.assertEqual(reviews["items"][0]["display_name"], "Alice")
         self.assertEqual({item["body"] for item in reviews["items"]}, {"Good", "Better"})
         self.assertEqual(len({item["id"] for item in reviews["items"]}), 2)
+
+    def test_review_pages_expose_total_and_do_not_repeat_items(self):
+        app_id = db.upsert_app("owner/repo")
+        for index in range(5):
+            db.put_review(app_id, f"uid-{index}", f"User {index}", 5, f"Body {index}")
+
+        first = app.h_reviews(str(app_id), {"page": ["1"], "page_size": ["2"]})
+        second = app.h_reviews(str(app_id), {"page": ["2"], "page_size": ["2"]})
+        last = app.h_reviews(str(app_id), {"page": ["3"], "page_size": ["2"]})
+
+        # total is the server-side count, not the length of the current page
+        self.assertEqual([first["total"], second["total"], last["total"]], [5, 5, 5])
+        self.assertEqual([first["page"], second["page"], last["page"]], [1, 2, 3])
+        self.assertEqual([len(first["items"]), len(second["items"]), len(last["items"])], [2, 2, 1])
+        seen = [item["id"] for page in (first, second, last) for item in page["items"]]
+        self.assertEqual(len(set(seen)), 5)
+
+    def test_review_page_size_is_capped_like_the_other_listings(self):
+        app_id = db.upsert_app("owner/repo")
+        for index in range(3):
+            db.put_review(app_id, f"uid-{index}", f"User {index}", 5, f"Body {index}")
+        page = app.h_reviews(str(app_id), {"page_size": ["500"]})
+        self.assertEqual(page["page_size"], 50)
+        self.assertEqual(page["total"], 3)
 
     def test_verified_avatar_appears_on_all_existing_account_reviews(self):
         app_id = db.upsert_app("owner/repo")

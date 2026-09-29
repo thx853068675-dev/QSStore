@@ -11,7 +11,7 @@
 //   · 服务端用自签证书提供 HTTPS（见 tools/deploy-tls.sh）
 //   · 客户端把该证书的 SHA-256 指纹**内置**进来做 pinning
 // 两者通过编译期参数注入；默认值对应当前已部署的 HTTPS 服务：
-//   --dart-define=HAPSTORE_API_BASE=https://store.example.com
+//   --dart-define=HAPSTORE_API_BASE=https://47.98.250.230
 //   --dart-define=HAPSTORE_API_PIN=<证书 DER 的 SHA-256 小写十六进制>
 
 import 'dart:convert';
@@ -44,7 +44,7 @@ class ApiClient {
   /// 生产地址。改 HTTPS 只需在构建时传 `HAPSTORE_API_BASE`，不必改代码。
   static const String defaultBaseUrl = String.fromEnvironment(
     'HAPSTORE_API_BASE',
-    defaultValue: 'https://store.example.com',
+    defaultValue: 'https://47.98.250.230',
   );
 
   /// 服务端证书 DER 的 SHA-256 指纹（小写十六进制）。

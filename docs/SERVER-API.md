@@ -1,6 +1,6 @@
 # HAP 商店 · 元数据服务（已上线）
 
-> 生产地址：**https://store.example.com/api/v1**（自签证书，客户端校验证书指纹）
+> 生产地址：**https://47.98.250.230/api/v1**（自签证书，客户端校验证书指纹）
 > 状态：**运行中** · systemd 托管 · 开机自启
 
 ---
@@ -9,16 +9,16 @@
 
 ```bash
 # 健康检查
-curl -k https://store.example.com/api/v1/healthz
+curl -k https://47.98.250.230/api/v1/healthz
 
 # 应用列表
-curl -k "https://store.example.com/api/v1/apps?page_size=10"
+curl -k "https://47.98.250.230/api/v1/apps?page_size=10"
 
 # 应用详情
-curl -k https://store.example.com/api/v1/apps/1
+curl -k https://47.98.250.230/api/v1/apps/1
 
 # 版本列表（含每个 HAP 的 sha256 与镜像链）
-curl -k "https://store.example.com/api/v1/apps/1/releases?page_size=3"
+curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 ```
 
 实测响应（生产数据）：
@@ -41,10 +41,10 @@ curl -k "https://store.example.com/api/v1/apps/1/releases?page_size=3"
 |---|---|---|
 | GET | `/api/v1/apps` | 列表。支持 `q` `category` `sort` `featured` `page` `page_size` |
 | GET | `/api/v1/apps/{id}` | 详情 |
-| GET | `/api/v1/apps/{id}/releases` | 版本列表（含 asset 与镜像链） |
+| GET | `/api/v1/apps/{id}/releases` | 版本列表（含 asset 与镜像链）。支持 `page` `page_size`（上限 50） |
 | GET | `/api/v1/apps/{id}/releases/{tag}` | 单版本 |
 | GET | `/api/v1/apps/{id}/icon` | 优先返回 HAP 图标，缺失时 302 跳转至 GitHub 头像 |
-| GET | `/api/v1/apps/{id}/reviews` | 评分与评论列表 |
+| GET | `/api/v1/apps/{id}/reviews` | 评分与评论列表。支持 `page` `page_size`（上限 50） |
 | POST | `/api/v1/apps/{id}/reviews` | 已验证华为开发者账号新增评分与评论（同账号可多条） |
 | GET | `/api/v1/signing-identity` | 已验证账号取回加密保存的签名身份；无记录时 `identity` 为 `null` |
 | POST | `/api/v1/signing-identity` | 首台设备上传与 AGC 调试证书配对的 P-256 私钥；同账号首次写入生效 |
@@ -69,6 +69,25 @@ curl -k "https://store.example.com/api/v1/apps/1/releases?page_size=3"
 {"ok": true,  "data": {...}, "server_time": "...", "api_version": 1}
 {"ok": false, "error": {"code": "...", "message": "...", "hint": "..."}}
 ```
+
+三个列表接口（`/apps`、`/apps/{id}/releases`、`/apps/{id}/reviews`）的 `data` 都是同一个分页信封：
+
+```json
+{"items": [...], "total": 128, "page": 2, "page_size": 30}
+```
+
+`total` 是符合条件的**服务端总条数**，不是当前页长度；客户端据此判断是否还有下一页，
+不要用 `items.length` 反推。`/reviews` 额外带 `summary`（`{count, average}`）。
+`page` 从 1 开始。`page_size` 上限：`/apps` 100，`/releases` 与 `/reviews` 50。
+
+`/apps` 与 `/apps/{id}` 还带 `latest_asset`：最新版本里**最大的**那个 HAP 附件
+（与客户端选中默认版本的规则一致），字段同 `/releases` 里的 asset
+（`name` `size` `sha256` `url` `mirror_urls` `bundle_name` `version_code` …），
+没有可用附件时为 `null`。
+
+客户端要用它判断「这个应用装没装、本机版本是不是落后」：`bundle_name` 与
+`version_code` 只在 releases 里才有，没有这个字段时客户端得为目录里**每个**
+应用单独请求一次 `/releases` —— 一屏 30 个应用就是 30 次往返。
 
 **安全**：全站安全响应头、按 IP 限流（默认 120/分，上架 3/小时）、管理接口仅本机、请求体上限 32KB、SQLite 全参数化。
 
@@ -160,7 +179,7 @@ sha256  6004cf8e931c6b39a135…      与 API 声明完全一致 ✅
 | 数据库 | `/var/lib/hapstore/hapstore.db`（SQLite WAL） |
 | 服务 | `systemctl {status,restart} hapstore-api` |
 | 监听 | `127.0.0.1:8787`（**仅本机**，由 nginx 反代） |
-| 对外 | `https://store.example.com/api/v1/*` |
+| 对外 | `https://47.98.250.230/api/v1/*` |
 | 日志 | `journalctl -u hapstore-api -f` |
 | 依赖 | Python 3.12、`cryptography`（签名身份加密） |
 
@@ -178,8 +197,8 @@ ReadWritePaths=/var/lib/hapstore
 
 ```bash
 cd "Tong Store"
-scp -i ~/.ssh/ts_hapstore_ed25519 -r server/hapstore server/run.py root@store.example.com:/opt/hapstore/
-ssh -i ~/.ssh/ts_hapstore_ed25519 root@store.example.com 'systemctl restart hapstore-api'
+scp -i ~/.ssh/ts_hapstore_ed25519 -r server/hapstore server/run.py root@47.98.250.230:/opt/hapstore/
+ssh -i ~/.ssh/ts_hapstore_ed25519 root@47.98.250.230 'systemctl restart hapstore-api'
 ```
 
 ---

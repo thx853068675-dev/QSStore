@@ -1,6 +1,6 @@
 # 服务器重置与加固报告
 
-> 目标机：`store.example.com`（阿里云 ECS · Ubuntu 24.04.4 LTS · 1 vCPU / 1.6 GB RAM / 40 GB）
+> 目标机：`47.98.250.230`（阿里云 ECS · Ubuntu 24.04.4 LTS · 1 vCPU / 1.6 GB RAM / 40 GB）
 > 主机名：`iZbp1gujoifp6zdmkh6wd9Z` · 时区 Asia/Shanghai（已 NTP 同步）
 > 执行时间：2026-09-26 · 执行方式：全程 SSH，可回退
 
@@ -95,7 +95,7 @@ nft 表 inet ts_guard
 | 步骤 | 结果 |
 |---|---|
 | 将本机 IP `139.226.99.179` 加入封禁集 | ✅ 成功写入，`timeout 30s` |
-| 从本机 SSH 连接 | ✅ `Connection closed by store.example.com port 22`（5 秒内被拒） |
+| 从本机 SSH 连接 | ✅ `Connection closed by 47.98.250.230 port 22`（5 秒内被拒） |
 | 从本机访问 80 端口 | ✅ `http_code=000`（同时被阻断） |
 | 查看 drop 规则计数 | ✅ `packets 50 bytes 4704 drop`（确实在丢包） |
 | 等待 30 秒 TTL 到期 | ✅ 元素自动消失，无需人工干预 |
@@ -133,7 +133,7 @@ Docker 会直接操作 iptables、绕过 UFW 的 INPUT 链。已在 `/etc/ufw/af
 
 **验证结果**：
 - 密钥登录 → ✅ `KEY_LOGIN_OK`
-- 密码登录 → ✅ `root@store.example.com: Permission denied (publickey).`
+- 密码登录 → ✅ `root@47.98.250.230: Permission denied (publickey).`
 - 强制密码认证 → ✅ `Permission denied (publickey).`
 
 ### 3.6 内核与网络加固
@@ -261,7 +261,7 @@ systemctl restart privoxy
 ### 6.2 🔑 登录方式已变更（**请立即备份私钥**）
 
 ```bash
-ssh -i ~/.ssh/ts_hapstore_ed25519 root@store.example.com
+ssh -i ~/.ssh/ts_hapstore_ed25519 root@47.98.250.230
 ```
 
 - ✅ 私钥位置：本机 `~/.ssh/ts_hapstore_ed25519`
@@ -271,7 +271,7 @@ ssh -i ~/.ssh/ts_hapstore_ed25519 root@store.example.com
 
 ```
 Host hapstore
-    HostName store.example.com
+    HostName 47.98.250.230
     User root
     IdentityFile ~/.ssh/ts_hapstore_ed25519
     ServerAliveInterval 60

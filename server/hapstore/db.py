@@ -260,7 +260,25 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True) -> dict[str, Any]
         ).fetchone()
         app["releases_count"] = n
         app["latest"] = dict(latest) if latest else None
+        app["latest_asset"] = latest_asset(c, row["id"])
     return app
+
+
+def latest_asset(c: sqlite3.Connection, app_id: int) -> dict[str, Any] | None:
+    """最新版本里最大的 HAP 附件。
+
+    客户端需要 bundleName / versionCode / sha256 才能判断「装没装」并直接安装。
+    没有这个字段时它得为目录里每个应用单独请求一次 releases —— 每请求一次
+    服务端往返约 1 秒，一屏 30 个应用就是半分钟。
+    取最大的附件与客户端选择默认版本的规则一致。
+    """
+    row = c.execute(
+        """SELECT a.* FROM asset a JOIN release r ON r.id = a.release_id
+           WHERE r.app_id=? AND a.bundle_name <> ''
+           ORDER BY r.published_at DESC, a.size DESC LIMIT 1""",
+        (app_id,),
+    ).fetchone()
+    return _row_to_asset(row) if row else None
 
 
 def list_apps(
@@ -464,7 +482,9 @@ def review_summary(app_id: int) -> dict[str, Any]:
 def list_reviews(app_id: int, page: int = 1, page_size: int = 20) -> dict[str, Any]:
     page = max(1, page)
     page_size = max(1, min(50, page_size))
-    rows = connect().execute(
+    c = connect()
+    total = c.execute("SELECT COUNT(*) AS n FROM review WHERE app_id=?", (app_id,)).fetchone()["n"]
+    rows = c.execute(
         """SELECT review.id, review.display_name, review.stars, review.body,
                   review.updated_at, COALESCE(account_avatar.avatar_url, '') AS avatar_url
            FROM review LEFT JOIN account_avatar
@@ -474,7 +494,7 @@ def list_reviews(app_id: int, page: int = 1, page_size: int = 20) -> dict[str, A
         (app_id, page_size, (page - 1) * page_size),
     ).fetchall()
     return {"items": [dict(row) for row in rows], "summary": review_summary(app_id),
-            "page": page, "page_size": page_size}
+            "total": total, "page": page, "page_size": page_size}
 
 
 def put_review(app_id: int, account_id: str, display_name: str, stars: int, body: str) -> None:

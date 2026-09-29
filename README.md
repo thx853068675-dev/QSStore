@@ -4,7 +4,9 @@
 
 ## 制品
 
-**[轻启·安装器 0.4.4](https://github.com/thx853068675-dev/QSStore/releases/latest)** — `com.tonghongxiang.hapstore`，versionCode 2026092901。ArkTS/ArkUI 原生实现，不含 Flutter 运行时。
+**[轻启·安装器 0.4.5](https://github.com/thx853068675-dev/QSStore/releases/latest)** — `com.tonghongxiang.hapstore`，versionCode 2026092902，SHA-256 `2e48aeed7478c55cbb0e69f73a54399de14e1d79ce6fad0ec2125970986868c0`。ArkTS/ArkUI 原生实现，不含 Flutter 运行时。
+
+Release 里的包已指向正式元数据服务，装上即可用。
 
 > **装不上是正常的。** Release 里的包用开发者本人的 AGC 调试 Profile 签名，而调试 Profile **绑定设备**，直接安装会因签名 / 设备授权不匹配而失败。请 clone 本仓库，用 DevEco Studio 打开 `native/`，在你自己的华为开发者账号下配置调试证书与 Profile（把你的设备 UDID 加进去）后自行构建签名。
 
@@ -17,6 +19,7 @@
 | 路径 | 内容 |
 |---|---|
 | `native/` | **当前实现**：ArkTS/ArkUI 原生版。签名核心与 HDC TCP 主机以 Rust 源码静态链接进 `libhap_core.so` |
+| `core/logic/` | HAP 校验、签名、设备授权逻辑 |
 | `app/` | 早期 Flutter 实现，保留作参考 |
 | `server/` | Python 元数据、上架、评论与签名身份服务 |
 | `core/logic/` | HAP 校验、签名、设备授权逻辑 |
@@ -39,3 +42,19 @@ cd app && flutter test
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。
+
+## 0.4.5 相比 0.4.4
+
+- **上架**：重复提交同一个仓库只会更新原条目；分类改为滑动选择框；上架入口移到
+  「管理 → 我上架的应用」下方，发现页右上角改为搜索（走服务端 `q`，不是只筛已加载的一页）。
+- **安装**：目录卡片与详情页按状态给出「安装 / 更新 / 打开」，已装的应用不会再被重复安装；
+  安装中按钮自身显示进度，安装过程分阶段显示「正在下载 / 正在签名 / 正在安装」。
+- **已装判定**改用系统 `bundleManager`，不再依赖无线调试；本地导入的 HAP 会从包内读应用图标；
+  管理页可「同步卸载」把设备上已卸载的记录清掉（连不上设备时不会误删）。
+- **性能**：目录列表直接带 `latest_asset`，一次请求即可判断整屏「装没装 / 要不要更新」，
+  不再为每个应用单独请求一次 releases；更新检查改为纯本地比对。
+- **签名**：全新账号可以完成首次签名（本机生成 P-256 私钥 + CSR，复用优先、槽位有守卫）；
+  删除证书前会先确认还有可配对的证书。
+- **其它**：应用名与描述去掉「预览」字样；评论日期带年份；详情页头部底色取自应用图标主色调。
+
+逐项提交记录与待实机验收清单见仓库提交历史。

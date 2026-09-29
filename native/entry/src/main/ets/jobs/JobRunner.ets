@@ -1,4 +1,5 @@
 import { FailureKind, InstallJob, InstallStage, RecoveryEvidence } from './InstallJob';
+import { JobScheduler } from './JobScheduler';
 import { JobStore } from './JobStore';
 import { recoveryStage } from './RecoveryPlanner';
 
@@ -51,6 +52,11 @@ export class JobRunner {
   }
 
   async run(id: string): Promise<InstallJob> {
+    // 一个任务同一时刻只能有一条流水线在跑：页面自己的忙标记挡不住另一个页面。
+    return JobScheduler.runExclusive(id, () => this.runLocked(id));
+  }
+
+  private async runLocked(id: string): Promise<InstallJob> {
     const job = await this.store.get(id);
     if (!job) throw new Error('安装任务不存在');
     try {

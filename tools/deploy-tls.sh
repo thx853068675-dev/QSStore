@@ -15,7 +15,7 @@
 #   1) 会打印一行  PIN=<sha256>
 #   2) 用该值重新构建 App：
 #        ./tools/build-app.sh release \
-#          --base https://store.example.com \
+#          --base https://47.98.250.230 \
 #          --pin  <sha256>
 #   （或直接给 build-app.sh 传 HAPSTORE_API_BASE / HAPSTORE_API_PIN 环境变量）
 #
@@ -23,7 +23,7 @@
 
 set -uo pipefail
 
-IP="${TS_IP:-store.example.com}"
+IP="${TS_IP:-47.98.250.230}"
 SSL_DIR="/etc/nginx/ssl"
 CERT="$SSL_DIR/hapstore.crt"
 KEY="$SSL_DIR/hapstore.key"

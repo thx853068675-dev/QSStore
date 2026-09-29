@@ -40,9 +40,9 @@ double _contrast(Color a, Color b) {
 
 StoreApp _app() => StoreApp(
       id: 1,
-      repo: 'example-org/example-store',
+      repo: 'thx853068675-dev/starstore-harmonyos',
       owner: 'thx853068675-dev',
-      name: 'example-store',
+      name: 'starstore-harmonyos',
       displayName: '轻启·安装器',
       summary: '从 GitHub 发现 HAP 应用',
       description: '',

@@ -10,6 +10,31 @@ import { SubmitDraft, AppReview } from './StoreActions';
 class PrepareBody { repo_url: string = ''; }
 class ConfirmBody { draft_token: string = ''; asset_name: string = ''; category: string = ''; }
 class ReviewBody { stars: number = 0; body: string = ''; }
+class IdentityBody { cert_id: string = ''; private_key_pem: string = ''; }
+
+/// Server page size ceilings: /apps caps page_size at 100, /releases and
+/// /reviews at 50. Every listing returns total next to items.
+export class ListPage<T> {
+  items: T[] = [];
+  /** Total number of records on the server, not just this page. */
+  total: number = 0;
+  page: number = 1;
+  pageSize: number = 20;
+
+  get totalPages(): number {
+    if (this.total <= 0 || this.pageSize <= 0) return 1;
+    return Math.ceil(this.total / this.pageSize);
+  }
+
+  get hasMore(): boolean {
+    return this.page < this.totalPages;
+  }
+}
+
+function numberField(row: Record<string, Object>, key: string, fallback: number): number {
+  const value = Number(row[key] ?? fallback);
+  return Number.isFinite(value) ? value : fallback;
+}
 
 export class BackedUpIdentity {
   certId: string = '';
@@ -20,7 +45,7 @@ export class BackedUpIdentity {
 /// certificate and pinning its public key preserves the Flutter client's TLS
 /// boundary; network errors never fall back to plain HTTP.
 export class StoreClient {
-  private static readonly BASE_URL = 'https://store.example.com';
+  private static readonly BASE_URL = 'https://47.98.250.230';
   private static readonly PUBLIC_KEY_SHA256 = '1z7Q/bXjcnfeell5HUKRCLRP1E8u1rJHMJYRN3PI3Lo=';
   private caData: string;
 
@@ -77,10 +102,22 @@ export class StoreClient {
     return this.requestData(path, http.RequestMethod.GET, account);
   }
 
-  async listApps(): Promise<CatalogApp[]> {
-    const data = await this.getData('/api/v1/apps?sort=updated&page=1&page_size=30');
+  /// ``page`` is 1-based. ``sort`` is one of updated/stars/name/new.
+  /// ``query`` 走服务端搜索：只过滤本地已加载的那一页会漏掉没加载的应用。
+  async listApps(page: number = 1, pageSize: number = 30,
+    sort: string = 'updated', query: string = ''): Promise<ListPage<CatalogApp>> {
+    const trimmed = query.trim();
+    const data = await this.getData('/api/v1/apps?sort=' + encodeURIComponent(sort) +
+      '&page=' + Math.max(1, Math.floor(page)) +
+      '&page_size=' + Math.min(100, Math.max(1, Math.floor(pageSize))) +
+      (trimmed.length > 0 ? '&q=' + encodeURIComponent(trimmed) : ''));
+    const result = new ListPage<CatalogApp>();
     const raw = data['items'] as Array<Record<string, Object>> | undefined;
-    return (raw ?? []).map((row: Record<string, Object>) => CatalogApp.fromJson(row));
+    result.items = (raw ?? []).map((row: Record<string, Object>) => CatalogApp.fromJson(row));
+    result.total = numberField(data, 'total', result.items.length);
+    result.page = numberField(data, 'page', page);
+    result.pageSize = numberField(data, 'page_size', pageSize);
+    return result;
   }
 
   async appDetail(id: number): Promise<CatalogApp> {
@@ -118,11 +155,19 @@ export class StoreClient {
     }
   }
 
-  async listReleases(appId: number): Promise<ReleaseInfo[]> {
-    const data = await this.getData('/api/v1/apps/' + appId +
-      '/releases?page=1&page_size=20');
+  /// ``page`` is 1-based; the server caps page_size at 50.
+  async listReleases(appId: number, page: number = 1,
+    pageSize: number = 20): Promise<ListPage<ReleaseInfo>> {
+    const data = await this.getData('/api/v1/apps/' + appId + '/releases?page=' +
+      Math.max(1, Math.floor(page)) + '&page_size=' +
+      Math.min(50, Math.max(1, Math.floor(pageSize))));
+    const result = new ListPage<ReleaseInfo>();
     const raw = data['items'] as Array<Record<string, Object>> | undefined;
-    return (raw ?? []).map((row: Record<string, Object>) => ReleaseInfo.fromJson(row));
+    result.items = (raw ?? []).map((row: Record<string, Object>) => ReleaseInfo.fromJson(row));
+    result.total = numberField(data, 'total', result.items.length);
+    result.page = numberField(data, 'page', page);
+    result.pageSize = numberField(data, 'page_size', pageSize);
+    return result;
   }
 
   async prepareSubmit(repoUrl: string, account: DeveloperAccount): Promise<SubmitDraft> {
@@ -154,21 +199,49 @@ export class StoreClient {
     await this.requestData('/api/v1/me/apps/' + id, http.RequestMethod.DELETE, account);
   }
 
-  async listReviews(appId: number): Promise<AppReview[]> {
-    const data = await this.getData('/api/v1/apps/' + appId + '/reviews');
+  /// Reviews always sort newest first, so page 1 is also what a new review lands on.
+  async listReviews(appId: number, page: number = 1,
+    pageSize: number = 20): Promise<ListPage<AppReview>> {
+    const data = await this.getData('/api/v1/apps/' + appId + '/reviews?page=' +
+      Math.max(1, Math.floor(page)) + '&page_size=' +
+      Math.min(50, Math.max(1, Math.floor(pageSize))));
+    const result = new ListPage<AppReview>();
     const rows = data['items'] as Array<Record<string, Object>> | undefined;
-    return (rows ?? []).map((row: Record<string, Object>) => AppReview.fromJson(row));
+    result.items = (rows ?? []).map((row: Record<string, Object>) => AppReview.fromJson(row));
+    result.total = numberField(data, 'total', result.items.length);
+    result.page = numberField(data, 'page', page);
+    result.pageSize = numberField(data, 'page_size', pageSize);
+    return result;
   }
 
   async postReview(appId: number, stars: number, body: string,
-    account: DeveloperAccount): Promise<AppReview[]> {
+    account: DeveloperAccount): Promise<ListPage<AppReview>> {
     const payload = new ReviewBody();
     payload.stars = stars;
     payload.body = body;
     const data = await this.requestData('/api/v1/apps/' + appId + '/reviews', http.RequestMethod.POST,
       account, payload);
+    const result = new ListPage<AppReview>();
     const rows = data['items'] as Array<Record<string, Object>> | undefined;
-    return (rows ?? []).map((row: Record<string, Object>) => AppReview.fromJson(row));
+    result.items = (rows ?? []).map((row: Record<string, Object>) => AppReview.fromJson(row));
+    result.total = numberField(data, 'total', result.items.length);
+    result.page = numberField(data, 'page', 1);
+    // The POST route returns the endpoint's default page, not the length of
+    // the page it just produced.
+    result.pageSize = numberField(data, 'page_size', 20);
+    return result;
+  }
+
+  /**
+   * 备份本机签名身份到商店服务，换设备时可直接取回。
+   * 服务端同一账号首次写入生效，之后保持原值，所以重复调用是安全的。
+   */
+  async publishSigningIdentity(certId: string, privateKeyPem: string,
+    account: DeveloperAccount): Promise<void> {
+    const body = new IdentityBody();
+    body.cert_id = certId;
+    body.private_key_pem = privateKeyPem;
+    await this.requestData('/api/v1/signing-identity', http.RequestMethod.POST, account, body);
   }
 
   async signingIdentity(account: DeveloperAccount): Promise<BackedUpIdentity | undefined> {

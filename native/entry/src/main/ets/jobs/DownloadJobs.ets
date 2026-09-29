@@ -5,16 +5,16 @@ import { JobStore } from './JobStore';
 import { inspectPackage, PackageInspectError } from './PackageInspector';
 
 export class DownloadJobs {
-  private static active: Set<string> = new Set<string>();
-
-  static async run(context: common.UIAbilityContext, store: JobStore, job: InstallJob,
+  /**
+   * 调用方必须已经通过 JobScheduler 取得该任务 ID 的独占权；本方法自己不加锁。
+   * 直接调用它会绕过任务互斥，请改用 JobScheduler.runDownload。
+   */
+  static async runLocked(context: common.UIAbilityContext, store: JobStore, job: InstallJob,
     onProgress?: (received: number, total: number) => void): Promise<void> {
-    if (DownloadJobs.active.has(job.id)) throw new Error('该附件正在下载');
-    DownloadJobs.active.add(job.id);
+    job.stage = InstallStage.DOWNLOADING;
+    job.lastError = '';
+    await store.save(job);
     try {
-      job.stage = InstallStage.DOWNLOADING;
-      job.lastError = '';
-      await store.save(job);
       await new AssetDownload(context, store).downloadAndVerify(job, onProgress);
       job.stage = InstallStage.VERIFIED;
       await store.save(job);
@@ -38,8 +38,6 @@ export class DownloadJobs {
         await store.recordFailure(job, kind, message);
       }
       throw new Error(message);
-    } finally {
-      DownloadJobs.active.delete(job.id);
     }
   }
 }

@@ -37,7 +37,7 @@
 | 5 | 用户上架只需填一个 GitHub 地址 | 上架成本 = 一个 URL，零表单、零审核材料 |
 | 6 | 从最新 release 取所有 HAP 版本列表供用户选择 | 解析 release 附件，筛出 `.hap`，含历史版本 |
 | 7 | 应用本地不存服务器，只存关键信息 | 服务器只做元数据/索引，**不做文件中转站** |
-| 8 | 服务器 store.example.com 重置 + 加固 | 见《附录 A 服务器加固报告》 |
+| 8 | 服务器 47.98.250.230 重置 + 加固 | 见《附录 A 服务器加固报告》 |
 
 ### 1.2 边界确认（这些我**不做**，请确认）
 
@@ -507,7 +507,7 @@ POST /api/v1/apps/:id/download-event { asset, device }  # 匿名计数
 
 | 项 | 方案 |
 |---|---|
-| API 地址 | `http://store.example.com/api/v1/*` |
+| API 地址 | `http://47.98.250.230/api/v1/*` |
 | 协议 | **HTTP 明文**（80 端口已放行并受 UFW 管控） |
 | 证书 | 不申请，不做 TLS |
 | 域名 | 不申请，不需要 ICP 备案 |
@@ -707,7 +707,7 @@ audit_log(id, actor, action, target, detail_json, created_at)
 ### 11.2 需要你拍板的问题
 
 **已确认（本轮）**：
-- ✅ **Q1 域名** → **不用域名，直接用 IP** `http://store.example.com`（见 §7.6）
+- ✅ **Q1 域名** → **不用域名，直接用 IP** `http://47.98.250.230`（见 §7.6）
 - ✅ **Q4 AGC 凭证** → **不需要**。底座沿用现有「小白·轻启」签名侧载模块，证书/Profile 获取机制保持现状，不做替换
 
 **仍需你确认**：
@@ -728,7 +728,7 @@ audit_log(id, actor, action, target, detail_json, created_at)
 
 > 📄 **完整报告见 [SERVER-HARDENING.md](SERVER-HARDENING.md)**。以下为与项目相关的结论摘要。
 
-**目标机**：`store.example.com`（阿里云 ECS，Ubuntu 24.04.4 LTS，1 vCPU / 1.6 GB RAM / 40 GB，主机名 `iZbp1gujoifp6zdmkh6wd9Z`）
+**目标机**：`47.98.250.230`（阿里云 ECS，Ubuntu 24.04.4 LTS，1 vCPU / 1.6 GB RAM / 40 GB，主机名 `iZbp1gujoifp6zdmkh6wd9Z`）
 
 ### A.0 加固成果一览（已实测复验）
 
@@ -795,7 +795,7 @@ audit_log(id, actor, action, target, detail_json, created_at)
 ### A.4 登录方式变更（**请务必注意**）
 
 加固后：
-- ✅ 必须使用密钥：`ssh -i ~/.ssh/ts_hapstore_ed25519 root@store.example.com`
+- ✅ 必须使用密钥：`ssh -i ~/.ssh/ts_hapstore_ed25519 root@47.98.250.230`
 - ❌ 密码 `thx@765256` 已**不能用于 SSH**（实测 `Permission denied (publickey)`）
 - ⚠️ 私钥在本机 `~/.ssh/ts_hapstore_ed25519`，**请立即备份到密码管理器或离线介质**；丢失只能走阿里云控制台 VNC 救援
 - 回退方式见 [SERVER-HARDENING.md](SERVER-HARDENING.md) §6.3

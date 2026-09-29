@@ -22,7 +22,7 @@
 #   ./tools/build-app.sh release    # release 构建
 #
 # 可选（启用 HTTPS 元数据 + 证书 pinning，见 tools/deploy-tls.sh）：
-#   ./tools/build-app.sh release --base https://store.example.com --pin <sha256>
+#   ./tools/build-app.sh release --base https://47.98.250.230 --pin <sha256>
 #   也可用环境变量 HAPSTORE_API_BASE / HAPSTORE_API_PIN
 
 set -euo pipefail
@@ -30,7 +30,7 @@ set -euo pipefail
 MODE="${1:-debug}"
 shift || true
 
-BASE="${HAPSTORE_API_BASE:-https://store.example.com}"
+BASE="${HAPSTORE_API_BASE:-https://47.98.250.230}"
 PIN="${HAPSTORE_API_PIN:-9a75775bef85e2ddca908529a708b426a0aa174525f9c133fd55ea615adb9b4f}"
 while [ $# -gt 0 ]; do
   case "$1" in

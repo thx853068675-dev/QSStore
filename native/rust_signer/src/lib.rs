@@ -377,6 +377,17 @@ pub extern "C" fn qingqi_sign_hap(
 
 /// Run only the HDC operations the installer needs. The Rust host server and
 /// signer share this static library; HDC keys stay in the app's sandbox.
+/// Bundle names arrive from the client and end up in an HDC argv, so they are
+/// restricted to the shape HarmonyOS itself allows.
+fn validate_bundle_name(name: &str) -> Result<(), String> {
+    if !name.contains('.') || name.len() > 255 ||
+        !name.bytes().all(|byte| byte.is_ascii_alphanumeric() ||
+            byte == b'.' || byte == b'_') {
+        return Err("invalid bundle name".into());
+    }
+    Ok(())
+}
+
 #[no_mangle]
 pub extern "C" fn qingqi_hdc_command(
     key_root: *const c_char,
@@ -407,11 +418,7 @@ pub extern "C" fn qingqi_hdc_command(
             }
             2 => vec!["shell".into(), "bm".into(), "get".into(), "--udid".into()],
             3 => {
-                if !argument.contains('.') || argument.len() > 255 ||
-                    !argument.bytes().all(|byte| byte.is_ascii_alphanumeric() ||
-                        byte == b'.' || byte == b'_') {
-                    return Err("invalid bundle name".into());
-                }
+                validate_bundle_name(&argument)?;
                 vec!["shell".into(), "bm".into(), "dump".into(), "-n".into(), argument]
             }
             4 => {
@@ -420,6 +427,11 @@ pub extern "C" fn qingqi_hdc_command(
                     return Err("HAP path is outside the application sandbox".into());
                 }
                 vec!["install".into(), "-r".into(), argument]
+            }
+            // 只查是否安装，不做任何改动；用于确认记录是否已经失效。
+            5 => {
+                validate_bundle_name(&argument)?;
+                vec!["shell".into(), "bm".into(), "dump".into(), "-n".into(), argument]
             }
             _ => return Err("unsupported HDC operation".into()),
         };

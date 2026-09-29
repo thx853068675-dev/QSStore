@@ -113,6 +113,24 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     // the device's installed version after this command; text is never proof.
   }
 
+  /**
+   * 设备上是否装着这个包。
+   *
+   * 记录里写着「已安装」不代表设备上还在 —— 用户可能在系统设置里卸掉了。
+   * 这个查询只读，不改设备状态；连接断开时抛错，调用方不能把它当成「没装」，
+   * 否则断线一次就会把全部记录误删。
+   */
+  async isInstalled(bundleName: string): Promise<boolean> {
+    if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) {
+      throw new Error('应用包名无效');
+    }
+    if (!await this.connected()) throw new Error('无线调试已断开');
+    const output = await this.command(5, bundleName);
+    if (output.includes('[Fail]')) throw new Error('无法读取设备上的安装状态');
+    // bm dump 只在包存在时才输出 versionCode
+    return /"versionCode"\s*:\s*\d+/.test(output);
+  }
+
   async openWirelessSettings(): Promise<void> {
     await this.context.startAbility({
       bundleName: 'com.huawei.hmos.settings',

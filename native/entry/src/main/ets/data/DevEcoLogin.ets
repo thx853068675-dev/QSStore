@@ -11,13 +11,18 @@ import { DeveloperAccount } from './DeveloperAccount';
  */
 const TRANSIENT = 'TRANSIENT|';
 
+/** 已确认登录态失效（4xx）。与 TRANSIENT 相对，调用方必须重新登录。 */
+const AUTH_FAILED = 'AUTHFAILED|';
+
 export function isTransientAuthError(error: Object): boolean {
-  return String(error).includes(TRANSIENT);
+  const text = String(error);
+  // 已判定失效的错误即使被别的层包过，也不算临时故障
+  return text.includes(TRANSIENT) && !text.includes(AUTH_FAILED);
 }
 
 /** 去掉内部标记后、可直接展示给用户的文案。 */
 export function authErrorText(error: Object): string {
-  return String(error).split(TRANSIENT).join('');
+  return String(error).split(TRANSIENT).join('').split(AUTH_FAILED).join('');
 }
 
 const AUTH_API = 'https://cn.devecostudio.huawei.com/authrouter/auth/api';
@@ -52,7 +57,7 @@ export class DevEcoLogin {
       if (response.responseCode !== 200 || typeof response.result !== 'string') {
         const code = response.responseCode;
         // 5xx / 0 是服务端或网络问题，4xx 才可能是登录态本身有问题
-        const head = (code === 0 || code >= 500) ? TRANSIENT : '';
+        const head = (code === 0 || code >= 500) ? TRANSIENT : AUTH_FAILED;
         throw new Error(head + '华为账号服务暂不可用（HTTP ' + code + '）');
       }
       try {
@@ -74,8 +79,15 @@ export class DevEcoLogin {
         throw new Error('华为账号服务返回的数据格式无效');
       }
     } catch (error) {
-      // 连接超时 / 断网：属于临时故障，不能据此判定登录态失效
-      throw new Error(TRANSIENT + String(error));
+      const text = String(error);
+      // 已经分过类的原样上抛。之前这里无条件加 TRANSIENT，会把内层刚判定
+      // 的 401/403 重新盖成「临时故障」，于是拿着失效登录态继续跑，后续
+      // 上架、评论、授权全部失败。
+      if (text.includes(TRANSIENT) || text.includes(AUTH_FAILED)) {
+        throw new Error(text);
+      }
+      // 其余是连接超时 / 断网：属于临时故障，不能据此判定登录态失效
+      throw new Error(TRANSIENT + text);
     } finally {
       request.destroy();
     }

@@ -26,15 +26,19 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     original = APP.read_text()
-    if original.count(PREVIEW_BUNDLE) != 1 or 'native-preview' not in original:
+    if original.count(PREVIEW_BUNDLE) != 1:
         raise ValueError('Expected the checked-in preview app identity')
+    # 版本名不再带预览后缀，正式包与预览包的差别只剩包名
     formal = original.replace(PREVIEW_BUNDLE, FORMAL_BUNDLE)
-    # 正式包版本名去掉预览后缀：0.4.4-native-preview -> 0.4.4
-    formal = formal.replace('-native-preview', '')
     environment = dict(os.environ)
     environment.setdefault('DEVECO_SDK_HOME', '/Applications/DevEco-Studio.app/Contents/sdk')
     environment.setdefault('JAVA_HOME',
                            '/Applications/DevEco-Studio.app/Contents/jbr/Contents/Home')
+    # hvigorw 需要 node。从 DevEco 的 tools 目录补进 PATH，否则在没配过环境的
+    # 终端里会以 "Command ... returned non-zero exit status 1" 失败，看不出原因。
+    deveco_node = '/Applications/DevEco-Studio.app/Contents/tools/node/bin'
+    if os.path.isdir(deveco_node):
+        environment['PATH'] = deveco_node + os.pathsep + environment.get('PATH', '')
     try:
         APP.write_text(formal)
         subprocess.run([str(HVIGOR), 'assembleHap', '-p', 'product=default',

@@ -20,6 +20,8 @@ constexpr uint32_t kCentral = 0x02014b50;
 constexpr uint32_t kLocal = 0x04034b50;
 constexpr size_t kMaxManifestSize = 4 * 1024 * 1024;
 constexpr size_t kMaxCompressedSize = 4 * 1024 * 1024;
+// App icons are small; anything larger is not an icon and is refused.
+constexpr size_t kMaxIconSize = 1024 * 1024;
 
 uint16_t U16(const uint8_t* p) {
   return static_cast<uint16_t>(p[0]) | static_cast<uint16_t>(p[1]) << 8;
@@ -43,20 +45,22 @@ std::vector<uint8_t> Read(std::ifstream& in, uint64_t offset, size_t size,
   return bytes;
 }
 
-std::string Decode(const std::vector<uint8_t>& compressed, uint32_t expanded_size,
-                   uint16_t method) {
-  if (expanded_size > kMaxManifestSize || compressed.size() > kMaxCompressedSize) {
-    throw std::runtime_error("HAP manifest exceeds size limit");
+// Expands one ZIP entry to raw bytes. Icons are binary, so the inflater cannot
+// assume text; callers that want JSON convert afterwards.
+std::vector<uint8_t> Expand(const std::vector<uint8_t>& compressed, uint32_t expanded_size,
+                            uint16_t method, size_t limit) {
+  if (expanded_size > limit || compressed.size() > kMaxCompressedSize) {
+    throw std::runtime_error("HAP entry exceeds size limit");
   }
   if (method == 0) {
     if (compressed.size() != expanded_size) {
-      throw std::runtime_error("Stored HAP manifest has invalid length");
+      throw std::runtime_error("Stored HAP entry has invalid length");
     }
-    return std::string(compressed.begin(), compressed.end());
+    return compressed;
   }
-  if (method != 8) throw std::runtime_error("Unsupported HAP manifest compression");
+  if (method != 8) throw std::runtime_error("Unsupported HAP compression");
 
-  std::string out(expanded_size, '\0');
+  std::vector<uint8_t> out(expanded_size);
   z_stream stream{};
   stream.next_in = const_cast<Bytef*>(compressed.data());
   stream.avail_in = static_cast<uInt>(compressed.size());
@@ -69,20 +73,51 @@ std::string Decode(const std::vector<uint8_t>& compressed, uint32_t expanded_siz
   inflateEnd(&stream);
   if (result != Z_STREAM_END || stream.total_out != expanded_size ||
       stream.total_in != compressed.size()) {
-    throw std::runtime_error("HAP manifest decompression failed");
+    throw std::runtime_error("HAP decompression failed");
   }
   return out;
 }
 
 }  // namespace
 
-std::string ReadMetadata(const std::string& hap_path, const std::string& entry_name,
-                         bool required) {
-  std::ifstream in(hap_path, std::ios::binary | std::ios::ate);
-  if (!in) throw std::runtime_error("Cannot open HAP");
-  const auto end = in.tellg();
-  if (end < 22) throw std::runtime_error("HAP ZIP footer is missing");
-  const uint64_t file_size = static_cast<uint64_t>(end);
+namespace {
+
+// Splits a module.json icon reference into a file name and its stem.
+// `$media:app_icon`, `app_icon.png` and `resources/base/media/app_icon.png`
+// must all reduce to the same lookup key. Steps are explicit: substr(npos) has
+// surprising semantics, so it is never used inside a ternary here.
+void IconNameParts(const std::string& icon_name, std::string& base, std::string& stem) {
+  std::string value = icon_name;
+  const std::string prefix = "$media:";
+  if (value.compare(0, prefix.size(), prefix) == 0) {
+    value = value.substr(prefix.size());
+  }
+  const size_t slash = value.find_last_of('/');
+  if (slash != std::string::npos) value = value.substr(slash + 1);
+  base = value;
+  stem = value;
+  const size_t dot = stem.find_last_of('.');
+  if (dot != std::string::npos) stem = stem.substr(0, dot);
+  // Density-qualified names (`app_icon@3x`) share the unqualified stem.
+  const size_t density = stem.find_last_of('@');
+  if (density != std::string::npos) stem = stem.substr(0, density);
+}
+
+struct CentralEntry {
+  std::string name;
+  uint16_t flags = 0;
+  uint16_t method = 0;
+  uint32_t crc = 0;
+  uint32_t packed = 0;
+  uint32_t unpacked = 0;
+  uint32_t local_offset = 0;
+};
+
+// Walks the central directory once and validates the footer. Both the metadata
+// readers and the icon reader use it, so the ZIP parsing rules stay in one place.
+std::vector<CentralEntry> ReadCentralDirectory(std::ifstream& in, uint64_t file_size,
+                                               uint64_t& central_offset) {
+  if (file_size < 22) throw std::runtime_error("HAP ZIP footer is missing");
   const size_t tail_size = static_cast<size_t>(std::min<uint64_t>(file_size, 22 + 65535));
   const uint64_t tail_start = file_size - tail_size;
   const auto tail = Read(in, tail_start, tail_size, file_size);
@@ -99,68 +134,117 @@ std::string ReadMetadata(const std::string& hap_path, const std::string& entry_n
   const uint8_t* footer = tail.data() + eocd;
   const uint16_t count = U16(footer + 10);
   const uint32_t central_size = U32(footer + 12);
-  const uint32_t central_offset = U32(footer + 16);
+  central_offset = U32(footer + 16);
   if (U16(footer + 4) != 0 || U16(footer + 6) != 0 ||
       U16(footer + 8) != count || count == 0 || count == 0xffff ||
       central_size == 0xffffffff || central_offset == 0xffffffff ||
-      static_cast<uint64_t>(central_offset) + central_size > tail_start + eocd) {
+      central_offset + central_size > tail_start + eocd) {
     throw std::runtime_error("Unsupported HAP ZIP directory");
   }
 
+  std::vector<CentralEntry> entries;
+  entries.reserve(count);
   uint64_t offset = central_offset;
   const uint64_t directory_end = offset + central_size;
-  std::optional<std::string> manifest;
   for (uint32_t i = 0; i < count; ++i) {
     if (offset + 46 > directory_end) throw std::runtime_error("Truncated HAP ZIP directory");
     const auto header = Read(in, offset, 46, file_size);
     if (U32(header.data()) != kCentral) throw std::runtime_error("Invalid HAP ZIP directory");
-    const uint16_t flags = U16(header.data() + 8);
-    const uint16_t method = U16(header.data() + 10);
-    const uint32_t crc = U32(header.data() + 16);
-    const uint32_t packed = U32(header.data() + 20);
-    const uint32_t unpacked = U32(header.data() + 24);
     const uint16_t name_size = U16(header.data() + 28);
     const uint16_t extra_size = U16(header.data() + 30);
     const uint16_t comment_size = U16(header.data() + 32);
-    const uint32_t local_offset = U32(header.data() + 42);
     const uint64_t next = offset + 46 + name_size + extra_size + comment_size;
     if (next > directory_end || name_size == 0) {
       throw std::runtime_error("Invalid HAP ZIP entry length");
     }
     const auto name_bytes = Read(in, offset + 46, name_size, file_size);
-    const std::string name(name_bytes.begin(), name_bytes.end());
+    CentralEntry entry;
+    entry.name.assign(name_bytes.begin(), name_bytes.end());
+    entry.flags = U16(header.data() + 8);
+    entry.method = U16(header.data() + 10);
+    entry.crc = U32(header.data() + 16);
+    entry.packed = U32(header.data() + 20);
+    entry.unpacked = U32(header.data() + 24);
+    entry.local_offset = U32(header.data() + 42);
+    entries.push_back(std::move(entry));
     offset = next;
-    if (name != entry_name) continue;
-    if (manifest.has_value()) throw std::runtime_error("Duplicate HAP metadata entry");
-    if ((flags & 1) != 0 || packed == 0 || unpacked == 0 || packed > kMaxCompressedSize ||
-        unpacked > kMaxManifestSize || local_offset == 0xffffffff) {
-      throw std::runtime_error("Unsupported HAP manifest entry");
-    }
-    const auto local = Read(in, local_offset, 30, file_size);
-    if (U32(local.data()) != kLocal || U16(local.data() + 8) != method) {
-      throw std::runtime_error("HAP manifest headers disagree");
-    }
-    if (U16(local.data() + 26) != name_size ||
-        Read(in, static_cast<uint64_t>(local_offset) + 30, name_size, file_size) != name_bytes) {
-      throw std::runtime_error("HAP manifest names disagree");
-    }
-    const uint64_t data_offset = static_cast<uint64_t>(local_offset) + 30 +
-      U16(local.data() + 26) + U16(local.data() + 28);
-    if (data_offset + packed > central_offset) {
-      throw std::runtime_error("HAP manifest overlaps ZIP directory");
-    }
-    const auto data = Read(in, data_offset, packed, file_size);
-    const std::string json = Decode(data, unpacked, method);
-    if (crc32(0, reinterpret_cast<const Bytef*>(json.data()), json.size()) != crc) {
-      throw std::runtime_error("HAP manifest checksum mismatch");
-    }
-    manifest = json;
   }
-  if (!manifest.has_value()) {
-    if (required) throw std::runtime_error("HAP metadata entry is missing");
-    return "";
+  return entries;
+}
+
+// Extracts one central-directory entry after re-reading its local header.
+std::vector<uint8_t> ReadEntry(std::ifstream& in, uint64_t file_size,
+                               const CentralEntry& entry, uint64_t central_offset,
+                               size_t limit) {
+  if (entry.name.empty()) throw std::runtime_error("Invalid HAP ZIP entry length");
+  if ((entry.flags & 1) != 0 || entry.packed == 0 || entry.unpacked == 0 ||
+      entry.packed > kMaxCompressedSize || entry.unpacked > limit ||
+      entry.local_offset == 0xffffffff) {
+    throw std::runtime_error("Unsupported HAP entry");
   }
-  return *manifest;
+  const auto local = Read(in, entry.local_offset, 30, file_size);
+  const uint16_t name_size = U16(local.data() + 26);
+  if (U32(local.data()) != kLocal || U16(local.data() + 8) != entry.method ||
+      name_size != entry.name.size()) {
+    throw std::runtime_error("HAP headers disagree");
+  }
+  const auto name_bytes = Read(in, static_cast<uint64_t>(entry.local_offset) + 30,
+                               name_size, file_size);
+  if (std::string(name_bytes.begin(), name_bytes.end()) != entry.name) {
+    throw std::runtime_error("HAP entry names disagree");
+  }
+  const uint64_t data_offset = static_cast<uint64_t>(entry.local_offset) + 30 +
+    name_size + U16(local.data() + 28);
+  if (data_offset + entry.packed > central_offset) {
+    throw std::runtime_error("HAP entry overlaps ZIP directory");
+  }
+  const auto data = Read(in, data_offset, entry.packed, file_size);
+  auto expanded = Expand(data, entry.unpacked, entry.method, limit);
+  if (crc32(0, reinterpret_cast<const Bytef*>(expanded.data()), expanded.size()) != entry.crc) {
+    throw std::runtime_error("HAP entry checksum mismatch");
+  }
+  return expanded;
+}
+
+std::ifstream OpenHap(const std::string& hap_path, uint64_t& file_size) {
+  std::ifstream in(hap_path, std::ios::binary | std::ios::ate);
+  if (!in) throw std::runtime_error("Cannot open HAP");
+  const auto end = in.tellg();
+  if (end < 22) throw std::runtime_error("HAP ZIP footer is missing");
+  file_size = static_cast<uint64_t>(end);
+  return in;
+}
+
+}  // namespace
+
+std::vector<uint8_t> ReadEntryBytes(const std::string& hap_path,
+                                    const std::string& entry_name, size_t limit) {
+  uint64_t file_size = 0;
+  auto in = OpenHap(hap_path, file_size);
+  uint64_t central_offset = 0;
+  const auto entries = ReadCentralDirectory(in, file_size, central_offset);
+  std::optional<std::vector<uint8_t>> found;
+  for (const auto& entry : entries) {
+    if (entry.name != entry_name) continue;
+    if (found.has_value()) throw std::runtime_error("Duplicate HAP entry");
+    found = ReadEntry(in, file_size, entry, central_offset, limit);
+  }
+  if (!found.has_value()) throw std::runtime_error("HAP entry is missing: " + entry_name);
+  return *found;
+}
+
+std::string ReadMetadata(const std::string& hap_path, const std::string& entry_name,
+                         bool required) {
+  try {
+    const auto bytes = ReadEntryBytes(hap_path, entry_name, kMaxManifestSize);
+    return std::string(bytes.begin(), bytes.end());
+  } catch (const std::exception& error) {
+    // pack.info is genuinely absent on older HAPs; that is not an error.
+    if (!required && std::string(error.what()).find("is missing") != std::string::npos) {
+      return "";
+    }
+    throw;
+  }
 }
 
 std::string ReadModuleJson(const std::string& hap_path) {
@@ -169,6 +253,44 @@ std::string ReadModuleJson(const std::string& hap_path) {
 
 std::string ReadPackInfo(const std::string& hap_path) {
   return ReadMetadata(hap_path, "pack.info", false);
+}
+
+std::vector<uint8_t> ReadHapIcon(const std::string& hap_path, const std::string& icon_name) {
+  // The name comes from module.json and is used as a lookup key, never as a path.
+  std::string base;
+  std::string stem;
+  IconNameParts(icon_name, base, stem);
+  if (base.empty()) return {};
+
+  uint64_t file_size = 0;
+  auto in = OpenHap(hap_path, file_size);
+  uint64_t central_offset = 0;
+  const auto entries = ReadCentralDirectory(in, file_size, central_offset);
+
+  // Prefer the exact requested path, then any media entry with the same stem.
+  std::vector<std::string> candidates;
+  candidates.push_back("resources/base/media/" + base);
+  for (const auto& entry : entries) {
+    const std::string& name = entry.name;
+    if (name.compare(0, 10, "resources/") != 0) continue;
+    if (name.find("/media/") == std::string::npos) continue;
+    std::string leaf;
+    std::string leaf_stem;
+    IconNameParts(name, leaf, leaf_stem);
+    if (leaf == base || leaf_stem == stem) candidates.push_back(name);
+  }
+
+  for (const auto& candidate : candidates) {
+    for (const auto& entry : entries) {
+      if (entry.name != candidate) continue;
+      try {
+        return ReadEntry(in, file_size, entry, central_offset, kMaxIconSize);
+      } catch (const std::exception&) {
+        // A single unreadable candidate must not abort the lookup.
+      }
+    }
+  }
+  return {};
 }
 
 }  // namespace qingqi::hap

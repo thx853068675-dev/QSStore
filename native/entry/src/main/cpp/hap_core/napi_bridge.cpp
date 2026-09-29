@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <string>
 #include <vector>
@@ -70,6 +71,61 @@ napi_value ReadModule(napi_env env, napi_callback_info info) {
 
 napi_value ReadPack(napi_env env, napi_callback_info info) {
   return ReadManifest(env, info, true);
+}
+
+// Returns the app icon bytes embedded in a local HAP, or an empty ArrayBuffer
+// when the package has no readable icon. A missing icon is normal, so it is not
+// reported as an error: the caller falls back to a placeholder.
+napi_value ReadIcon(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2]{};
+  if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 2) {
+    napi_throw_type_error(env, nullptr, "Expected a HAP path and an icon name");
+    return nullptr;
+  }
+  std::array<std::string, 2> values;
+  for (size_t i = 0; i < argc; ++i) {
+    size_t length = 0;
+    if (napi_get_value_string_utf8(env, args[i], nullptr, 0, &length) != napi_ok) {
+      napi_throw_type_error(env, nullptr, "Invalid HAP icon argument");
+      return nullptr;
+    }
+    // The icon name is short; the path uses the same bound as the manifest reader.
+    const size_t limit = i == 0 ? 4096 : 256;
+    if (length > limit) {
+      napi_throw_type_error(env, nullptr, "Invalid HAP icon argument");
+      return nullptr;
+    }
+    std::vector<char> buffer(length + 1);
+    if (napi_get_value_string_utf8(env, args[i], buffer.data(), buffer.size(), &length) != napi_ok) {
+      napi_throw_type_error(env, nullptr, "Invalid HAP icon argument");
+      return nullptr;
+    }
+    values[i].assign(buffer.data(), length);
+  }
+  try {
+    const auto bytes = qingqi::hap::ReadHapIcon(values[0], values[1]);
+    void* data = nullptr;
+    napi_value buffer = nullptr;
+    if (napi_create_arraybuffer(env, bytes.size(), &data, &buffer) != napi_ok) {
+      napi_throw_error(env, nullptr, "Cannot allocate HAP icon buffer");
+      return nullptr;
+    }
+    if (!bytes.empty()) {
+      std::memcpy(data, bytes.data(), bytes.size());
+    }
+    // Hand ArkTS a Uint8Array over that buffer; Uint8Array.buffer gives the
+    // ArrayBuffer back, so callers can use either shape.
+    napi_value result = nullptr;
+    if (napi_create_typedarray(env, napi_uint8_array, bytes.size(), buffer, 0, &result) != napi_ok) {
+      napi_throw_error(env, nullptr, "Cannot return HAP icon");
+      return nullptr;
+    }
+    return result;
+  } catch (const std::exception& error) {
+    napi_throw_error(env, "HAP_ICON", error.what());
+    return nullptr;
+  }
 }
 
 napi_value MatchMaterialPair(napi_env env, napi_callback_info info, bool profile) {
@@ -195,7 +251,7 @@ napi_value HdcCommand(napi_env env, napi_callback_info info) {
   std::vector<char> root(length + 1);
   if (napi_get_value_string_utf8(env, args[0], root.data(), root.size(), &length) != napi_ok ||
       napi_get_value_uint32(env, args[1], &state->operation) != napi_ok ||
-      state->operation > 4 ||
+      state->operation > 5 ||
       napi_get_value_string_utf8(env, args[2], nullptr, 0, &length) != napi_ok ||
       length > 4096) {
     delete state;
@@ -383,6 +439,7 @@ napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
     {"readModuleJson", nullptr, ReadModule, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readPackInfo", nullptr, ReadPack, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"readHapIcon", nullptr, ReadIcon, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"keyMatchesCertificate", nullptr, KeyMatchesCertificate, nullptr, nullptr, nullptr,
      napi_default, nullptr},
     {"readSignedProfile", nullptr, ReadSignedProfile, nullptr, nullptr, nullptr, napi_default,
@@ -393,7 +450,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"signHap", nullptr, SignHap, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"hdcCommand", nullptr, HdcCommand, nullptr, nullptr, nullptr, napi_default, nullptr}
   };
-  napi_define_properties(env, exports, 8, properties);
+  napi_define_properties(env, exports, 9, properties);
   return exports;
 }
 

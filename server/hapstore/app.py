@@ -154,7 +154,8 @@ def h_reviews(app_id: str, q: dict[str, list[str]]) -> dict[str, Any]:
     if not published or published["status"] != "published":
         raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
     return db.list_reviews(int(app_id),
-                           page=_int((q.get("page") or ["1"])[0], 1, 1, 10000))
+                           page=_int((q.get("page") or ["1"])[0], 1, 1, 10000),
+                           page_size=_int((q.get("page_size") or ["20"])[0], 20, 1, 50))
 
 
 def h_put_review(app_id: str, body: dict[str, Any], identity: tuple[str, str]) -> dict[str, Any]:
@@ -173,7 +174,9 @@ def h_put_review(app_id: str, body: dict[str, Any], identity: tuple[str, str]) -
     if len(comment) > 2000:
         raise ApiError(400, "COMMENT_TOO_LONG", "评论不能超过 2000 字")
     db.put_review(int(app_id), identity[0], identity[1], stars, comment)
-    return db.list_reviews(int(app_id), page=1)
+    # Echo the page the client is now looking at, with the same default the
+    # GET route uses, so both responses describe the listing identically.
+    return db.list_reviews(int(app_id), page=1, page_size=20)
 
 
 def h_get_signing_identity(identity: tuple[str, str]) -> dict[str, Any]:
@@ -237,6 +240,28 @@ SUBMIT_CATEGORIES = (
 )
 
 
+def _repo_owner_state(repo: str, account_id: str) -> dict[str, Any]:
+    """这个仓库在本店的归属：没有记录 / 属于自己 / 属于别人。"""
+    row = db.connect().execute(
+        "SELECT id FROM app WHERE repo_full_name=?", (repo,)
+    ).fetchone()
+    if not row:
+        return {"state": "new", "app_id": 0}
+    owner = db.publisher_account_id(row["id"])
+    if owner and owner != account_id:
+        return {"state": "other", "app_id": int(row["id"])}
+    if owner:
+        return {"state": "mine", "app_id": int(row["id"])}
+    # 有记录但还没归属（采集进来、没人上架）：首次上架按 new 处理
+    return {"state": "new", "app_id": int(row["id"])}
+
+
+def _reject_foreign_repo(repo: str, account_id: str) -> None:
+    """别人的仓库不允许重复上架。放在采集之前，避免白跑一次 GitHub 请求。"""
+    if _repo_owner_state(repo, account_id)["state"] == "other":
+        raise ApiError(403, "PUBLISHER_MISMATCH", "该仓库已由其他账号上架")
+
+
 def h_submit_prepare(body: dict[str, Any], ip: str,
                      identity: tuple[str, str]) -> dict[str, Any]:
     if not _rate_ok(f"submit:{ip}", *RATE_SUBMIT):
@@ -275,6 +300,8 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
                 "choices": choices,
                 "suggested_category": meta["category"],
                 "categories": SUBMIT_CATEGORIES,
+                # 客户端据此提示「这是更新已有的那条」还是「已被别人上架」
+                "existing": _repo_owner_state(repo, identity[0]),
                 "expires_in_seconds": 1800}
     except ApiError:
         raise
@@ -296,13 +323,8 @@ def h_submit_confirm(body: dict[str, Any], identity: tuple[str, str]) -> dict[st
     category = str(body.get("category") or "")
     if category not in SUBMIT_CATEGORIES:
         raise ApiError(400, "INVALID_CATEGORY", "请选择应用分类")
-    existing = db.connect().execute(
-        "SELECT id FROM app WHERE repo_full_name=?", (draft["repo"],)
-    ).fetchone()
-    if existing:
-        owner = db.publisher_account_id(existing["id"])
-        if owner and owner != identity[0]:
-            raise ApiError(403, "PUBLISHER_MISMATCH", "该仓库已由其他账号上架")
+    # 先判归属再同步：别人的仓库直接拒绝，不必浪费一次 GitHub 采集
+    _reject_foreign_repo(draft["repo"], identity[0])
     selection = {"asset_name": choice["name"], "bundle_name": choice["bundle_name"],
                  "tag": choice["tag"], "sha256": choice.get("sha256") or ""}
     try:

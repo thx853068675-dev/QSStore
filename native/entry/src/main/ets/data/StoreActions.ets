@@ -25,6 +25,10 @@ export class SubmitDraft {
   suggestedCategory: string = '';
   categories: string[] = [];
   choices: SubmitChoice[] = [];
+  /** 服务端给的本店归属：new / mine / other。 */
+  existingState: string = 'new';
+  /** 已在架时那条记录的编号（0 表示没有）。 */
+  existingAppId: number = 0;
 
   static fromJson(row: Record<string, Object>): SubmitDraft {
     const draft = new SubmitDraft();
@@ -37,6 +41,9 @@ export class SubmitDraft {
     const choices = row['choices'] as Array<Record<string, Object>> | undefined;
     draft.choices = (choices ?? []).map((item: Record<string, Object>) =>
       SubmitChoice.fromJson(item));
+    const existing = row['existing'] as Record<string, Object> | undefined;
+    draft.existingState = String(existing?.['state'] ?? 'new');
+    draft.existingAppId = Number(existing?.['app_id'] ?? 0);
     return draft;
   }
 }

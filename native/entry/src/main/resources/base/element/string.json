@@ -1,7 +1,16 @@
 {
   "string": [
-    { "name": "module_desc", "value": "轻启·安装器原生预览" },
-    { "name": "EntryAbility_desc", "value": "原生签名商店预览" },
-    { "name": "EntryAbility_label", "value": "轻启·安装器·原生预览" }
+    {
+      "name": "module_desc",
+      "value": "轻启·安装器"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "原生签名应用商店"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "轻启·安装器"
+    }
   ]
 }

@@ -5,6 +5,11 @@ const AGC_API = 'https://connect-api.cloud.huawei.com/api';
 
 class SourceUrlsBody { sourceUrls: string = ''; }
 class DeleteCertsBody { certIds: string[] = []; }
+class CreateCertBody {
+  csr: string = '';
+  certName: string = '';
+  certType: number = 1;
+}
 class RegisterDeviceBody {
   deviceName: string = '';
   udid: string = '';
@@ -79,6 +84,29 @@ export class AgcClient {
   async certificates(): Promise<Array<Record<string, Object>>> {
     const data = await this.request('/cps/harmony-cert-manage/v1/cert/list');
     return data['certList'] as Array<Record<string, Object>> ?? [];
+  }
+
+  /**
+   * 申请调试证书（certType 1），返回 AGC 建好的证书记录。
+   *
+   * 这是唯一会占用 AGC 调试证书槽位的调用，所以只应由 SigningIdentityRecovery
+   * 在「账号下没有任何证书与本机私钥配对」之后调用，不要在登录/核对路径上顺手调用。
+   */
+  async createCertificate(csrPem: string, certName: string): Promise<Record<string, Object>> {
+    if (!/^-----BEGIN CERTIFICATE REQUEST-----/.test(csrPem)) {
+      throw new Error('证书请求格式无效，已取消申请');
+    }
+    const body = new CreateCertBody();
+    body.csr = csrPem;
+    body.certName = certName;
+    body.certType = 1;
+    const data = await this.request('/cps/harmony-cert-manage/v1/cert/add', body);
+    const created = data['harmonyCert'] as Record<string, Object> | undefined;
+    if (!created || String(created['id'] ?? '').length === 0) {
+      const ret = data['ret'] as Record<string, Object> | undefined;
+      throw new Error('AGC 未返回新证书：' + String(ret?.['msg'] ?? '原因未知'));
+    }
+    return created;
   }
 
   /** 删除调试证书。接口形态与 Flutter 版 agc_service.deleteCertList 一致。 */

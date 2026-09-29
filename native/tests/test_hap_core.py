@@ -107,6 +107,61 @@ class HapReaderTest(unittest.TestCase):
                 archive.writestr("module.json", '{"app":{}}')
         self.assertNotEqual(self.run_reader(path).returncode, 0)
 
+    def run_icon(self, file, icon_name):
+        return subprocess.run(
+            [str(self.cli), str(file), "icon", icon_name],
+            capture_output=True,
+        )
+
+    def test_icon_is_found_through_the_module_json_reference(self):
+        # 设备上的真实布局：module.json 里是 $media:app_icon，文件在同名 path 下
+        payload = b"\x89PNG\r\n\x1a\n" + b"icon-body" * 8
+        path = self.create_hap("icon.hap", json.dumps({
+            "app": {"bundleName": "com.example.app", "icon": "$media:app_icon"},
+            "module": {"name": "entry"},
+        }))
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("resources/base/media/app_icon.png", payload)
+        result = self.run_icon(path, "$media:app_icon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, payload)
+
+    def test_icon_survives_a_density_specific_directory(self):
+        payload = b"\x89PNG\r\n\x1a\n" + b"dense" * 4
+        path = self.create_hap("icon-density.hap", json.dumps({
+            "app": {"bundleName": "com.example.app", "icon": "$media:app_icon"},
+            "module": {"name": "entry"},
+        }))
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("resources/base/media/app_icon@3x.png", payload)
+        result = self.run_icon(path, "$media:app_icon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, payload)
+
+    def test_missing_icon_is_empty_not_an_error(self):
+        # 没有图标是正常情况，调用方要能区分「没有」和「读失败」
+        path = self.create_hap("no-icon.hap", '{"app":{"icon":"$media:app_icon"}}')
+        result = self.run_icon(path, "$media:app_icon")
+        self.assertEqual((result.returncode, result.stdout), (0, b""))
+
+    def test_icon_size_limit_is_enforced(self):
+        path = self.create_hap("big-icon.hap", '{"app":{"icon":"$media:app_icon"}}')
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("resources/base/media/app_icon.png",
+                             b"\x89PNG\r\n\x1a\n" + b"B" * (1024 * 1024))
+        result = self.run_icon(path, "$media:app_icon")
+        self.assertEqual((result.returncode, result.stdout), (0, b""))
+
+    def test_icon_name_cannot_escape_the_media_directory(self):
+        # 清单里的名字只当查找键用，不能变成任意路径读取
+        path = self.create_hap("escape.hap", '{"app":{"icon":"../../etc/passwd"}}')
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("etc/passwd", b"root:x:0:0")
+            archive.writestr("resources/base/media/passwd", b"not-the-real-one")
+        result = self.run_icon(path, "../../etc/passwd")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.stdout, b"root:x:0:0")
+
     def test_optional_pack_info_and_duplicate_rejection(self):
         path = self.create_hap("no-pack.hap", '{"app":{}}')
         result = self.run_reader(path, "pack")

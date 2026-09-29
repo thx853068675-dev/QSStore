@@ -1,4 +1,4 @@
-import { readModuleJson, readPackInfo } from 'libhap_core.so';
+import { readModuleJson, readPackInfo, readHapIcon } from 'libhap_core.so';
 
 export class PackageInspectError extends Error {
   constructor(message: string) {
@@ -60,5 +60,43 @@ export function requestedPermissions(path: string): string[] {
         /^ohos\.permission\.[A-Za-z0-9_.]+$/.test(name) && names.indexOf(name) === index);
   } catch (_) {
     throw new PackageInspectError('无法读取 HAP 声明的权限');
+  }
+}
+
+/**
+ * 应用图标在 HAP 清单里的引用。
+ *
+ * 既可能是 `$media:app_icon` 字符串，也可能是 `{ "name": "app_icon" }`；
+ * 取不到就返回空串，交给调用方按「没有图标」处理。
+ */
+export function iconReference(path: string): string {
+  try {
+    const manifest = JSON.parse(readModuleJson(path)) as Record<string, Object>;
+    const app = manifest['app'] as Record<string, Object> | undefined;
+    const raw = app?.['icon'];
+    if (typeof raw === 'string') return raw;
+    if (raw !== null && raw !== undefined) {
+      const row = raw as Record<string, Object>;
+      return String(row['name'] ?? '');
+    }
+    return '';
+  } catch (_) {
+    return '';
+  }
+}
+
+/**
+ * 从本机 HAP 里取出应用图标字节。读不到返回 undefined —— 缺图标是正常情况，
+ * 不该让整个安装流程失败。
+ */
+export function readIconBytes(path: string, reference: string): ArrayBuffer | undefined {
+  if (reference.length === 0) return undefined;
+  try {
+    const bytes = readHapIcon(path, reference);
+    if (bytes === undefined || bytes === null || bytes.byteLength === 0) return undefined;
+    // NAPI 返回的是 Uint8Array 视图，ImageSource 要的是底层 ArrayBuffer
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  } catch (_) {
+    return undefined;
   }
 }

@@ -1,6 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { relationalStore } from '@kit.ArkData';
-import { FailureKind, InstallJob, InstallStage } from './InstallJob';
+import { FailureKind, InstallJob, InstallStage, StageMark } from './InstallJob';
 import { isPending, stageForFailure } from './RecoveryPlanner';
 
 const JOB_SCHEMA = `CREATE TABLE IF NOT EXISTS install_jobs (
@@ -12,6 +12,8 @@ const JOB_SCHEMA = `CREATE TABLE IF NOT EXISTS install_jobs (
   expected_sha256 TEXT NOT NULL,
   bundle_name TEXT NOT NULL,
   version_code INTEGER NOT NULL,
+  version_name TEXT NOT NULL DEFAULT '',
+  stage_history TEXT NOT NULL DEFAULT '[]',
   module_name TEXT NOT NULL DEFAULT '',
   main_ability TEXT NOT NULL DEFAULT '',
   stage TEXT NOT NULL,
@@ -60,6 +62,8 @@ export class JobStore {
     let hasDeviceUdid = false;
     let hasProfileSha256 = false;
     let hasSignedProfileSha256 = false;
+    let hasVersionName = false;
+    let hasStageHistory = false;
     try {
       while (columns.goToNextRow()) {
         const name = columns.getString(columns.getColumnIndex('name'));
@@ -73,6 +77,8 @@ export class JobStore {
         if (name === 'device_udid') hasDeviceUdid = true;
         if (name === 'profile_sha256') hasProfileSha256 = true;
         if (name === 'signed_profile_sha256') hasSignedProfileSha256 = true;
+        if (name === 'version_name') hasVersionName = true;
+        if (name === 'stage_history') hasStageHistory = true;
       }
     } finally {
       columns.close();
@@ -101,21 +107,47 @@ export class JobStore {
     if (!hasSignedProfileSha256) {
       await db.executeSql("ALTER TABLE install_jobs ADD COLUMN signed_profile_sha256 TEXT NOT NULL DEFAULT ''");
     }
+    // 版本名用于展示，阶段时间轴用于画安装流程；都是后加的，旧库要补列
+    if (!hasVersionName) {
+      await db.executeSql("ALTER TABLE install_jobs ADD COLUMN version_name TEXT NOT NULL DEFAULT ''");
+    }
+    if (!hasStageHistory) {
+      await db.executeSql("ALTER TABLE install_jobs ADD COLUMN stage_history TEXT NOT NULL DEFAULT '[]'");
+    }
     return new JobStore(db);
+  }
+
+  /**
+   * 阶段变化时追加一个时间戳。
+   *
+   * 放在 save 里而不是 JobRunner：下载、恢复、失败重试都会改阶段，收在一处
+   * 才不会漏。同一个阶段重复保存（比如下载进度）不会重复记录。
+   */
+  private static markStage(job: InstallJob, stage: InstallStage): void {
+    const last = job.stageHistory.length > 0 ?
+      job.stageHistory[job.stageHistory.length - 1] : undefined;
+    if (last !== undefined && last.stage === stage) return;
+    const mark = new StageMark();
+    mark.stage = stage;
+    mark.at = job.updatedAt;
+    job.stageHistory = job.stageHistory.concat([mark]);
   }
 
   async save(job: InstallJob): Promise<void> {
     job.updatedAt = Date.now();
+    JobStore.markStage(job, job.stage);
     await this.db.executeSql(
       `INSERT OR REPLACE INTO install_jobs
       (id, app_id, asset_name, source_url, mirror_urls, expected_sha256, bundle_name,
-       version_code, module_name, main_ability, stage, cache_path, signed_path, profile_path,
+       version_code, version_name, stage_history, module_name, main_ability, stage,
+       cache_path, signed_path, profile_path,
        device_udid, profile_sha256, signed_profile_sha256, transfer_task_id,
        attempt, last_error, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [job.id, job.appId, job.assetName, job.sourceUrl, JSON.stringify(job.mirrorUrls),
        job.expectedSha256,
-       job.bundleName, job.versionCode, job.moduleName, job.mainAbility,
+       job.bundleName, job.versionCode, job.versionName, JSON.stringify(job.stageHistory),
+       job.moduleName, job.mainAbility,
        job.stage, job.cachePath, job.signedPath, job.profilePath,
        job.deviceUdid, job.profileSha256, job.signedProfileSha256,
        job.transferTaskId,
@@ -129,7 +161,8 @@ export class JobStore {
   }
 
   async enqueue(appId: number, assetName: string, sourceUrl: string,
-    expectedSha256: string, mirrorUrls: string[] = []): Promise<InstallJob> {
+    expectedSha256: string, mirrorUrls: string[] = [],
+    versionName: string = ''): Promise<InstallJob> {
     if (appId <= 0 || assetName.length === 0 || sourceUrl.length === 0 ||
       !/^https:\/\//.test(sourceUrl) || !/^[0-9a-fA-F]{64}$/.test(expectedSha256)) {
       throw new Error('安装任务缺少可信的附件或 SHA-256');
@@ -149,6 +182,7 @@ export class JobStore {
     const job = InstallJob.create(id, appId, assetName,
       candidates.length > 0 ? candidates[0] : sourceUrl, expectedSha256);
     job.mirrorUrls = candidates.length > 0 ? [...candidates.slice(1), sourceUrl] : [];
+    job.versionName = versionName;
     await this.save(job);
     return job;
   }
@@ -217,6 +251,19 @@ export class JobStore {
         job.expectedSha256 = result.getString(result.getColumnIndex('expected_sha256'));
         job.bundleName = result.getString(result.getColumnIndex('bundle_name'));
         job.versionCode = result.getLong(result.getColumnIndex('version_code'));
+        job.versionName = result.getString(result.getColumnIndex('version_name'));
+        const historyText = result.getString(result.getColumnIndex('stage_history'));
+        try {
+          const parsed = JSON.parse(historyText) as Array<Record<string, Object>>;
+          job.stageHistory = Array.isArray(parsed) ? parsed.map((row: Record<string, Object>) => {
+            const mark = new StageMark();
+            mark.stage = String(row['stage'] ?? '');
+            mark.at = Number(row['at'] ?? 0);
+            return mark;
+          }).filter((mark: StageMark) => mark.stage.length > 0 && mark.at > 0) : [];
+        } catch (_) {
+          job.stageHistory = [];
+        }
         job.moduleName = result.getString(result.getColumnIndex('module_name'));
         job.mainAbility = result.getString(result.getColumnIndex('main_ability'));
         job.stage = result.getString(result.getColumnIndex('stage')) as InstallStage;

@@ -20,6 +20,13 @@ export class ListPage<T> {
   total: number = 0;
   page: number = 1;
   pageSize: number = 20;
+  /**
+   * 服务端原样的行数据。
+   *
+   * 缓存要存的是"服务端说了什么"，不是我们解析后的对象 —— 存原样才能在
+   * 版本升级后仍按当前解析规则读回来。
+   */
+  rawItems: Array<Record<string, Object>> = [];
 
   get totalPages(): number {
     if (this.total <= 0 || this.pageSize <= 0) return 1;
@@ -113,6 +120,7 @@ export class StoreClient {
       (trimmed.length > 0 ? '&q=' + encodeURIComponent(trimmed) : ''));
     const result = new ListPage<CatalogApp>();
     const raw = data['items'] as Array<Record<string, Object>> | undefined;
+    result.rawItems = raw ?? [];
     result.items = (raw ?? []).map((row: Record<string, Object>) => CatalogApp.fromJson(row));
     result.total = numberField(data, 'total', result.items.length);
     result.page = numberField(data, 'page', page);
@@ -124,7 +132,13 @@ export class StoreClient {
     return CatalogApp.fromJson(await this.getData('/api/v1/apps/' + id));
   }
 
-  async appIcon(app: CatalogApp): Promise<image.PixelMap | undefined> {
+  /**
+   * 图标的原始字节。
+   *
+   * 单独抽出来是为了能缓存：PixelMap 不能序列化，但字节可以。冷启动时先用
+   * 缓存的字节直接画出图标，再去后端刷新。
+   */
+  async appIconBytes(app: CatalogApp): Promise<ArrayBuffer | undefined> {
     if (app.id <= 0 || app.iconUrl !== '/api/v1/apps/' + app.id + '/icon') {
       return undefined;
     }
@@ -145,13 +159,23 @@ export class StoreClient {
       if (response.responseCode !== 200 || !(response.result instanceof ArrayBuffer)) {
         return undefined;
       }
-      const source = image.createImageSource(response.result);
-      try { return await source.createPixelMap(); }
-      finally { await source.release(); }
+      return response.result;
     } catch (_) {
       return undefined;
     } finally {
       request.destroy();
+    }
+  }
+
+  async appIcon(app: CatalogApp): Promise<image.PixelMap | undefined> {
+    const bytes = await this.appIconBytes(app);
+    if (bytes === undefined) return undefined;
+    try {
+      const source = image.createImageSource(bytes);
+      try { return await source.createPixelMap(); }
+      finally { await source.release(); }
+    } catch (_) {
+      return undefined;
     }
   }
 

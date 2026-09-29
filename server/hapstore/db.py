@@ -582,14 +582,6 @@ def publisher_account_id(app_id: int) -> str | None:
     return row["account_id"] if row else None
 
 
-def categories() -> list[dict[str, Any]]:
-    rows = connect().execute(
-        """SELECT category, COUNT(*) AS n FROM app
-           WHERE status='published' GROUP BY category ORDER BY n DESC"""
-    ).fetchall()
-    return [{"name": r["category"], "count": r["n"]} for r in rows]
-
-
 def record_download(app_id: int, asset_id: int, device_hash: str = "") -> None:
     c = connect()
     c.execute(
@@ -704,58 +696,6 @@ def replace_releases(app_id: int, releases: Iterable[dict[str, Any]]) -> int:
     return count
 
 
-def create_submit_task(repo_url: str, ip_hash: str) -> int:
-    c = connect()
-    cur = c.execute(
-        "INSERT INTO submit_task(repo_url, ip_hash, created_at) VALUES (?,?,?)",
-        (repo_url, ip_hash, int(time.time())),
-    )
-    c.commit()
-    return cur.lastrowid
-
-
-def finish_submit_task(task_id: int, status: str, result: dict[str, Any]) -> None:
-    c = connect()
-    c.execute(
-        "UPDATE submit_task SET status=?, result_json=? WHERE id=?",
-        (status, json.dumps(result, ensure_ascii=False), task_id),
-    )
-    c.commit()
-
-
-def get_submit_task(task_id: int) -> dict[str, Any] | None:
-    row = connect().execute(
-        "SELECT * FROM submit_task WHERE id=?", (task_id,)
-    ).fetchone()
-    if not row:
-        return None
-    return {
-        "id": row["id"],
-        "repo_url": row["repo_url"],
-        "status": row["status"],
-        "result": json.loads(row["result_json"] or "{}"),
-        "created_at": row["created_at"],
-    }
-
-
-def recent_submits(ip_hash: str, window_seconds: int) -> int:
-    since = int(time.time()) - window_seconds
-    return connect().execute(
-        "SELECT COUNT(*) AS n FROM submit_task WHERE ip_hash=? AND created_at>=?",
-        (ip_hash, since),
-    ).fetchone()["n"]
-
-
-def add_report(app_id: int, reason: str, detail: str, ip_hash: str) -> int:
-    c = connect()
-    cur = c.execute(
-        "INSERT INTO report(app_id, reason, detail, ip_hash, created_at) VALUES (?,?,?,?,?)",
-        (app_id, reason, detail, ip_hash, int(time.time())),
-    )
-    c.commit()
-    return cur.lastrowid
-
-
 def set_meta(key: str, value: str) -> None:
     c = connect()
     c.execute(
@@ -809,6 +749,11 @@ def github_api_mirrors(path: str) -> list[str]:
 
 
 def stats() -> dict[str, Any]:
+    """运维用的总量统计。
+
+    没有对应的 HTTP 路由 —— 客户端从不调用它。保留是因为排查问题时
+    `python3 -c "from hapstore import db; print(db.stats())"` 比手写 SQL 快。
+    """
     c = connect()
     return {
         "apps": c.execute("SELECT COUNT(*) AS n FROM app").fetchone()["n"],

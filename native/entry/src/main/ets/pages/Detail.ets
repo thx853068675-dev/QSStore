@@ -8,6 +8,7 @@ import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
 import { JobStore } from '../jobs/JobStore';
 import { JobRunner } from '../jobs/JobRunner';
 import { JobScheduler } from '../jobs/JobScheduler';
+import { LocalBundles } from '../jobs/LocalBundles';
 import { NativeJobRuntime } from '../jobs/NativeJobRuntime';
 import { InstallJob, InstallStage } from '../jobs/InstallJob';
 import { AppReview } from '../data/StoreActions';
@@ -51,6 +52,8 @@ struct Detail {
   @State private account: DeveloperAccount = new DeveloperAccount();
   @State private signedIn: boolean = false;
   @State private installedJobs: InstallJob[] = [];
+  /** 系统查到的本机版本号（0 = 没装）。不依赖无线调试。 */
+  @State private installedVersion: number = 0;
   @State private expandedReleaseTag: string = '';
   @State private showReconnect: boolean = false;
   @State private reconnectPort: string = '';
@@ -110,47 +113,62 @@ struct Detail {
     }
   }
 
+  /**
+   * 刷新「本机装没装」。
+   *
+   * 数据源有两层：轻启自己的安装记录（知道入口 ability，能直接打开），以及
+   * 系统 bundleManager 查到的本机版本。前者依赖无线调试（HDC），后者是本地
+   * 同步调用 —— 只看记录时，关掉无线调试就会把已装的应用显示成「安装应用」。
+   */
   private async loadInstalledJobs(): Promise<void> {
     try {
-      const context = getContext(this) as common.UIAbilityContext;
-      const store = await JobStore.open(context);
-      const installed = (await store.listAll()).filter((job: InstallJob) =>
+      const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
+      this.installedJobs = (await store.listAll()).filter((job: InstallJob) =>
         job.stage === InstallStage.INSTALLED);
-      const bridge = new HdcDeviceBridge(context);
-      const verified: InstallJob[] = [];
-      for (const job of installed) {
-        try {
-          if (await bridge.installedVersion(job.bundleName) === job.versionCode) {
-            verified.push(job);
-          }
-        } catch (_) {
-          // A disconnected device can still open previously installed apps.
-          verified.push(job);
-        }
-      }
-      this.installedJobs = verified;
     } catch (_) {
       this.installedJobs = [];
     }
+    this.refreshInstalledVersion();
   }
 
-  /**
-   * 本机是否已经装了这个应用。
-   *
-   * 只按包名判定，不再要求版本号与当前选中的附件完全一致 —— 要求版本相等时，
-   * 应用装的是旧版本就会显示成「安装应用」，点下去等于又装一遍。
-   */
+  /** 查一次本机版本；查的是当前选中附件的包名（切换版本后包名一般不变）。 */
+  private refreshInstalledVersion(): void {
+    const bundleName = this.selectedAsset.bundleName;
+    this.installedVersion = bundleName.length > 0 ?
+      LocalBundles.installedVersion(bundleName) : 0;
+  }
+
+  /** 本机是否装了这个应用：记录或系统查询任一命中即可。 */
   private installedForApp(): InstallJob | undefined {
     const bundleName = this.selectedAsset.bundleName;
     if (bundleName.length === 0) return undefined;
-    return this.installedJobs.find((job: InstallJob) => job.bundleName === bundleName);
+    const record = this.installedJobs.find((job: InstallJob) =>
+      job.bundleName === bundleName);
+    if (record !== undefined) return record;
+    // 系统里装着但没有轻启的安装记录：构造一个够用的记录（没有入口 ability，
+    // openInstalled 会交给系统解析）
+    if (this.installedVersion <= 0) return undefined;
+    const job = new InstallJob();
+    job.appId = this.app.id;
+    job.bundleName = bundleName;
+    job.versionCode = this.installedVersion;
+    return job;
   }
 
-  /** 选中版本是否比本机装的更新。 */
+  /**
+   * 选中版本是否比本机装的更新。
+   *
+   * 比较用 versionCode，展示用 versionName —— 后者对人可读。
+   */
   private updateAvailable(): boolean {
-    const installed = this.installedForApp();
-    if (installed === undefined) return false;
-    return this.selectedAsset.versionCode > installed.versionCode;
+    if (this.installedVersion <= 0 && this.installedForApp() === undefined) return false;
+    return this.selectedAsset.versionCode > this.installedVersion;
+  }
+
+  /** 按钮上显示的目标版本名；没有版本名就退回版本号。 */
+  private selectedVersionLabel(): string {
+    return this.selectedAsset.versionName.length > 0 ? this.selectedAsset.versionName :
+      String(this.selectedAsset.versionCode);
   }
 
   private installedForSelection(): InstallJob | undefined {
@@ -253,6 +271,8 @@ struct Detail {
     const release = this.releases[index];
     if (release && release.assets.length > 0) this.selectedAsset = release.assets[0];
     this.expandedReleaseTag = '';
+    // 换了附件就可能换了包名，按钮状态要跟着重算
+    this.refreshInstalledVersion();
   }
 
   /** 取服务端的第 page 页（从 1 开始）。失败时保留当前页，只提示错误。 */
@@ -341,6 +361,9 @@ struct Detail {
       if (this.releases.length > 0 && this.releases[0].assets.length > 0) {
         this.selectedAsset = this.releases[0].assets[0];
       }
+      // 必须在选中附件之后重算：aboutToAppear 里 loadInstalledJobs 跑在
+      // loadApp 之前，那时 selectedAsset 还是空的，查不到包名就会一直显示「安装应用」。
+      this.refreshInstalledVersion();
       this.loaded = true;
       this.error = '';
     } catch (error) {
@@ -428,7 +451,7 @@ struct Detail {
       const context = getContext(this) as common.UIAbilityContext;
       const store = await JobStore.open(context);
       const job = await store.enqueue(this.app.id, asset.name, asset.url,
-        asset.sha256, asset.mirrorUrls);
+        asset.sha256, asset.mirrorUrls, asset.versionName);
       if (job.stage === InstallStage.QUEUED || job.stage === InstallStage.DOWNLOADING ||
         job.stage === InstallStage.WAITING_NETWORK) {
         await JobScheduler.runDownload(context, store, job,
@@ -804,8 +827,9 @@ struct Detail {
                   .width('100%').height(52)
                   .onReady(() => this.paintInstallButton())
               }
-              Text(this.installedForApp() ? (this.updateAvailable() ? '更新到新版本' : '打开应用') :
-                this.downloadBusy ? '正在安装  ' + this.downloadPercent + '%' : '安装应用')
+              Text(this.downloadBusy ? '正在安装  ' + this.downloadPercent + '%' :
+                (!this.installedForApp() ? '安装应用' :
+                  (this.updateAvailable() ? '更新到 ' + this.selectedVersionLabel() : '打开应用')))
                 .fontSize(17).fontWeight(FontWeight.Medium)
                 .fontColor(Palette.onAccent)
             }

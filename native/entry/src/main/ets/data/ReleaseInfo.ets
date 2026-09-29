@@ -5,6 +5,8 @@ export class HapAsset {
   size: number = 0;
   bundleName: string = '';
   versionCode: number = 0;
+  /** 展示用版本名，如 1.1.0。设备比对用 versionCode，界面显示用这个。 */
+  versionName: string = '';
   mirrorUrls: string[] = [];
 
   static fromJson(row: Record<string, Object>): HapAsset {
@@ -15,6 +17,7 @@ export class HapAsset {
     asset.size = Number(row['size'] ?? 0);
     asset.bundleName = String(row['bundle_name'] ?? '');
     asset.versionCode = Number(row['version_code'] ?? 0);
+    asset.versionName = String(row['version_name'] ?? '');
     const mirrors = row['mirror_urls'] as string[] | undefined;
     asset.mirrorUrls = mirrors ?? [];
     return asset;

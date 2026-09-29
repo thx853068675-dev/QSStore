@@ -224,14 +224,6 @@ def h_app_release(app_id: str, tag: str, q: dict[str, list[str]]) -> dict[str, A
     return rel
 
 
-def h_categories(q: dict[str, list[str]]) -> dict[str, Any]:
-    return {"items": db.categories()}
-
-
-def h_stats(q: dict[str, list[str]]) -> dict[str, Any]:
-    return db.stats()
-
-
 # ── 上架 ────────────────────────────────────────────────────────
 
 
@@ -358,42 +350,6 @@ def h_remove_my_app(app_id: str, identity: tuple[str, str]) -> dict[str, Any]:
     return {"removed": True, "app_id": int(app_id)}
 
 
-def h_submit_status(task_id: str, q: dict[str, list[str]]) -> dict[str, Any]:
-    task = db.get_submit_task(int(task_id))
-    if not task:
-        raise ApiError(404, "TASK_NOT_FOUND", "任务不存在")
-    return task
-
-
-# ── 下载计数 / 举报 ─────────────────────────────────────────────
-
-
-def h_download_event(app_id: str, body: dict[str, Any], ip: str) -> dict[str, Any]:
-    asset_id = int(body.get("asset_id") or 0)
-    if asset_id <= 0:
-        raise ApiError(400, "INVALID_ASSET", "缺少 asset_id")
-    if not _rate_ok(f"dl:{ip}", 600, 60):
-        raise ApiError(429, "RATE_LIMITED", "请求过于频繁")
-    db.record_download(int(app_id), asset_id, _ip_hash(str(body.get("device") or "")))
-    return {"recorded": True}
-
-
-def h_report(app_id: str, body: dict[str, Any], ip: str) -> dict[str, Any]:
-    if not db.get_app(int(app_id)):
-        raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
-    reason = str(body.get("reason") or "").strip()
-    if not reason:
-        raise ApiError(400, "INVALID_REPORT", "请填写举报原因")
-    if not _rate_ok(f"report:{ip}", 10, 3600):
-        raise ApiError(429, "RATE_LIMITED", "举报过于频繁")
-    rid = db.add_report(int(app_id), reason, str(body.get("detail") or "")[:2000],
-                        _ip_hash(ip))
-    return {"report_id": rid}
-
-
-# ── 管理（仅本机）───────────────────────────────────────────────
-
-
 def h_admin_sync(body: dict[str, Any], ip: str) -> dict[str, Any]:
     if not _rate_ok("admin_sync", *RATE_SYNC):
         raise ApiError(429, "RATE_LIMITED", "同步过于频繁")
@@ -433,8 +389,6 @@ router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/reviews", h_reviews)
 router.add("POST", r"/api/v1/apps/(?P<app_id>\d+)/reviews", "REVIEW")
 router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/releases", h_app_releases)
 router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/releases/(?P<tag>[^/]+)", h_app_release)
-router.add("GET", r"/api/v1/categories", h_categories)
-router.add("GET", r"/api/v1/stats", h_stats)
 router.add("GET", r"/api/v1/healthz", lambda q: {"ok": True, "stage": "M1"})
 router.add("POST", r"/api/v1/submit/prepare", "SUBMIT_PREPARE")
 router.add("POST", r"/api/v1/submit/confirm", "SUBMIT_CONFIRM")
@@ -442,9 +396,6 @@ router.add("GET", r"/api/v1/me/apps", "MY_APPS")
 router.add("DELETE", r"/api/v1/me/apps/(?P<app_id>\d+)", "MY_APP_DELETE")
 router.add("GET", r"/api/v1/signing-identity", "IDENTITY_GET")
 router.add("POST", r"/api/v1/signing-identity", "IDENTITY_PUT")
-router.add("GET", r"/api/v1/submit/(?P<task_id>\d+)", h_submit_status)
-router.add("POST", r"/api/v1/apps/(?P<app_id>\d+)/download-event", "DOWNLOAD")
-router.add("POST", r"/api/v1/apps/(?P<app_id>\d+)/report", "REPORT")
 router.add("GET", r"/api/v1/admin/sync", h_admin_channels)   # 探测通道
 router.add("POST", r"/api/v1/admin/sync", "ADMIN_SYNC")
 router.add("POST", r"/api/v1/admin/apps/(?P<app_id>\d+)/hide", "ADMIN_HIDE")
@@ -582,10 +533,6 @@ class Handler(BaseHTTPRequestHandler):
                            {"Cache-Control": "no-store"})
             elif fn == "IDENTITY_PUT":
                 self._json(h_put_signing_identity(self._read_body(), self._identity()))
-            elif fn == "DOWNLOAD":
-                self._json(h_download_event(params["app_id"], self._read_body(), ip))
-            elif fn == "REPORT":
-                self._json(h_report(params["app_id"], self._read_body(), ip))
             elif fn == "ADMIN_SYNC":
                 self._json(h_admin_sync(self._read_body(), ip))
             elif fn == "ADMIN_HIDE":

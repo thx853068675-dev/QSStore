@@ -4,7 +4,7 @@
 
 ## 制品
 
-**[轻启·安装器 0.4.7](https://github.com/thx853068675-dev/QSStore/releases/latest)** — `com.tonghongxiang.hapstore`，versionCode 2026092904，SHA-256 `70b8cc491a879903f4970ecfa61cbc840de6f1ef8eae2bb28add14e804538302`。ArkTS/ArkUI 原生实现，不含 Flutter 运行时。
+**[最新版本](https://github.com/thx853068675-dev/QSStore/releases/latest)** — `com.tonghongxiang.hapstore`。ArkTS/ArkUI 原生实现，不含 Flutter 运行时。
 
 Release 里的包已指向正式元数据服务，装上即可用。
 

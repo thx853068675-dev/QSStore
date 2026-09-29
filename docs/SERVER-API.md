@@ -48,10 +48,16 @@ curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 | POST | `/api/v1/apps/{id}/reviews` | 已验证华为开发者账号新增评分与评论（同账号可多条） |
 | GET | `/api/v1/signing-identity` | 已验证账号取回加密保存的签名身份；无记录时 `identity` 为 `null` |
 | POST | `/api/v1/signing-identity` | 首台设备上传与 AGC 调试证书配对的 P-256 私钥；同账号首次写入生效 |
+| GET | `/api/v1/categories` | 分类统计 |
+| GET | `/api/v1/stats` | 全局统计 |
 | POST | `/api/v1/submit/prepare` | 检查 GitHub Release，返回各 HAP 的实际应用名、包名与建议分类；需 Bearer 凭证 |
 | POST | `/api/v1/submit/confirm` | 携带 `draft_token`、`asset_name`、`category` 确认上架；重新核对所选 HAP |
 | GET | `/api/v1/me/apps` | 获取当前已验证华为账号上架的公开应用 |
 | DELETE | `/api/v1/me/apps/{id}` | 当前上架者删除应用的公开展示；保留历史数据以便重新上架 |
+| POST | `/api/v1/submit` | 兼容旧版客户端的上架接口 |
+| GET | `/api/v1/submit/{task_id}` | 上架进度 |
+| POST | `/api/v1/apps/{id}/download-event` | 匿名下载计数 |
+| POST | `/api/v1/apps/{id}/report` | 举报 |
 | GET | `/api/v1/admin/sync` | **仅本机** 探测采集通道 |
 | POST | `/api/v1/admin/sync` | **仅本机** 手动触发采集 |
 | POST | `/api/v1/admin/apps/{id}/hide` | **仅本机** 上下架 |

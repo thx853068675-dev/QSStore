@@ -1,12 +1,15 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
-import { hdcCommand } from 'libhap_core.so';
+import { hdcCommand, hdcDisconnect } from 'libhap_core.so';
 import { NativeDeviceBridge } from './NativeJobRuntime';
 
 // All commands share one in-process Rust HDC host. Serialize install and
 // verification so a second UI action cannot overtake an active transfer.
 export class HdcDeviceBridge implements NativeDeviceBridge {
+  /** 本进程是否建立过设备链路。断开或进程结束即复位。 */
+  private static linked: boolean = false;
+
   private static queue: Promise<void> = Promise.resolve();
   private context: common.UIAbilityContext;
 
@@ -20,10 +23,42 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     HdcDeviceBridge.queue = new Promise<void>((resolve: () => void) => { release = resolve; });
     await previous;
     try {
-      return await hdcCommand(this.context.filesDir, operation, parameter);
+      const output = await hdcCommand(this.context.filesDir, operation, parameter);
+      // 只要命令真的跑过，服务端就建了到设备的链路
+      if (operation !== 0) HdcDeviceBridge.linked = true;
+      return output;
     } finally {
       release();
     }
+  }
+
+  /**
+   * 释放设备的调试链路。
+   *
+   * 设备的无线调试基本只服务一个 HDC 宿主，我们连着不放，DevEco Studio 和 hdc
+   * 命令行就连不上去了。所以用完要主动断开；下次操作 connected() 会自动重连，
+   * 用户不需要重新配对。
+   *
+   * 返回是否真的断开过链路（false 表示本来就没连）。
+   */
+  static releaseDevice(): boolean {
+    try {
+      const dropped = hdcDisconnect() > 0;
+      HdcDeviceBridge.linked = false;
+      return dropped;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * 本进程是否已经连过设备。
+   *
+   * 只反映"我们这边有没有链路"的近似状态：HDC 服务端存的是连接表，这里不去
+   * 查询设备（查询本身也会占用链路，就成了为看状态而占端口）。
+   */
+  static deviceLinked(): boolean {
+    return HdcDeviceBridge.linked;
   }
 
   private async savedPort(): Promise<number> {

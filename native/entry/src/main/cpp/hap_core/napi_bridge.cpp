@@ -23,6 +23,8 @@ extern "C" int qingqi_profile_matches_certificate(const char* profile_path,
                                                      const char* certificate_path);
 extern "C" int qingqi_verify_hap(const char* file_path, char* error_buffer,
                                    size_t error_capacity);
+extern "C" int qingqi_hdc_disconnect(char* error_buffer, size_t error_capacity);
+
 extern "C" int qingqi_hdc_command(const char* key_root, uint16_t port,
                                   uint32_t operation, const char* parameter,
                                   unsigned char* output, size_t output_capacity,
@@ -309,6 +311,16 @@ napi_value HdcCommand(napi_env env, napi_callback_info info) {
   return promise;
 }
 
+napi_value HdcDisconnect(napi_env env, napi_callback_info info) {
+  // 断开是一次性的轻操作，同步做完即可；失败也不抛错，只回报数量，
+  // 界面按「已断开」处理就好 —— 让用户为一个释放动作处理异常没有意义。
+  std::string error(256, '\0');
+  const int dropped = qingqi_hdc_disconnect(error.data(), error.size());
+  napi_value value = nullptr;
+  napi_create_int32(env, dropped < 0 ? 0 : dropped, &value);
+  return value;
+}
+
 napi_value VerifyHap(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value arg = nullptr;
@@ -448,9 +460,10 @@ napi_value Init(napi_env env, napi_value exports) {
      nullptr, napi_default, nullptr},
     {"verifyHap", nullptr, VerifyHap, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"signHap", nullptr, SignHap, nullptr, nullptr, nullptr, napi_default, nullptr},
-    {"hdcCommand", nullptr, HdcCommand, nullptr, nullptr, nullptr, napi_default, nullptr}
+    {"hdcCommand", nullptr, HdcCommand, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"hdcDisconnect", nullptr, HdcDisconnect, nullptr, nullptr, nullptr, napi_default, nullptr}
   };
-  napi_define_properties(env, exports, 9, properties);
+  napi_define_properties(env, exports, 10, properties);
   return exports;
 }
 

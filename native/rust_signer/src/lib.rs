@@ -388,6 +388,32 @@ fn validate_bundle_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Drop every HDC device link, releasing the device's wireless debugging endpoint.
+///
+/// The protocol has no "disconnect" verb, so this drops the transport instead.
+/// The loopback server keeps running; the next command reconnects by itself.
+/// Returns the number of links dropped, or -1 on failure.
+#[no_mangle]
+pub extern "C" fn qingqi_hdc_disconnect(
+    error_buffer: *mut c_char,
+    error_capacity: usize,
+) -> i32 {
+    match panic::catch_unwind(|| qingqi_hdc_transport::disconnect()) {
+        Ok(Ok(dropped)) => {
+            write_error(error_buffer, error_capacity, "");
+            dropped as i32
+        }
+        Ok(Err(error)) => {
+            write_error(error_buffer, error_capacity, &format!("HDC disconnect: {error}"));
+            -1
+        }
+        Err(_) => {
+            write_error(error_buffer, error_capacity, "HDC disconnect stopped unexpectedly");
+            -1
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn qingqi_hdc_command(
     key_root: *const c_char,
@@ -435,9 +461,10 @@ pub extern "C" fn qingqi_hdc_command(
             }
             _ => return Err("unsupported HDC operation".into()),
         };
-        qingqi_hdc_transport::start(Path::new(&root), port)
+        // start() 返回实际监听端口：首选端口被别的程序占用时它会换一个空闲的
+        let actual_port = qingqi_hdc_transport::start(Path::new(&root), port)
             .map_err(|error| format!("HDC server: {error}"))?;
-        qingqi_hdc_transport::command(port, &args,
+        qingqi_hdc_transport::command(actual_port, &args,
             Duration::from_secs(if operation == 4 { 300 } else if operation == 1 { 90 } else { 30 }))
             .map_err(|error| format!("HDC command: {error}"))
     });

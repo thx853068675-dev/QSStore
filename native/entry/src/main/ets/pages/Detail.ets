@@ -54,6 +54,11 @@ struct Detail {
   @State private installedJobs: InstallJob[] = [];
   /** 系统查到的本机版本号（0 = 没装）。不依赖无线调试。 */
   @State private installedVersion: number = 0;
+  /** 「检查更新」的进行状态与结果提示。 */
+  @State private refreshBusy: boolean = false;
+  @State private refreshMessage: string = '';
+  /** 上次真正发起检查的时间，用于客户端侧的静默冷却。 */
+  private lastCheckAt: number = 0;
   @State private expandedReleaseTag: string = '';
   @State private showReconnect: boolean = false;
   @State private reconnectPort: string = '';
@@ -77,6 +82,22 @@ struct Detail {
     ColorTint.heroBackground(this.appIcon).then((color: string) => {
       this.heroColor = color;
     });
+  }
+
+  /**
+   * 回到页面时清掉残留的「正在安装」显示。
+   *
+   * downloadBusy 是在按下按钮时置位的，如果安装途中离开页面（甚至进程被回收），
+   * 回来时它可能还是 true，按钮就永远停在进度上。这里核对任务是不是真的还在跑。
+   */
+  onPageShow(): void {
+    if (this.activeInstallId.length === 0) return;
+    if (JobScheduler.isRunning(this.activeInstallId)) return;
+    this.activeInstallId = '';
+    this.downloadBusy = false;
+    this.downloadMessage = '';
+    this.downloadPercent = 0;
+    this.refreshInstalledVersion();
   }
 
   aboutToAppear(): void {
@@ -201,7 +222,71 @@ struct Detail {
     }
   }
 
+  /**
+   * 检查更新：让服务端重采这个仓库，再把版本列表重新拉一遍。
+   *
+   * 客户端只能看到服务端已经采集到的数据，而采集器是有周期的，所以「刚发布的
+   * 版本」在界面上会晚一轮出现。点这里让服务端立刻去 GitHub 采一次。
+   */
+  private async checkForUpdates(): Promise<void> {
+    if (this.refreshBusy || this.app.id <= 0) return;
+    // 客户端自己也限频：服务端虽然按 IP 限流，但没必要为了连点几次去占一次
+    // 请求。冷却期内的点击直接忽略——用户无感，不会弹错也不会转圈。
+    const now = Date.now();
+    if (now - this.lastCheckAt < Detail.CHECK_COOLDOWN_MS) {
+      return;
+    }
+    this.lastCheckAt = now;
+    this.refreshBusy = true;
+    this.refreshMessage = '正在检查…';
+    try {
+      const client = new StoreClient(getContext(this) as common.UIAbilityContext);
+      // 服务端要现去 GitHub 采一次，给它一个上限：卡住时按钮要能自己恢复
+      await Detail.withDeadline(client.refreshApp(this.app.id), Detail.CHECK_TIMEOUT_MS,
+        '检查更新超时，请稍后再试');
+      const releases = await client.listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE);
+      const before = this.releaseTotal;
+      this.releases = releases.items;
+      this.releasePage = releases.page;
+      this.releaseTotal = releases.total;
+      // 先取本机版本，再判断按钮该显示「安装」还是「更新」
+      this.refreshInstalledVersion();
+      this.refreshMessage = releases.total > before ?
+        '发现 ' + (releases.total - before) + ' 个新版本' : '已是最新';
+    } catch (error) {
+      // 检查失败不影响已有内容，只提示这一次
+      this.refreshMessage = '检查更新失败：' + String(error);
+    } finally {
+      this.refreshBusy = false;
+    }
+  }
+
   /** 每页条数直接交给服务端，界面上不再对第一页做本地切片。 */
+  /** 「检查更新」的客户端冷却：冷却期内的点击静默忽略，不发请求也不提示。 */
+  private static readonly CHECK_COOLDOWN_MS: number = 60000;
+  /** 检查更新的上限：服务端要现去 GitHub 采一次，慢了就放弃，别让按钮一直转。 */
+  private static readonly CHECK_TIMEOUT_MS: number = 30000;
+
+  /** 给一个 Promise 加上限，超时后以给定文案失败。 */
+  private static withDeadline<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+    let settled = false;
+    const guarded = work.then((value: T) => {
+      if (!settled) return value;
+      return new Promise<T>(() => {});
+    }, (error: Object) => {
+      // ArkTS 只允许抛 Error 实例，原始错误转成文案再抛
+      if (!settled) throw new Error(String(error));
+      return new Promise<T>(() => {});
+    });
+    const limit = new Promise<T>((_resolve, reject) => {
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(message));
+      }, ms);
+    });
+    return Promise.race([guarded, limit]);
+  }
   private static readonly REVIEWS_PER_PAGE: number = 20;
   private static readonly RELEASES_PER_PAGE: number = 20;
 
@@ -626,6 +711,14 @@ struct Detail {
                   .fontColor(Palette.text).layoutWeight(1)
                 Text(String(this.releaseTotal) + ' 个版本').fontSize(11)
                   .fontColor(Palette.textTertiary)
+                // 采集器按周期跑，刚发布的版本要等下一轮；这里可以即时重采
+                if (this.refreshBusy) {
+                  LoadingProgress().width(16).height(16).margin({ left: 10 })
+                } else {
+                  Text('检查更新').fontSize(11).fontColor(Palette.accent)
+                    .margin({ left: 10 })
+                    .onClick(() => this.checkForUpdates())
+                }
               }.width('100%')
               if (this.currentRelease()) {
                 Column({ space: 11 }) {
@@ -676,6 +769,11 @@ struct Detail {
                       .onClick(() => { this.selectedAsset = asset; })
                   }, (asset: HapAsset) => asset.name)
                   // 版本按服务端分页续取，避免只看到第一页就以为没有旧版本。
+                  if (this.refreshMessage.length > 0) {
+                    Text(this.refreshMessage).fontSize(11)
+                      .fontColor(Palette.textTertiary)
+                      .width('100%').maxLines(2)
+                  }
                   if (this.releaseMessage.length > 0) {
                     Text(this.releaseMessage).fontSize(11)
                       .fontColor(Palette.textSecondary)

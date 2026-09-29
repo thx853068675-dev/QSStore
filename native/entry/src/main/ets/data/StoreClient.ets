@@ -11,6 +11,8 @@ class PrepareBody { repo_url: string = ''; }
 class ConfirmBody { draft_token: string = ''; asset_name: string = ''; category: string = ''; }
 class ReviewBody { stars: number = 0; body: string = ''; }
 class IdentityBody { cert_id: string = ''; private_key_pem: string = ''; }
+/** 无参数的 POST 也要带一个合法 JSON 对象：ArkTS 的 http 不接受空 extraData。 */
+class EmptyBody { }
 
 /// Server page size ceilings: /apps caps page_size at 100, /releases and
 /// /reviews at 50. Every listing returns total next to items.
@@ -177,6 +179,21 @@ export class StoreClient {
     } catch (_) {
       return undefined;
     }
+  }
+
+  /**
+   * 让服务端立刻重采这个应用，把 GitHub 上刚发布的版本拉进来。
+   *
+   * 采集器按固定周期跑（默认 30 分钟），所以「刚发的 Release」在客户端要等
+   * 下一轮才看得见。用户点「检查更新」时调这个接口即时重采一次。
+   * 服务端按 IP 限流；失败只代表这次没查到新版本，不影响已有数据。
+   */
+  async refreshApp(appId: number): Promise<void> {
+    if (appId <= 0) throw new Error('应用编号无效');
+    // 带一个空 JSON 对象：http.request 的 extraData 传空字符串会直接抛
+    // 401 Parameter error，服务端对空 body 本身是容忍的。
+    await this.requestData('/api/v1/apps/' + appId + '/refresh',
+      http.RequestMethod.POST, undefined, new EmptyBody());
   }
 
   /// ``page`` is 1-based; the server caps page_size at 50.

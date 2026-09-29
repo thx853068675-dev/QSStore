@@ -10,6 +10,7 @@ import { LegacyInstalledMigration } from '../jobs/LegacyInstalledMigration';
 import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
 import { JobRunner } from '../jobs/JobRunner';
 import { JobScheduler } from '../jobs/JobScheduler';
+import { isPending } from '../jobs/RecoveryPlanner';
 import { NativeJobRuntime } from '../jobs/NativeJobRuntime';
 import { retryDelayMs } from '../jobs/RecoveryPlanner';
 import { LocalImport } from '../jobs/LocalImport';
@@ -85,6 +86,8 @@ struct Index {
   @State private expandedInstallBundles: string[] = [];
   @State private jobsError: string = '';
   @State private activeJobId: string = '';
+  /** 每秒推进一次，供时间轴的「用时」走字。 */
+  @State private nowTick: number = 0;
   /** 进行中任务的阶段刷新定时器（-1 表示未在跑）。 */
   private stageTicker: number = -1;
   /** 上一次已渲染的阶段，用来避免无谓的重绘。 */
@@ -108,6 +111,10 @@ struct Index {
   @State private syncMessage: string = '';
   @State private localBusy: boolean = false;
   @State private localMessage: string = '';
+  /** 「我上架的应用」列表是否正在刷新。 */
+  @State private myAppsBusy: boolean = false;
+  /** 「设备连接」卡片里的一次性提示（如「已释放调试链路」）。 */
+  @State private deviceMessage: string = '';
   /** 本地页时间轴要展示的任务 id。 */
   @State private localJobId: string = '';
   @State private apps: CatalogApp[] = [];
@@ -180,6 +187,7 @@ struct Index {
   }
 
   aboutToAppear(): void {
+    this.nowTick = Date.now();
     this.syncPalette();
     this.loadJobs();
     this.migrateLegacyJobs();
@@ -188,6 +196,17 @@ struct Index {
     this.loadCatalogFromCache().then(() => this.loadApps());
     this.recoverDownloads();
     this.restoreAccount();
+  }
+
+  /**
+   * 每次页面回到前台都兜底一次。
+   *
+   * 安装中途离开再回来时，上次的「正在忙」状态可能还留在界面上，任务也可能停在
+   * 半路。这里做两件事：把不再真的在跑的任务从「进行中」摘掉，把长时间没动静的
+   * 任务标成可重试，让用户看到「继续安装」而不是一个永远转圈的进度。
+   */
+  onPageShow(): void {
+    this.reconcileStuckJobs();
   }
 
   aboutToDisappear(): void {
@@ -267,6 +286,16 @@ struct Index {
     this.loginMessage = '';
     this.identityMessage = '';
     this.myApps = [];
+  }
+
+  /** 退出的二次确认：图标按钮容易误触，而退出会清掉登录态。 */
+  private confirmSignOut(): void {
+    AlertDialog.show({
+      title: '退出账号',
+      message: '退出后需要重新登录才能上架和评价。已安装的应用与安装记录不受影响。',
+      primaryButton: { value: '取消', action: () => {} },
+      secondaryButton: { value: '退出', action: () => { this.signOut(); } }
+    });
   }
 
   private async recoverSigningIdentity(): Promise<void> {
@@ -889,7 +918,27 @@ struct Index {
    * 所以优先显示 versionName；没有版本名时才回退。
    */
   private versionLabel(job: InstallJob): string {
-    return job.versionName.length > 0 ? job.versionName : String(job.versionCode);
+    if (job.versionName.length > 0) return job.versionName;
+    // 旧记录（加 version_name 字段之前装的）没有版本名。直接显示 versionCode 会
+    // 得到 2026092902 这种看着像日期的数字，所以依次退两步。
+    const app = this.apps.find((item: CatalogApp) => item.id === job.appId);
+    if (app !== undefined) {
+      const direct = app.latestAsset;
+      if (direct !== undefined && direct.versionCode === job.versionCode &&
+        direct.versionName.length > 0) {
+        return direct.versionName;
+      }
+    }
+    // 装的是旧版本时目录里只有「最新版」的版本名，对不上号；这时从包名解析。
+    // 发布的包名通常带版本，如 qingqi-native-formal-0.4.5-device6.1-signed.hap。
+    const fromName = Index.versionFromAssetName(job.assetName);
+    return fromName.length > 0 ? fromName : String(job.versionCode);
+  }
+
+  /** 从 HAP 文件名里取出形如 0.4.5 的版本号；取不到返回空串。 */
+  private static versionFromAssetName(assetName: string): string {
+    const match = assetName.match(/([0-9]+\.[0-9]+\.[0-9]+)/);
+    return match !== null && match.length > 1 ? match[1] : '';
   }
 
   private jobStatusLine(job: InstallJob): string {
@@ -918,13 +967,16 @@ struct Index {
   }
 
   private async loadMyApps(): Promise<void> {
-    if (!this.signedIn) return;
+    if (!this.signedIn || this.myAppsBusy) return;
+    this.myAppsBusy = true;
     try {
       this.myApps = await new StoreClient(getContext(this) as common.UIAbilityContext)
         .myApps(this.account);
       this.myAppsMessage = '';
     } catch (error) {
       this.myAppsMessage = String(error);
+    } finally {
+      this.myAppsBusy = false;
     }
   }
 
@@ -1090,6 +1142,48 @@ struct Index {
       }
       if (unfinished.length > 0) await this.loadJobs();
     } catch (_) {}
+  }
+
+  /**
+   * 兜底：把「卡住」的任务恢复成可操作的状态。
+   *
+   * 两个来源的卡住：
+   *   · 界面自己的 activeJobId 还指着某个任务，但它其实已经不在运行（进程重启、
+   *     页面重建、任务已经结束）—— 摘掉标记，阶段轮询也停掉。
+   *   · 任务停在非终态且很久没有更新（设备掉线、底层调用悬挂、界面被销毁）——
+   *     标成可重试，管理页会出现「继续安装」。
+   *
+   * 只标可重试、不自动重跑：设备上那次安装可能已经生效了，自动重跑会再装一遍。
+   */
+  private static readonly STUCK_JOB_MS: number = 10 * 60 * 1000;
+
+  private async reconcileStuckJobs(): Promise<void> {
+    // 先处理界面状态：activeJobId 指向的任务已经不在运行就清掉
+    if (this.activeJobId.length > 0 && !JobScheduler.isRunning(this.activeJobId)) {
+      this.activeJobId = '';
+      this.stopStageTicker();
+    }
+    try {
+      const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
+      const jobs = await store.listAll();
+      const now = Date.now();
+      let healed = 0;
+      for (const job of jobs) {
+        if (!isPending(job.stage)) continue;
+        if (JobScheduler.isRunning(job.id)) continue;
+        if (now - job.updatedAt < Index.STUCK_JOB_MS) continue;
+        job.stage = InstallStage.RETRYABLE_ERROR;
+        job.lastError = '上次安装中断了，点击继续安装';
+        await store.save(job);
+        healed++;
+      }
+      if (healed > 0) {
+        await this.loadJobs();
+        this.jobsError = '';
+      }
+    } catch (_) {
+      // 兜底失败不该影响页面：下次回到页面还会再试
+    }
   }
 
   private async loadJobs(): Promise<void> {
@@ -1566,14 +1660,17 @@ struct Index {
   private startStageTicker(jobId: string): void {
     this.stopStageTicker();
     this.stageTicker = setInterval(async () => {
+      // 时间轴上的「用时」要靠这个每秒走字；不能只在阶段变化时刷新
+      this.nowTick = Date.now();
       try {
         const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
         const fresh = await store.get(jobId);
         if (fresh === undefined) return;
-        // 换一个对象才会触发刷新：直接改字段对 @State 数组不可见
-        if (fresh.stage === this.activeStage) return;
         this.activeStage = fresh.stage;
         this.jobsError = '';
+        // 换一个对象才会触发刷新：直接改字段对 @State 数组不可见。
+        // 这里不能因为「阶段没变」就返回 —— 同一阶段里 stageHistory 与进度仍在变，
+        // 早退会让时间轴停在上一次的快照上。
         this.installedJobs = this.installedJobs.map((job: InstallJob) =>
           job.id === jobId ? fresh : job);
         this.pendingJobs = this.pendingJobs.map((job: InstallJob) =>
@@ -1595,7 +1692,7 @@ struct Index {
   private forgetJob(job: InstallJob): void {
     AlertDialog.show({
       title: '移除记录',
-      message: '只移除「' + this.jobTitle(job) + ' · 版本 ' + job.versionCode +
+      message: '只移除「' + this.jobTitle(job) + ' · 版本 ' + this.versionLabel(job) +
         '」这一条记录，不会卸载应用。',
       primaryButton: { value: '取消', action: () => {} },
       secondaryButton: { value: '移除', action: async () => {
@@ -1736,17 +1833,33 @@ struct Index {
         this.jobsError = '请先在「我的」登录华为开发者账号';
       } else if (result.stage === InstallStage.INSTALLED) {
         this.jobsError = '';
-        this.localMessage = '安装完成';
+        // 完成状态由时间轴卡片顶部的「安装完成」表达，这里不再另设一行
+        this.localMessage = '';
       } else {
         this.jobsError = result.lastError;
+        this.localMessage = result.lastError;
       }
     } catch (error) {
       this.jobsError = String(error);
+      this.localMessage = String(error);
     } finally {
       this.stopStageTicker();
       this.activeJobId = '';
       await this.loadJobs();
     }
+  }
+
+  /**
+   * 主动释放设备调试链路。
+   *
+   * 不打扰用户：不需要确认，也不重新探测设备（探测本身就会重新占链路）。
+   * 断开后下次安装/查询会自动重连，配对信息仍然有效。
+   */
+  private releaseDeviceLink(): void {
+    const dropped = HdcDeviceBridge.releaseDevice();
+    this.deviceConnected = false;
+    this.deviceMessage = dropped ? '已释放调试链路' : '当前没有占用中的调试链路';
+    setTimeout(() => { this.deviceMessage = ''; }, 4000);
   }
 
   private async reconnect(): Promise<void> {
@@ -1938,19 +2051,14 @@ struct Index {
             Text('从文件安装').fontSize(20).fontWeight(FontWeight.Bold)
               .fontColor(Palette.text)
           }.width('100%').alignItems(HorizontalAlign.Center)
-          Text('选择 HAP 后，轻启会核对应用身份与文件完整性，再接续签名和安装。')
-            .fontSize(13).fontColor(Palette.textSecondary).lineHeight(21)
-            .textAlign(TextAlign.Center)
-            .width('100%').margin({ top: 16, bottom: 22 })
+            .margin({ bottom: 22 })
+
           Button(this.localBusy ? '正在读取文件…' : '选择 HAP 文件')
             .height(48).enabled(!this.localBusy).width('100%')
             .fontSize(15).fontWeight(FontWeight.Medium)
             .backgroundColor(Palette.accent).borderRadius(15)
             .onClick(() => this.pickLocalHap())
-          if (this.localMessage.length > 0) {
-            Text(this.localMessage).fontSize(12).fontColor(Palette.textBody)
-              .width('100%').maxLines(3).margin({ top: 13 })
-          }
+
         }.alignItems(HorizontalAlign.Start).padding(22)
           .width('100%').backgroundColor(Palette.surface).borderRadius(22)
         // 安装流程时间轴：读取 → 核对 → 签名 → 安装
@@ -1976,8 +2084,8 @@ struct Index {
     const local = this.installedJobs.concat(this.pendingJobs).filter((job: InstallJob) =>
       job.sourceUrl === 'local' || job.id.startsWith('local:'));
     if (local.length === 0) return undefined;
-    return local.reduce((newest: InstallJob, job: InstallJob) =>
-      job.updatedAt > newest.updatedAt ? job : newest);
+    return local.reduce((best: InstallJob, job: InstallJob) =>
+      job.updatedAt > best.updatedAt ? job : best);
   }
 
   /**
@@ -1997,8 +2105,17 @@ struct Index {
           (job.versionCode > 0 ? String(job.versionCode) : ''))
           .fontSize(11).fontColor(Palette.textTertiary)
       }.width('100%')
-      Text(this.jobTitle(job)).fontSize(12).fontColor(Palette.textSecondary)
-        .width('100%').maxLines(1)
+      Row({ space: 8 }) {
+        Text(this.jobTitle(job)).fontSize(12).fontColor(Palette.textSecondary)
+          .layoutWeight(1).maxLines(1)
+        // 当前状态放在流程里：装完就在这里显示「安装完成」，
+        // 不用在按钮下面另起一行
+        Text(job.stage === InstallStage.INSTALLED ? '安装完成' : this.stageLabel(job.stage))
+          .fontSize(12).fontWeight(FontWeight.Medium)
+          .fontColor(job.stage === InstallStage.INSTALLED ? Palette.success :
+            (job.lastError.length > 0 ? Palette.danger : Palette.accent))
+          .maxLines(1)
+      }.width('100%')
       ForEach(job.stageHistory, (mark: StageMark, index: number) => {
         Row({ space: 11 }) {
           Column() {
@@ -2016,14 +2133,16 @@ struct Index {
           Column({ space: 2 }) {
             Text(this.timelineStepLabel(mark.stage)).fontSize(13)
               .fontColor(Palette.text).maxLines(1)
-            Text(Index.formatClock(mark.at) + ' · 用时 ' +
-              Index.formatDuration(mark.at, job.stageHistory, index))
+            Text(Index.stepTiming(mark.at, job.stageHistory, index, this.nowTick))
               .fontSize(10).fontColor(Palette.textTertiary).maxLines(1)
           }.alignItems(HorizontalAlign.Start).layoutWeight(1)
         }.width('100%')
       }, (mark: StageMark) => mark.stage + ':' + String(mark.at))
       if (job.lastError.length > 0) {
         Text(job.lastError).fontSize(11).fontColor(Palette.danger)
+          .width('100%').maxLines(3)
+      } else if (this.localMessage.length > 0) {
+        Text(this.localMessage).fontSize(11).fontColor(Palette.textSecondary)
           .width('100%').maxLines(3)
       }
     }.alignItems(HorizontalAlign.Start).width('100%').padding(18)
@@ -2059,9 +2178,30 @@ struct Index {
   }
 
   /** 这一步到下一步之间的耗时；最后一步显示距今时间。 */
-  private static formatDuration(at: number, marks: StageMark[], index: number): string {
-    const next: number = index + 1 < marks.length ? marks[index + 1].at : Date.now();
-    const seconds = Math.max(0, Math.round((next - at) / 1000));
+  /** 时间轴上每一行的时间说明：时刻，外加「用时」；没有用时就不显示后半段。 */
+  private static stepTiming(at: number, marks: StageMark[], index: number,
+    tick: number): string {
+    const live = index === marks.length - 1 &&
+      tick > 0 && Date.now() - tick < 5000;
+    const now = tick > 0 ? tick : Date.now();
+    const duration = Index.formatDuration(at, marks, index, now, live);
+    return duration.length > 0 ? Index.formatClock(at) + ' · 用时 ' + duration :
+      Index.formatClock(at);
+  }
+
+  /**
+   * 这一步花了多久。
+   *
+   * 中间各步就是「下一步开始 − 这一步开始」。最后一步没有下一步：任务还在跑时按
+   * 当前时间算（所以会走字），已经结束就返回空 —— 那种情况下「最后一步花了多久」
+   * 没有意义，显示一个数字只会误导。
+   */
+  private static formatDuration(at: number, marks: StageMark[], index: number,
+    now: number, live: boolean): string {
+    if (index + 1 >= marks.length && !live) return '';
+    const next: number = index + 1 < marks.length ? marks[index + 1].at : now;
+    // 时间戳理论上不会倒流；真倒流时显示 0 秒比显示负数好
+    const seconds = Math.max(0, Math.round(Math.abs(next - at) / 1000));
     if (seconds < 60) return seconds + ' 秒';
     return Math.floor(seconds / 60) + ' 分 ' + (seconds % 60) + ' 秒';
   }
@@ -2076,8 +2216,14 @@ struct Index {
             Row() {
               Text('我上架的应用').fontSize(19).fontWeight(FontWeight.Bold)
                 .fontColor(Palette.text).layoutWeight(1)
-              Text('刷新').fontSize(12).fontColor(Palette.accent)
-                .onClick(() => this.loadMyApps())
+              // 与「已安装」那里同一个刷新图标：转圈时不给再点
+              if (this.myAppsBusy) {
+                LoadingProgress().width(20).height(20)
+              } else {
+                Text('↻').fontSize(19).fontColor(Palette.accent)
+                  .width(32).height(32).textAlign(TextAlign.Center)
+                  .onClick(() => this.loadMyApps())
+              }
             }.width('100%').padding({ top: 3, bottom: 6 })
           }
           // 上架入口：从发现页搬到这里，与「我上架的应用」同处一块
@@ -2242,7 +2388,7 @@ struct Index {
                 if (this.expandedInstallBundles.includes(job.bundleName)) {
                   ForEach(this.olderInstalledJobs(job.bundleName, job.id), (older: InstallJob) => {
                     Row({ space: 8 }) {
-                      Text('版本 ' + older.versionCode).fontSize(11)
+                      Text('版本 ' + this.versionLabel(older)).fontSize(11)
                         .fontColor(Palette.textTertiary).layoutWeight(1)
                     }.width('100%').padding({ top: 8 })
                   }, (older: InstallJob) => older.id)
@@ -2390,16 +2536,29 @@ struct Index {
                 (this.signedIn ? '开发者身份已连接' : '登录后即可上架和评价'))
                   .fontSize(12).fontColor(Palette.textSecondary)
               }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+              // 已登录时退出收成一个图标，比一整条按钮简洁；点一下仍会二次确认
+              if (this.signedIn) {
+                // 用基础箭头转 180° 得到「←]」这种退出符号：系统符号名在 SDK 里
+                // 查不到，字符想保证各机型都能渲染，基础箭头最稳。
+                Text('→').fontSize(19).fontWeight(FontWeight.Bold)
+                  .fontColor(Palette.textSecondary)
+                  .rotate({ angle: 180 })
+                  .width(38).height(38).textAlign(TextAlign.Center)
+                  .backgroundColor(Palette.fill).borderRadius(12)
+                  .onClick(() => this.confirmSignOut())
+              }
             }.width('100%')
             if (this.loginMessage.length > 0) {
               Text(this.loginMessage).fontSize(12).fontColor(Palette.textSecondary)
                 .maxLines(3).width('100%')
             }
-            Button(this.signedIn ? '退出当前账号' : this.loginBusy ? '等待浏览器授权…' : '登录华为开发者账号')
-              .height(43).backgroundColor(this.signedIn ? Palette.fill : Palette.accent)
-              .fontColor(this.signedIn ? Palette.textSecondary : Palette.onAccent)
-              .borderRadius(14).enabled(!this.loginBusy).width('100%')
-              .onClick(() => { if (this.signedIn) this.signOut(); else this.login(); })
+            if (!this.signedIn) {
+              Button(this.loginBusy ? '等待浏览器授权…' : '登录华为开发者账号')
+                .height(43).backgroundColor(Palette.accent)
+                .fontColor(Palette.onAccent)
+                .borderRadius(14).enabled(!this.loginBusy).width('100%')
+                .onClick(() => this.login())
+            }
           }.alignItems(HorizontalAlign.Start).padding(20)
             .width('100%').backgroundColor(Palette.surface).borderRadius(22)
 
@@ -2489,7 +2648,11 @@ struct Index {
                 .fontSize(14).fontWeight(FontWeight.Medium).fontColor(Palette.text)
                 .layoutWeight(1)
               if (this.deviceConnected) {
-                // 已连接就一行，不再显示 UDID
+                // 已连接就一行，不再显示 UDID；旁边给一个主动释放的出口
+                Button('释放')
+                  .height(34).fontSize(12).fontColor(Palette.textSecondary)
+                  .backgroundColor(Palette.fill).borderRadius(11)
+                  .onClick(() => this.releaseDeviceLink())
               } else if (!this.deviceBusy) {
                 Button('连接')
                   .height(34).fontSize(12).fontColor(Palette.onAccent)
@@ -2497,6 +2660,16 @@ struct Index {
                   .onClick(() => { this.reconnectPort = ''; this.showReconnect = true; })
               }
             }.width('100%')
+            // 设备的无线调试基本只服务一个 HDC 宿主：我们连着不放，
+            // DevEco Studio 和 hdc 命令行就连不上去了。用完点「释放」即可。
+            Text('设备的无线调试同时只服务一个调试宿主。装完应用后点「释放」，' +
+              'DevEco Studio 或 hdc 命令行就能立刻连上；下次安装会自动重连，不用重新配对。')
+              .fontSize(11).fontColor(Palette.textTertiary).lineHeight(17)
+              .width('100%')
+            if (this.deviceMessage.length > 0) {
+              Text(this.deviceMessage).fontSize(11).fontColor(Palette.accent)
+                .width('100%')
+            }
           }.alignItems(HorizontalAlign.Start).padding(18)
             .width('100%').backgroundColor(Palette.surface).borderRadius(22)
 

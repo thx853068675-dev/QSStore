@@ -44,6 +44,9 @@ _rl: dict[str, list[float]] = {}
 RATE_DEFAULT = (120, 60)     # 120 次 / 60 秒
 RATE_SUBMIT = (3, 3600)      # 3 次 / 小时
 RATE_SYNC = (6, 3600)
+# 客户端点「检查更新」会即时重采一个仓库。比 admin 宽一点（用户可能在几个
+# 应用间来回切），但仍按 IP 限流，避免被拿来刷 GitHub 配额。
+RATE_REFRESH = (10, 3600)
 
 
 def _client_ip(handler: BaseHTTPRequestHandler) -> str:
@@ -335,6 +338,32 @@ def h_submit_confirm(body: dict[str, Any], identity: tuple[str, str]) -> dict[st
     return {"app": db.get_app(info["app_id"]), "status": "ok"}
 
 
+def h_refresh_app(app_id: str, ip: str) -> dict[str, Any]:
+    """立刻重采一个应用，把 GitHub 上刚发布的版本拉进来。
+
+    采集器每 HAPSTORE_SYNC_INTERVAL 才跑一轮，所以「刚发的 Release」在客户端
+    要等下一轮才能看见。这个接口让客户端在用户点「检查更新」时即时重采这一个
+    仓库，代价是一次 GitHub 请求；按 IP 限流，避免被拿来刷配额。
+    """
+    if not _rate_ok(f"refresh:{ip}", *RATE_REFRESH):
+        raise ApiError(429, "RATE_LIMITED", "检查过于频繁，请稍后再试")
+    app = db.get_app(int(app_id))
+    if not app or app["status"] != "published":
+        raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
+    repo = str(app.get("repo") or "")
+    if not repo:
+        raise ApiError(422, "NO_REPO", "该应用没有关联仓库，无法检查更新")
+    try:
+        info = collector.sync_app(repo, token=GITHUB_TOKEN)
+    except collector.CollectError as e:
+        # 采集失败不该让界面报错：旧数据仍然可用，只是没有新版本
+        raise ApiError(502, "COLLECT_FAILED", f"暂时无法检查更新：{e}") from e
+    fresh = db.get_app(int(app_id)) or {}
+    return {"app_id": int(app_id), "repo": repo,
+            "latest": fresh.get("latest"), "latest_asset": fresh.get("latest_asset"),
+            "releases": info.get("releases", 0)}
+
+
 def h_my_apps(identity: tuple[str, str]) -> dict[str, Any]:
     return {"items": db.list_published_by_account(identity[0])}
 
@@ -392,6 +421,7 @@ router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/releases/(?P<tag>[^/]+)", h_app
 router.add("GET", r"/api/v1/healthz", lambda q: {"ok": True, "stage": "M1"})
 router.add("POST", r"/api/v1/submit/prepare", "SUBMIT_PREPARE")
 router.add("POST", r"/api/v1/submit/confirm", "SUBMIT_CONFIRM")
+router.add("POST", r"/api/v1/apps/(?P<app_id>\d+)/refresh", "APP_REFRESH")
 router.add("GET", r"/api/v1/me/apps", "MY_APPS")
 router.add("DELETE", r"/api/v1/me/apps/(?P<app_id>\d+)", "MY_APP_DELETE")
 router.add("GET", r"/api/v1/signing-identity", "IDENTITY_GET")
@@ -518,6 +548,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(h_submit_prepare(self._read_body(), ip, self._identity()))
             elif fn == "SUBMIT_CONFIRM":
                 self._json(h_submit_confirm(self._read_body(), self._identity()))
+            elif fn == "APP_REFRESH":
+                self._json(h_refresh_app(params["app_id"], ip))
             elif fn == "MY_APPS":
                 self._json(h_my_apps(self._identity()))
             elif fn == "MY_APP_DELETE":

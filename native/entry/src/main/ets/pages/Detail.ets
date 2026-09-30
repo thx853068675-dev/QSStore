@@ -94,6 +94,8 @@ struct Detail {
   syncPalette(): void {
     // 主题一变，之前按旧主题算出的底色就不再合适，重新推导一次
     this.refreshHeroColor();
+    // Canvas 不会随组件属性更新自动重画，下载时切换主题也要同步进度填充色。
+    if (this.downloadBusy) this.paintInstallButton();
   }
 
   private refreshHeroColor(): void {

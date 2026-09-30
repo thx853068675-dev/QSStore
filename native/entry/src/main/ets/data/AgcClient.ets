@@ -33,7 +33,7 @@ export class AgcClient {
     const request = http.createHttp();
     const verb = method ?? (body ? http.RequestMethod.POST : http.RequestMethod.GET);
     try {
-      const response = await request.request(AGC_API + path, {
+      const options: http.HttpRequestOptions = {
         method: verb,
         header: {
           'oauth2Token': this.account.accessToken,
@@ -41,11 +41,13 @@ export class AgcClient {
           'uid': this.account.userId,
           'Content-Type': 'application/json'
         },
-        extraData: body ? JSON.stringify(body) : '',
         connectTimeout: 8000,
         readTimeout: 15000,
         maxLimit: 1024 * 1024
-      });
+      };
+      // HarmonyOS rejects extraData: '' before a bodyless GET reaches AGC.
+      if (body) options.extraData = JSON.stringify(body);
+      const response = await request.request(AGC_API + path, options);
       if (response.responseCode !== 200 || typeof response.result !== 'string') {
         throw new Error('AGC 暂时无法完成请求');
       }

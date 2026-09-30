@@ -1,7 +1,9 @@
+import { InstallTaskState } from './InstallTaskState';
 import { common } from '@kit.AbilityKit';
 import { DownloadJobs } from './DownloadJobs';
 import { InstallJob } from './InstallJob';
 import { JobStore } from './JobStore';
+import { JobCancellation } from './JobCancellation';
 
 /**
  * 同一安装任务的唯一互斥点。
@@ -15,6 +17,27 @@ import { JobStore } from './JobStore';
  */
 export class JobScheduler {
   private static inFlight: Set<string> = new Set<string>();
+  /** 已超时、但旧执行仍在后台收尾的任务。这些任务的锁还没放。 */
+  private static timedOut: Set<string> = new Set<string>();
+  private static cleanup: Map<string, () => Promise<void>> = new Map();
+  private static cancelWaiters: Map<string, () => void> = new Map();
+
+  static async cancel(context: common.UIAbilityContext, store: JobStore, job: InstallJob): Promise<void> {
+    const running = JobScheduler.isRunning(job.id);
+    const marking = store.cancel(job);
+    const clean = async (): Promise<void> => {
+      await marking;
+      await store.cleanupCancelled(context, job.id);
+    };
+    if (running) JobScheduler.cleanup.set(job.id, clean);
+    await marking;
+    JobScheduler.cancelWaiters.get(job.id)?.();
+    await store.stopTransfer(context, job);
+    if (!running) {
+      await clean();
+      JobCancellation.clear(job.id);
+    }
+  }
 
   /**
    * 单个任务的墙钟上限。
@@ -27,9 +50,27 @@ export class JobScheduler {
   private static readonly DEFAULT_TIMEOUT_MS: number = 4 * 60 * 1000;
   /** 下载大包要更宽裕：4 分钟对慢网的大 HAP 不够。 */
   static readonly DOWNLOAD_TIMEOUT_MS: number = 12 * 60 * 1000;
+  /**
+   * 「签名 + 安装到设备」这一段的上限。
+   *
+   * **必须大于底层 `hdc install` 自己的预算（300 秒）**，否则外层先放弃：连接被
+   * 丢掉之后，设备上即使装成功了也收不到结果，用户只看到超时。自己更新自己时
+   * 设备要先停掉旧进程，这一步本来就更慢。
+   */
+  static readonly INSTALL_TIMEOUT_MS: number = 6 * 60 * 1000;
 
   static isRunning(jobId: string): boolean {
     return JobScheduler.inFlight.has(jobId);
+  }
+
+  /**
+   * 任务是否已经超时但仍在收尾。
+   *
+   * 界面用它在超时提示上补一句「本次仍在收尾」——否则用户会以为可以立刻重试，
+   * 点了却收到「正在执行」，看起来像卡住了。
+   */
+  static stillFinishing(jobId: string): boolean {
+    return JobScheduler.timedOut.has(jobId);
   }
 
   /** 正在执行的任务 ID，供界面显示（同一时刻通常只有一个）。 */
@@ -37,41 +78,45 @@ export class JobScheduler {
     return Array.from(JobScheduler.inFlight);
   }
 
-  /**
-   * 独占执行 body。已有同 ID 任务在跑时直接抛错，不排队：排队会让第二次调用在第一次
-   * 结束后重跑整条流水线，等于重复安装。
-   *
-   * body 超时后调用方会收到失败，但 body 本身可能还在后台挂着（JS 里取消不掉一个
-   * 已经发出去的底层调用）。那时它若再抛错就无人接收，所以先声明成已结束把它吞掉。
-   */
+  /** 超时结束界面等待；互斥一直保留到实际执行退出。 */
   static async runExclusive<T>(jobId: string, body: () => Promise<T>,
     timeoutMs: number = JobScheduler.DEFAULT_TIMEOUT_MS): Promise<T> {
     if (JobScheduler.inFlight.has(jobId)) {
-      throw new Error('该安装任务正在执行，未重复启动');
+      throw new Error(JobScheduler.stillFinishing(jobId) ?
+        '上一次执行仍在收尾，请稍候再试' : '该安装任务正在执行，未重复启动');
     }
     JobScheduler.inFlight.add(jobId);
-    let finished = false;
-    try {
-      const work = body().then((value: T) => {
-        if (!finished) return value;
-        return new Promise<T>(() => {});
-      }, (error: Object) => {
-        // ArkTS 只允许抛 Error 实例，原始错误转成文案再抛
-        if (!finished) throw new Error(String(error));
-        return new Promise<T>(() => {});
-      });
-      const timeout = new Promise<T>((_resolve, reject) => {
-        setTimeout(() => {
-          if (finished) return;
-          finished = true;
-          reject(new Error('等待设备响应超时：请确认设备已连接无线调试，然后重试'));
-        }, timeoutMs);
-      });
-      return await Promise.race([work, timeout]);
-    } finally {
-      finished = true;
+    InstallTaskState.setRunning(jobId, true);
+    let timer: number = -1;
+    // 放在微任务内调用，同步抛错也会经过 finally，避免留下永久锁。
+    const work = Promise.resolve().then(() => {
+      JobCancellation.assertActive(jobId);
+      return body();
+    }).finally(async () => {
+      if (timer >= 0) clearTimeout(timer);
+      const clean = JobScheduler.cleanup.get(jobId);
+      if (clean !== undefined) {
+        try { await clean(); } catch (_) {}
+        JobScheduler.cleanup.delete(jobId);
+      }
       JobScheduler.inFlight.delete(jobId);
-    }
+      JobScheduler.timedOut.delete(jobId);
+      JobScheduler.cancelWaiters.delete(jobId);
+      JobCancellation.clear(jobId);
+      InstallTaskState.setRunning(jobId, false);
+    });
+    const timeout = new Promise<T>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        if (JobCancellation.isCancelled(jobId)) return;
+        JobScheduler.timedOut.add(jobId);
+        InstallTaskState.setRunning(jobId, true, true);
+        reject(new Error('等待设备响应超时，本次执行仍在收尾，请勿重复安装'));
+      }, timeoutMs);
+    });
+    const cancelled = new Promise<T>((_resolve, reject) => {
+      JobScheduler.cancelWaiters.set(jobId, () => reject(new Error('安装任务已取消')));
+    });
+    return Promise.race([work, timeout, cancelled]);
   }
 
   /** 只跑下载与包解析这一段流水线，供已有的独立下载入口使用。 */
@@ -80,5 +125,15 @@ export class JobScheduler {
     return JobScheduler.runExclusive(job.id, () =>
       DownloadJobs.runLocked(context, store, job, onProgress),
     JobScheduler.DOWNLOAD_TIMEOUT_MS);
+  }
+
+  /**
+   * 跑完整的「签名 + 安装」流水线。
+   *
+   * 单独开一个入口是为了用 [INSTALL_TIMEOUT_MS]：默认的 4 分钟小于底层 `hdc install`
+   * 自己的 5 分钟预算，会出现「外层已超时、底层还在装」的错位。
+   */
+  static runInstall<T>(jobId: string, body: () => Promise<T>): Promise<T> {
+    return JobScheduler.runExclusive(jobId, body, JobScheduler.INSTALL_TIMEOUT_MS);
   }
 }

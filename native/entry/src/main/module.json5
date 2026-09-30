@@ -27,7 +27,16 @@
       }
     ],
     "requestPermissions": [
-      { "name": "ohos.permission.INTERNET" }
+      { "name": "ohos.permission.INTERNET" },
+      {
+        // 查询本机已安装版本。SDK 声明（@ohos.bundle.bundleManager.d.ts:1389）：
+        //   @permission ohos.permission.GET_BUNDLE_INFO_PRIVILEGED
+        //               or ohos.permission.GET_BUNDLE_INFO
+        // PRIVILEGED 是系统级权限，普通应用拿不到；GET_BUNDLE_INFO 是开放权限
+        // （system_grant，装上即授予）。不声明它时查询抛 201，而 201 过去被
+        // 当成「没装」——外部安装的应用识别不到，有安装记录的一直显示「更新」。
+        "name": "ohos.permission.GET_BUNDLE_INFO"
+      }
     ]
   }
 }

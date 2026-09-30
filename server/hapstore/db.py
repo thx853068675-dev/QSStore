@@ -12,6 +12,7 @@ SQLite 连接用 thread-local 持有，写入统一走短事务 + WAL。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS app (
 CREATE TABLE IF NOT EXISTS app_icon (
     app_id INTEGER PRIMARY KEY REFERENCES app(id) ON DELETE CASCADE,
     mime TEXT NOT NULL,
-    data BLOB NOT NULL
+    data BLOB NOT NULL,
+    digest TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS publisher (
@@ -82,7 +84,8 @@ CREATE TABLE IF NOT EXISTS signing_identity (
     account_id TEXT PRIMARY KEY,
     cert_id TEXT NOT NULL,
     nonce BLOB NOT NULL,
-    ciphertext BLOB NOT NULL
+    ciphertext BLOB NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1
 );
 
 
@@ -136,6 +139,11 @@ CREATE TABLE IF NOT EXISTS app_selection (
     app_id INTEGER PRIMARY KEY REFERENCES app(id) ON DELETE CASCADE,
     asset_name TEXT NOT NULL,
     bundle_name TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS app_category (
+    app_id INTEGER PRIMARY KEY REFERENCES app(id) ON DELETE CASCADE,
+    category TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS report (
@@ -192,6 +200,15 @@ def init_db() -> None:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         conn = connect()
         conn.executescript(SCHEMA)
+        if 'digest' not in {row['name'] for row in conn.execute('PRAGMA table_info(app_icon)')}:
+            conn.execute("ALTER TABLE app_icon ADD COLUMN digest TEXT NOT NULL DEFAULT ''")
+        for row in list(conn.execute("SELECT app_id,data FROM app_icon WHERE digest=''")):
+            conn.execute("UPDATE app_icon SET digest=? WHERE app_id=?",
+                         (hashlib.sha256(row['data']).hexdigest()[:16], row['app_id']))
+        if 'revision' not in {row['name'] for row in conn.execute(
+            'PRAGMA table_info(signing_identity)'
+        )}:
+            conn.execute('ALTER TABLE signing_identity ADD COLUMN revision INTEGER NOT NULL DEFAULT 1')
         # SQLite cannot drop a table-level UNIQUE constraint in place. Preserve
         # existing comments while changing the model to one row per submission.
         review_sql = conn.execute(
@@ -223,6 +240,7 @@ def init_db() -> None:
 
 
 def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True) -> dict[str, Any]:
+    icon = connect().execute("SELECT digest FROM app_icon WHERE app_id=?", (row['id'],)).fetchone()
     app = {
         "id": row["id"],
         "repo": row["repo_full_name"],
@@ -231,7 +249,8 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True) -> dict[str, Any]
         "display_name": row["display_name"] or row["name"],
         "summary": row["summary"],
         "description": row["description"],
-        "icon_url": f"/api/v1/apps/{row['id']}/icon" if row["icon_url"] or has_app_icon(row["id"]) else "",
+        "icon_url": f"/api/v1/apps/{row['id']}/icon" if icon else "",
+        "icon_rev": icon['digest'] if icon else "",
         "category": row["category"],
         "tags": json.loads(row["tags_json"] or "[]"),
         "stars": row["stars"],
@@ -251,11 +270,11 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True) -> dict[str, Any]
     if with_counts:
         c = connect()
         n = c.execute(
-            "SELECT COUNT(*) AS n FROM release WHERE app_id=?", (row["id"],)
+            "SELECT COUNT(*) AS n FROM release WHERE app_id=? AND prerelease=0", (row["id"],)
         ).fetchone()["n"]
         latest = c.execute(
             """SELECT tag, name, published_at, prerelease FROM release
-               WHERE app_id=? ORDER BY published_at DESC LIMIT 1""",
+               WHERE app_id=? AND prerelease=0 ORDER BY published_at DESC LIMIT 1""",
             (row["id"],),
         ).fetchone()
         app["releases_count"] = n
@@ -274,7 +293,7 @@ def latest_asset(c: sqlite3.Connection, app_id: int) -> dict[str, Any] | None:
     """
     row = c.execute(
         """SELECT a.* FROM asset a JOIN release r ON r.id = a.release_id
-           WHERE r.app_id=? AND a.bundle_name <> ''
+           WHERE r.app_id=? AND r.prerelease=0 AND a.bundle_name <> ''
            ORDER BY r.published_at DESC, a.size DESC LIMIT 1""",
         (app_id,),
     ).fetchone()
@@ -362,8 +381,37 @@ def hide_published_app(app_id: int, account_id: str) -> bool:
     return cur.rowcount == 1
 
 
+def set_app_category(app_id: int, category: str) -> None:
+    """用户选定的分类保留在独立表中，不被 GitHub 自动分类覆盖。"""
+    c = connect()
+    c.execute("INSERT OR REPLACE INTO app_category (app_id,category) VALUES (?,?)",
+              (app_id, category))
+    c.execute("UPDATE app SET category=?, updated_at=? WHERE id=?",
+              (category, int(time.time()), app_id))
+    c.commit()
+
+
+def get_app_category(app_id: int) -> str:
+    row = connect().execute("SELECT category FROM app_category WHERE app_id=?", (app_id,)).fetchone()
+    return row["category"] if row else ""
+
+
+def configure_published_app(app_id: int, account_id: str, category: str) -> bool:
+    c = connect()
+    with c:
+        cur = c.execute(
+            """UPDATE app SET category=?, updated_at=? WHERE id=? AND status='published'
+               AND EXISTS (SELECT 1 FROM publisher WHERE publisher.app_id=app.id
+               AND publisher.account_id=?)""", (category, int(time.time()), app_id, account_id))
+        if cur.rowcount != 1:
+            return False
+        c.execute("INSERT OR REPLACE INTO app_category (app_id,category) VALUES (?,?)",
+                  (app_id, category))
+    return True
+
+
 def list_releases(app_id: int, *, page: int = 1, page_size: int = 20,
-                  include_prerelease: bool = True) -> dict[str, Any]:
+                  include_prerelease: bool = False) -> dict[str, Any]:
     c = connect()
     where = ["app_id=?"]
     params: list[Any] = [app_id]
@@ -458,7 +506,14 @@ def put_app_icon(app_id: int, mime: str, data: bytes) -> None:
     if mime not in ("image/png", "image/jpeg", "image/webp") or not data or len(data) > 1024 * 1024:
         raise ValueError("invalid app icon")
     c = connect()
-    c.execute("INSERT OR REPLACE INTO app_icon(app_id,mime,data) VALUES (?,?,?)", (app_id, mime, data))
+    c.execute("INSERT OR REPLACE INTO app_icon(app_id,mime,data,digest) VALUES (?,?,?,?)",
+              (app_id, mime, data, hashlib.sha256(data).hexdigest()[:16]))
+    c.commit()
+
+
+def delete_app_icon(app_id: int) -> None:
+    c = connect()
+    c.execute("DELETE FROM app_icon WHERE app_id=?", (app_id,))
     c.commit()
 
 
@@ -641,11 +696,19 @@ _APP_COLUMNS = {
 
 
 def replace_releases(app_id: int, releases: Iterable[dict[str, Any]]) -> int:
-    """用采集结果替换该应用的全部 release/asset。返回写入的 release 数。"""
+    """用采集结果替换该应用的全部 release/asset。返回写入的 release 数。
+
+    **「替换」必须包含删除。** 上游把 Release 或 tag 删掉之后，采集结果里就不再
+    有它；如果这里只做 upsert，那条记录会永远留在库里，客户端刷新多少次都还能
+    看到 —— 用户在 GitHub 删掉的版本，商店里仍然列着。所以末尾要裁掉本次没出现
+    的 release（asset 由外键级联删除，`PRAGMA foreign_keys = ON` 已开启）。
+    """
     c = connect()
     now = int(time.time())
     count = 0
+    tags: list[str] = []
     for rel in releases:
+        tags.append(rel["tag"])
         c.execute(
             """INSERT INTO release(app_id, tag, name, body, published_at,
                                    prerelease, html_url, etag, fetched_at)
@@ -692,6 +755,13 @@ def replace_releases(app_id: int, releases: Iterable[dict[str, Any]]) -> int:
                 ),
             )
         count += 1
+    # 裁掉本次采集里已经不存在的 release（上游删了 tag / Release）。
+    # 采集到的列表为空时**不删**：那更可能是抓取失败或限流，而不是作者把
+    # 所有版本都撤了 —— 一次网络抖动就清空版本历史是不可接受的。
+    if tags:
+        placeholders = ",".join("?" for _ in tags)
+        c.execute(f"DELETE FROM release WHERE app_id=? AND tag NOT IN ({placeholders})",
+                  [app_id, *tags])
     c.commit()
     return count
 
@@ -708,6 +778,22 @@ def set_meta(key: str, value: str) -> None:
 def get_meta(key: str, default: str = "") -> str:
     row = connect().execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
     return row["v"] if row else default
+
+
+def stale_published_apps(max_age_seconds: int, limit: int = 50) -> list[dict[str, Any]]:
+    """已经「不新鲜」的已发布应用，字段与 `get_app` 一致。
+
+    与 `apps_needing_sync` 的区别是这里走 `_row_to_app`：采集器只需要
+    `repo_full_name`，而接口层要的是 `repo` 这类对外字段。直接用原始 Row 会拿到
+    `repo_full_name`，调用方按 `repo` 取就会得到空值 —— 静默什么都没做。
+    """
+    cutoff = int(time.time()) - max_age_seconds
+    rows = connect().execute(
+        """SELECT * FROM app WHERE status='published' AND synced_at < ?
+           ORDER BY synced_at ASC LIMIT ?""",
+        (cutoff, limit),
+    ).fetchall()
+    return [_row_to_app(row, with_counts=False) for row in rows]
 
 
 def apps_needing_sync(limit: int = 50, max_age_seconds: int = 6 * 3600) -> list[dict[str, Any]]:

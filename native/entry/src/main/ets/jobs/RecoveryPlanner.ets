@@ -6,7 +6,7 @@ export function recoveryStage(job: InstallJob, evidence: RecoveryEvidence): Inst
   if (job.stage === InstallStage.TERMINAL_ERROR) {
     return InstallStage.TERMINAL_ERROR;
   }
-  if (job.bundleName.length > 0 && job.versionCode > 0 &&
+  if (!job.reinstallRequired && job.bundleName.length > 0 && job.versionCode > 0 &&
     evidence.installedVersionCode === job.versionCode) {
     return InstallStage.INSTALLED;
   }
@@ -37,6 +37,7 @@ export function stageForFailure(kind: FailureKind): InstallStage {
     case FailureKind.NETWORK: return InstallStage.WAITING_NETWORK;
     case FailureKind.ACCOUNT: return InstallStage.WAITING_ACCOUNT;
     case FailureKind.DEVICE: return InstallStage.WAITING_DEVICE;
+    case FailureKind.CONFIRMATION: return InstallStage.WAITING_CONFIRMATION;
     case FailureKind.TRANSIENT: return InstallStage.RETRYABLE_ERROR;
     case FailureKind.INTERNAL: return InstallStage.TERMINAL_ERROR;
     case FailureKind.INVALID_PACKAGE: return InstallStage.TERMINAL_ERROR;

@@ -43,6 +43,15 @@ export class Palette {
   static get accent(): string { return Palette.pick('#2463E9', '#6FA0FF'); }
   /** 压在主色实底上的前景 */
   static get onAccent(): string { return Palette.pick('#FFFFFF', '#08111F'); }
+  /**
+   * 主色实底上的次级文字（摘要、星数这类小字）。
+   *
+   * 不能直接用 `borderStrong`：那是给浅色卡片画描边用的浅蓝，压在主色底上只有
+   * 3.6:1，12px 的小字读起来发虚。这里用带透明度的前景色，既压得住又比正文弱。
+   */
+  static get onAccentSecondary(): string { return Palette.pick('#EBFFFFFF', '#B308111F'); }
+  /** 主色实底上更弱的文字（角标、计数）。 */
+  static get onAccentTertiary(): string { return Palette.pick('#BFFFFFFF', '#9908111F'); }
 
   /** 描边 / 分隔线 */
   static get border(): string { return Palette.pick('#EEF1F6', '#26344A'); }

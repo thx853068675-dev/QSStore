@@ -1,9 +1,9 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
-import { keyMatchesCertificate } from 'libhap_core.so';
+import { certificateFingerprint, keyMatchesCertificate } from 'libhap_core.so';
 import { DeveloperAccount } from './DeveloperAccount';
-import { StoreClient } from './StoreClient';
+import { BackedUpIdentity, StoreClient } from './StoreClient';
 import { AgcClient } from './AgcClient';
 import { DeviceIdentity, DeviceKeyMaterial } from './DeviceIdentity';
 
@@ -38,21 +38,23 @@ export class EnrollmentOptions {
    * 默认 false：先让用户确认，避免一次误点占掉团队最后一个槽位。
    */
   allowLastSlot: boolean = false;
+  /** 用户主动续期时，跳过此时间之前到期的证书。 */
+  renewBeforeSeconds: number = 0;
 }
 
-// Restores only a certificate already issued to this account. This code has
-// deliberately no cert/add or cert/delete request: login cannot use a slot.
+// Login restores existing material. Only explicit enrollment may issue a certificate.
 export class SigningIdentityRecovery {
+  private static deletingCert: string = '';
   private static materialDir(context: common.UIAbilityContext): string {
     const dir = context.filesDir + '/signing-identity';
     if (!fileIo.accessSync(dir)) fileIo.mkdirSync(dir, true);
     return dir;
   }
 
-  /// `mode` 默认仅属主可读写（0o600）：私钥与证书都属于敏感材料。
-  static writeFile(path: string, bytes: ArrayBuffer | string, mode: number = 0o600): void {
+  /// 材料仅写入应用沙箱；openSync 的第二参数是打开标志，不是 Unix 权限。
+  static writeFile(path: string, bytes: ArrayBuffer | string): void {
     const file = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY |
-      fileIo.OpenMode.TRUNC | mode);
+      fileIo.OpenMode.TRUNC);
     try {
       fileIo.writeSync(file.fd, bytes);
       fileIo.fsyncSync(file.fd);
@@ -62,7 +64,7 @@ export class SigningIdentityRecovery {
   }
 
   static async load(context: common.UIAbilityContext,
-    account: DeveloperAccount): Promise<LocalSigningIdentity | undefined> {
+    account: DeveloperAccount, allowExpired: boolean = false): Promise<LocalSigningIdentity | undefined> {
     const store = await preferences.getPreferences(context, INDEX_NAME);
     const raw = await store.get('identity', '') as string;
     if (raw.length === 0) return undefined;
@@ -75,18 +77,137 @@ export class SigningIdentityRecovery {
       identity.certificatePath = String(row['certificatePath'] ?? '');
       const name = String(row['certName'] ?? '');
       identity.certName = /^[A-Za-z0-9._-]{1,64}$/.test(name) ? name : '';
+      // 删除请求发出前先标记该证书；即使进程在 AGC 已删除、清理本机材料前
+      // 退出，也不能把仍在沙箱里的旧证书当作有效身份继续签名。
+      const marker = await store.get('deleting-cert', '') as string;
+      const identityKey = identity.accountId + ':' + identity.certId;
+      if (marker === 'pending:' + identityKey || marker === 'deleted:' + identityKey) {
+        return undefined;
+      }
       const expiry = Number(row['certExpiry'] ?? 0);
       identity.certExpiry = Number.isFinite(expiry) && expiry > 0 ? Math.floor(expiry) : 0;
       const dir = SigningIdentityRecovery.materialDir(context) + '/';
       if (identity.accountId !== account.userId || !/^\d{1,64}$/.test(identity.certId) ||
-        !identity.privateKeyPath.startsWith(dir) || !identity.certificatePath.startsWith(dir) ||
+        identity.privateKeyPath !== dir + 'identity.pem' || identity.certificatePath !== dir + 'identity.cer' ||
         !fileIo.accessSync(identity.privateKeyPath) ||
         !fileIo.accessSync(identity.certificatePath)) return undefined;
+      // 过期证书不能算「可用身份」：过期后签出来的包设备会拒绝安装。
+      // 返回 undefined 让调用方走正常流程去找同私钥的另一张证书（续期），
+      // 而不是把这张已经没用的证书继续返回给用户。
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      if (!allowExpired && identity.certExpiry > 0 && identity.certExpiry <= nowSeconds) return undefined;
       return keyMatchesCertificate(identity.privateKeyPath, identity.certificatePath) ?
         identity : undefined;
     } catch (_) {
       return undefined;
     }
+  }
+
+  /** 只复用本机保留的私钥；AGC 里有证书但没有对应私钥，不能冒充可覆盖身份。 */
+  static async matchingInstalledCertificate(context: common.UIAbilityContext,
+    account: DeveloperAccount, fingerprint: string): Promise<LocalSigningIdentity | undefined> {
+    if (!/^[0-9A-Fa-f]{64}$/.test(fingerprint)) return undefined;
+    const current = await SigningIdentityRecovery.restore(context, account);
+    if (!current) return undefined;
+    const wanted = fingerprint.toUpperCase();
+    if (certificateFingerprint(current.certificatePath) === wanted) return current;
+    const agc = new AgcClient(account);
+    const rows = await agc.certificates();
+    const dir = SigningIdentityRecovery.materialDir(context);
+    const index = await preferences.getPreferences(context, INDEX_NAME);
+    const deletion = await index.get('deleting-cert', '') as string;
+    let incomplete = false;
+    for (const row of rows) {
+      if (Number(row['certType'] ?? 0) !== 1) continue;
+      const id = String(row['id'] ?? '');
+      if (!/^\d{1,64}$/.test(id) || id === current.certId) continue;
+      if (deletion === 'pending:' + account.userId + ':' + id ||
+        deletion === 'deleted:' + account.userId + ':' + id) continue;
+      const expiry = SigningIdentityRecovery.expirySeconds(row['expireTime']);
+      if (expiry > 0 && expiry <= Date.now() / 1000) continue;
+      const objectId = String(row['certObjectId'] ?? '');
+      if (objectId.length === 0) { incomplete = true; continue; }
+      const target = dir + '/cert-' + id + '.cer';
+      try {
+        // AGC is authoritative for whether a saved certificate still exists.
+        // A cached file is useful only after that check and key-pair validation.
+        if (!fileIo.accessSync(target) || certificateFingerprint(target) !== wanted) {
+          const bytes = await agc.download(await agc.certificateUrl(objectId));
+          const temporary = target + '.' + Date.now() + '-' +
+            Math.floor(Math.random() * 1000000) + '.part';
+          try {
+            SigningIdentityRecovery.writeFile(temporary, bytes);
+            if (certificateFingerprint(temporary) !== wanted) continue;
+            if (!keyMatchesCertificate(current.privateKeyPath, temporary)) return undefined;
+            fileIo.renameSync(temporary, target);
+          } finally {
+            if (fileIo.accessSync(temporary)) fileIo.unlinkSync(temporary);
+          }
+        }
+        if (!keyMatchesCertificate(current.privateKeyPath, target)) return undefined;
+        const matched = new LocalSigningIdentity();
+        matched.accountId = account.userId;
+        matched.certId = id;
+        matched.privateKeyPath = current.privateKeyPath;
+        matched.certificatePath = target;
+        matched.certName = String(row['certName'] ?? '');
+        matched.certExpiry = expiry;
+        return matched;
+      } catch (_) {
+        incomplete = true;
+      }
+    }
+    if (incomplete) throw new Error('部分证书暂时无法核实，已暂停更新以保护应用数据');
+    return undefined;
+  }
+
+  /** 恢复某个任务选定的本机证书，防止全局证书切换后任务用错材料。 */
+  static async forJob(context: common.UIAbilityContext, account: DeveloperAccount,
+    certId: string): Promise<LocalSigningIdentity | undefined> {
+    const current = await SigningIdentityRecovery.load(context, account);
+    if (!current) return undefined;
+    if (certId.length === 0) return current;
+    if (!/^\d{1,64}$/.test(certId)) return undefined;
+    const index = await preferences.getPreferences(context, INDEX_NAME);
+    const deletion = await index.get('deleting-cert', '') as string;
+    if (deletion === 'pending:' + account.userId + ':' + certId ||
+      deletion === 'deleted:' + account.userId + ':' + certId) return undefined;
+    const path = SigningIdentityRecovery.materialDir(context) + '/cert-' + certId + '.cer';
+    if (!fileIo.accessSync(path)) return certId === current.certId ? current : undefined;
+    if (!keyMatchesCertificate(current.privateKeyPath, path)) return undefined;
+    const matched = new LocalSigningIdentity();
+    matched.accountId = account.userId;
+    matched.certId = certId;
+    matched.privateKeyPath = current.privateKeyPath;
+    matched.certificatePath = path;
+    return matched;
+  }
+
+  static async pinForJob(context: common.UIAbilityContext,
+    identity: LocalSigningIdentity): Promise<LocalSigningIdentity> {
+    if (!/^\d{1,64}$/.test(identity.certId)) throw new Error('签名证书编号无效');
+    const path = SigningIdentityRecovery.materialDir(context) + '/cert-' + identity.certId + '.cer';
+    if (identity.certificatePath !== path) {
+      const temporary = path + '.' + Date.now() + '-' +
+        Math.floor(Math.random() * 1000000) + '.part';
+      try {
+        await fileIo.copyFile(identity.certificatePath, temporary);
+        if (!keyMatchesCertificate(identity.privateKeyPath, temporary)) {
+          throw new Error('签名证书与私钥不配对');
+        }
+        fileIo.renameSync(temporary, path);
+      } finally {
+        if (fileIo.accessSync(temporary)) fileIo.unlinkSync(temporary);
+      }
+    }
+    const pinned = new LocalSigningIdentity();
+    pinned.accountId = identity.accountId;
+    pinned.certId = identity.certId;
+    pinned.privateKeyPath = identity.privateKeyPath;
+    pinned.certificatePath = path;
+    pinned.certName = identity.certName;
+    pinned.certExpiry = identity.certExpiry;
+    return pinned;
   }
 
   /**
@@ -97,7 +218,7 @@ export class SigningIdentityRecovery {
    */
   static async activate(context: common.UIAbilityContext, account: DeveloperAccount,
     certId: string): Promise<LocalSigningIdentity> {
-    const current = await SigningIdentityRecovery.load(context, account);
+    const current = await SigningIdentityRecovery.load(context, account, true);
     if (current === undefined) {
       throw new Error('本机还没有可用的私钥，请先完成一次签名身份核对');
     }
@@ -105,6 +226,11 @@ export class SigningIdentityRecovery {
     const cert = (await agc.certificates()).find((item: Record<string, Object>) =>
       String(item['id'] ?? '') === certId && Number(item['certType'] ?? 0) === 1);
     if (cert === undefined) throw new Error('该证书不在当前账号下，或不是调试证书');
+    const expiry = SigningIdentityRecovery.expirySeconds(cert['expireTime']);
+    if (expiry > 0 && expiry <= Date.now() / 1000) throw new Error('该证书已过期');
+    // 切换前确认旧身份的备份版本；失败时保留当前身份。
+    await new StoreClient(context).publishSigningIdentity(current.certId,
+      fileIo.readTextSync(current.privateKeyPath), account);
     const objectId = String(cert['certObjectId'] ?? '');
     if (objectId.length === 0) throw new Error('AGC 未提供该证书的下载位置');
     const bytes = await agc.download(await agc.certificateUrl(objectId));
@@ -149,17 +275,11 @@ export class SigningIdentityRecovery {
     }
   }
 
-  /**
-   * 找一张「能替代 `excludeCertId`」的账号调试证书：与本机私钥配对、未过期。
-   *
-   * 删除证书前必须先拿到这个答案：本机私钥只有一把，删掉在用的证书后若没有
-   * 别的证书能配上它，本机就再也签不出能装上的包，而重新申请会占新槽位。
-   * 返回 undefined 表示没有可用替代，调用方应该拒绝删除。
-   */
+  /** 查找与保留的私钥配对、未过期的替代证书；查询失败时不猜测替代身份。 */
   static async findReplacement(context: common.UIAbilityContext, account: DeveloperAccount,
     excludeCertId: string): Promise<LocalSigningIdentity | undefined> {
-    const current = await SigningIdentityRecovery.load(context, account);
-    if (current === undefined) return undefined;
+    const privateKeyPath = SigningIdentityRecovery.materialDir(context) + '/identity.pem';
+    if (!fileIo.accessSync(privateKeyPath)) return undefined;
     const agc = new AgcClient(account);
     const rows = await agc.certificates();
     const now = Math.floor(Date.now() / 1000);
@@ -174,12 +294,12 @@ export class SigningIdentityRecovery {
       if (objectId.length === 0) continue;
       try {
         const bytes = await agc.download(await agc.certificateUrl(objectId));
-        if (!SigningIdentityRecovery.pairsWithKey(current.privateKeyPath, bytes, dir)) continue;
+        if (!SigningIdentityRecovery.pairsWithKey(privateKeyPath, bytes, dir)) continue;
         const replacement = new LocalSigningIdentity();
         replacement.accountId = account.userId;
         replacement.certId = id;
-        replacement.privateKeyPath = current.privateKeyPath;
-        replacement.certificatePath = current.certificatePath;
+        replacement.privateKeyPath = privateKeyPath;
+        replacement.certificatePath = dir + '/identity.cer';
         replacement.certName = String(row['certName'] ?? '');
         replacement.certExpiry = expiry;
         return replacement;
@@ -190,21 +310,91 @@ export class SigningIdentityRecovery {
     return undefined;
   }
 
-  /** 清掉本机保存的签名身份，下次核对时会重新从账号取回。 */
-  static async reset(context: common.UIAbilityContext): Promise<void> {
-    const dir = SigningIdentityRecovery.materialDir(context);
-    for (const name of ['/identity.pem', '/identity.cer', '/switch.cer']) {
-      const path = dir + name;
-      try {
-        if (fileIo.accessSync(path)) fileIo.unlinkSync(path);
-      } catch (_) {
-        // 单个文件删不掉不阻断重置
+  /** 删除前尽量切到替代证书并备份私钥；最后一张也允许删除。 */
+  static async prepareCertificateDeletion(context: common.UIAbilityContext,
+    account: DeveloperAccount, certId: string): Promise<LocalSigningIdentity | undefined> {
+    let current = await SigningIdentityRecovery.load(context, account, true);
+    if (current !== undefined && current.certId === certId) {
+      const replacement = await SigningIdentityRecovery.findReplacement(context, account, certId);
+      if (replacement !== undefined) {
+        current = await SigningIdentityRecovery.activate(context, account, replacement.certId);
       }
     }
-    const store = await preferences.getPreferences(context, INDEX_NAME);
-    await store.clear();
-    await store.flush();
+    // 上次切换成功但备份失败时，重试也必须重新检查，不能绕过备份直接删除旧证书。
+    if (current !== undefined) {
+      await new StoreClient(context).publishSigningIdentity(current.certId,
+        fileIo.readTextSync(current.privateKeyPath), account);
+    }
+    return current;
   }
+
+  /** AGC 删除前落盘墓碑；只标记正在使用的证书，不影响删除无关证书。 */
+  static async beginCertificateDeletion(context: common.UIAbilityContext,
+    account: DeveloperAccount, certId: string): Promise<void> {
+    const store = await preferences.getPreferences(context, INDEX_NAME);
+    const raw = await store.get('identity', '') as string;
+    if (raw.length === 0) return;
+    let row: Record<string, Object>;
+    try { row = JSON.parse(raw) as Record<string, Object>; }
+    catch (_) { return; }
+    if (row === null || typeof row !== 'object') return;
+    if (String(row['accountId'] ?? '') !== account.userId ||
+      String(row['certId'] ?? '') !== certId) return;
+    await store.put('deleting-cert', 'pending:' + account.userId + ':' + certId);
+    await store.flush();
+    SigningIdentityRecovery.deletingCert = account.userId + ':' + certId;
+  }
+
+  /** AGC 明确拒绝删除时撤销墓碑，本机原证书仍可使用。 */
+  static async cancelCertificateDeletion(context: common.UIAbilityContext,
+    account: DeveloperAccount, certId: string): Promise<void> {
+    const store = await preferences.getPreferences(context, INDEX_NAME);
+    if (await store.get('deleting-cert', '') !==
+      'pending:' + account.userId + ':' + certId) return;
+    await store.put('deleting-cert', '');
+    await store.flush();
+    SigningIdentityRecovery.deletingCert = '';
+  }
+
+  /** AGC 删除成功后忘记旧证书；私钥和云端备份留给下一次申请复用。 */
+  static async finishCertificateDeletion(context: common.UIAbilityContext,
+    account: DeveloperAccount, certId: string): Promise<void> {
+    const store = await preferences.getPreferences(context, INDEX_NAME);
+    const raw = await store.get('identity', '') as string;
+    SigningIdentityRecovery.deletingCert = '';
+    await store.put('deleting-cert', 'deleted:' + account.userId + ':' + certId);
+    await store.flush();
+    if (/^\d{1,64}$/.test(certId)) {
+      const pinned = SigningIdentityRecovery.materialDir(context) + '/cert-' + certId + '.cer';
+      try { if (fileIo.accessSync(pinned)) fileIo.unlinkSync(pinned); } catch (_) {}
+    }
+    if (raw.length === 0) return;
+    let row: Record<string, Object>;
+    try { row = JSON.parse(raw) as Record<string, Object>; }
+    catch (_) { return; }
+    if (row === null || typeof row !== 'object') return;
+    if (String(row['accountId'] ?? '') === account.userId &&
+      String(row['certId'] ?? '') === certId) await store.put('identity', '');
+    await store.flush();
+    if (String(row['accountId'] ?? '') !== account.userId ||
+      String(row['certId'] ?? '') !== certId) return;
+    const certificatePath = SigningIdentityRecovery.materialDir(context) + '/identity.cer';
+    try {
+      if (fileIo.accessSync(certificatePath)) fileIo.unlinkSync(certificatePath);
+    } catch (_) {
+      // 偏好设置与墓碑已经使旧证书不可用；清理文件失败不影响私钥。
+    }
+  }
+
+  /** 先验证云端材料，再原子刷新证书；始终保留本机私钥及失败前的可用材料。 */
+  static async reset(context: common.UIAbilityContext,
+    account: DeveloperAccount): Promise<void> {
+    const restored = await SigningIdentityRecovery.restore(context, account, true);
+    if (restored === undefined) {
+      throw new Error('云端没有可恢复的有效证书，已保留本机私钥和原有材料，请准备签名身份');
+    }
+  }
+
 
   /**
    * 首次签名的入口：保证这台设备有一份可用的签名身份。
@@ -234,46 +424,89 @@ export class SigningIdentityRecovery {
 
   private static async enrollLocked(context: common.UIAbilityContext,
     account: DeveloperAccount, options: EnrollmentOptions): Promise<EnrollmentResult> {
-    const reusable = await SigningIdentityRecovery.restoreAny(context, account);
-    if (reusable) {
+    // 「确认没有身份」和「暂时核实不了」必须分开：后者接着往下走就会申请新证书，
+    // 白占一个团队共享的槽位。所以这里把核实失败直接抛给用户重试。
+    let reusable: LocalSigningIdentity | undefined = undefined;
+    try {
+      reusable = await SigningIdentityRecovery.restore(context, account);
+    } catch (error) {
+      throw new Error('暂时无法核实本机签名身份（' + String(error) +
+        '）。为避免重复占用调试证书槽位，本次不申请新证书，请稍后重试。');
+    }
+    if (reusable && (options.renewBeforeSeconds <= 0 || reusable.certExpiry <= 0 ||
+      reusable.certExpiry > options.renewBeforeSeconds)) {
       const result = new EnrollmentResult();
       result.outcome = EnrollmentOutcome.RESTORED;
       result.identity = reusable;
       return result;
     }
+    if (reusable !== undefined) {
+      // 提前续期前确认旧版本，首次升级到版本化备份的设备也能安全轮换。
+      await new StoreClient(context).publishSigningIdentity(reusable.certId,
+        fileIo.readTextSync(reusable.privateKeyPath), account);
+    }
 
     const dir = SigningIdentityRecovery.materialDir(context);
     const privateKeyPath = dir + '/identity.pem';
 
-    // 私钥在、但没有可用证书：只有当它确实是一把可解析的 P-256 私钥时才继续用，
+    // 私钥在、但没有可用证书：只有当它确实是一把可解析的 EC 私钥时才继续用，
     // 否则重新生成，避免拿一把坏密钥去申请证书白占一个槽位。
     let generated: DeviceKeyMaterial | undefined = undefined;
     if (fileIo.accessSync(privateKeyPath) &&
       !await SigningIdentityRecovery.readablePrivateKey(privateKeyPath)) {
-      fileIo.unlinkSync(privateKeyPath);
+      throw new Error('本机私钥暂无法解析，已保留原文件，本次不申请新证书');
     }
     if (!fileIo.accessSync(privateKeyPath)) {
       generated = await DeviceIdentity.generate();
       // 私钥只对应用本身可读，避免同机其他进程或备份顺走。
-      SigningIdentityRecovery.writeFile(privateKeyPath, generated.privateKeyPem, 0o600);
+      SigningIdentityRecovery.writeFile(privateKeyPath, generated.privateKeyPem);
     }
 
     const agc = new AgcClient(account);
     const rows = await agc.certificates();
     const valid = SigningIdentityRecovery.validDebugCerts(rows);
     const freeSlots = Math.max(0, SigningIdentityRecovery.DEBUG_SLOT_LIMIT - valid.length);
+    const index = await preferences.getPreferences(context, INDEX_NAME);
+    let deletion = await index.get('deleting-cert', '') as string;
+    const pendingPrefix = 'pending:' + account.userId + ':';
+    if (deletion.startsWith(pendingPrefix)) {
+      const pendingId = deletion.substring(pendingPrefix.length);
+      if (rows.some((row: Record<string, Object>) => String(row['id'] ?? '') === pendingId)) {
+        throw new Error('上次证书删除尚未确认，请在证书管理中重新删除后再申请');
+      }
+      await SigningIdentityRecovery.finishCertificateDeletion(context, account, pendingId);
+      deletion = 'deleted:' + account.userId + ':' + pendingId;
+    }
 
     // 先看有没有现成证书能配上这把私钥 —— 配得上就不需要新槽位。
+    //
+    // 关键：**只有「每一张都确实下载并比对过」才能断定配不上。** 某张证书
+    // 因为网络/服务抖动没下下来时，结论是未知，不是没有；此时继续申请新证书
+    // 就会在本来能复用的情况下多占一个槽位。所以记下失败次数，最后据此收口。
+    let undownloaded = 0;
     for (const row of valid) {
+      const expiry = SigningIdentityRecovery.expirySeconds(row['expireTime']);
+      if (options.renewBeforeSeconds > 0 && expiry > 0 && expiry <= options.renewBeforeSeconds) continue;
       const id = String(row['id'] ?? '');
+      if (deletion === 'pending:' + account.userId + ':' + id ||
+        deletion === 'deleted:' + account.userId + ':' + id) continue;
       const objectId = String(row['certObjectId'] ?? '');
-      if (objectId.length === 0) continue;
+      if (objectId.length === 0) { undownloaded++; continue; }
       const downloaded = await SigningIdentityRecovery.tryDownloadCertificate(agc, objectId);
-      if (downloaded === undefined) continue;
+      if (downloaded === undefined) {
+        undownloaded++;
+        continue;
+      }
       if (!SigningIdentityRecovery.pairsWithKey(privateKeyPath, downloaded, dir)) continue;
       return SigningIdentityRecovery.persist(context, account, id, downloaded,
         String(row['certName'] ?? ''), SigningIdentityRecovery.expirySeconds(row['expireTime']),
         EnrollmentOutcome.RESTORED, freeSlots);
+    }
+
+    if (undownloaded > 0) {
+      throw new Error('有 ' + undownloaded +
+        ' 张账号证书暂时下载失败，无法确认本机私钥能否与它们配对。' +
+        '为避免重复占用调试证书槽位，本次不申请新证书，请稍后重试。');
     }
 
     if (freeSlots <= 0) {
@@ -299,20 +532,6 @@ export class SigningIdentityRecovery {
     return SigningIdentityRecovery.persist(context, account, createdId, createdBytes,
       String(created['certName'] ?? certName), SigningIdentityRecovery.expirySeconds(
         created['expireTime']), EnrollmentOutcome.CREATED, freeSlots - 1);
-  }
-
-  /**
-   * 只复用、不申请。任何一步失败都返回 undefined，让调用方决定是否申请新证书。
-   * `restore` 会对云端备份与 AGC 的不一致直接抛错，这里不能那样：首次签名时
-   * 「账号里什么都没有」是正常状态，不是错误。
-   */
-  private static async restoreAny(context: common.UIAbilityContext,
-    account: DeveloperAccount): Promise<LocalSigningIdentity | undefined> {
-    try {
-      return await SigningIdentityRecovery.restore(context, account);
-    } catch (_) {
-      return undefined;
-    }
   }
 
   /// AGC 调试证书槽位上限（团队共享资源，不做自动删除别人的证书）。
@@ -380,8 +599,6 @@ export class SigningIdentityRecovery {
     try {
       SigningIdentityRecovery.writeFile(probe, certificate);
       return keyMatchesCertificate(privateKeyPath, probe);
-    } catch (_) {
-      return false;
     } finally {
       try {
         if (fileIo.accessSync(probe)) fileIo.unlinkSync(probe);
@@ -437,6 +654,7 @@ export class SigningIdentityRecovery {
     }
     const store = await preferences.getPreferences(context, INDEX_NAME);
     await store.put('identity', JSON.stringify(identity));
+    await store.put('deleting-cert', '');
     await store.flush();
     const result = new EnrollmentResult();
     result.outcome = outcome;
@@ -446,28 +664,58 @@ export class SigningIdentityRecovery {
   }
 
   static async restore(context: common.UIAbilityContext,
-    account: DeveloperAccount): Promise<LocalSigningIdentity | undefined> {
-    const current = await SigningIdentityRecovery.load(context, account);
-    if (current) return current;
-    const legacy = await SigningIdentityRecovery.migrateLegacy(context, account);
-    if (legacy) return legacy;
+    account: DeveloperAccount, refresh: boolean = false): Promise<LocalSigningIdentity | undefined> {
+    if (!refresh) {
+      const current = await SigningIdentityRecovery.load(context, account);
+      if (current) return current;
+      const legacy = await SigningIdentityRecovery.migrateLegacy(context, account);
+      if (legacy) return legacy;
+    }
     const backup = await new StoreClient(context).signingIdentity(account);
     if (!backup) return undefined;
+    if (refresh) {
+      const previous = await SigningIdentityRecovery.load(context, account, true);
+      if (previous !== undefined && previous.certId !== backup.certId) {
+        throw new Error('备份证书与本机不同，已保留原身份，请先完成备份同步');
+      }
+    }
     const agc = new AgcClient(account);
     const rows = await agc.certificates();
-    const cert = rows.find((row: Record<string, Object>) =>
+    let cert = rows.find((row: Record<string, Object>) =>
       String(row['id'] ?? '') === backup.certId && Number(row['certType'] ?? 0) === 1);
-    if (!cert) throw new Error('已备份的调试证书不在当前 AGC 账号中；不会申请新证书');
-    const expire = Number(cert['expireTime'] ?? 0);
-    const expirySeconds = expire > 100000000000 ? Math.floor(expire / 1000) : expire;
-    if (expirySeconds > 0 && expirySeconds <= Date.now() / 1000) {
-      throw new Error('已备份的调试证书已过期；不会自动占用新槽位');
+    const index = await preferences.getPreferences(context, INDEX_NAME);
+    const marker = account.userId + ':' + backup.certId;
+    const deletion = await index.get('deleting-cert', '') as string;
+    if (deletion === 'pending:' + marker || deletion === 'deleted:' + marker) {
+      if (SigningIdentityRecovery.deletingCert === marker) {
+        throw new Error('证书正在删除，请稍后再准备签名身份');
+      }
+      // AGC 删除后列表可能短暂返回旧数据。墓碑未清除前不能复活旧证书。
+      cert = undefined;
+    }
+    const dir = SigningIdentityRecovery.materialDir(context);
+    const privateKeyPath = dir + '/identity.pem';
+    if (fileIo.accessSync(privateKeyPath) &&
+      fileIo.readTextSync(privateKeyPath).trim() !== backup.privateKeyPem.trim()) {
+      throw new Error('云端与本机私钥不同，已保留本机材料，未覆盖身份');
+    }
+    const expirySeconds = cert === undefined ? 0 :
+      SigningIdentityRecovery.expirySeconds(cert['expireTime']);
+    if (cert === undefined || (expirySeconds > 0 && expirySeconds <= Date.now() / 1000)) {
+      // 确认失效后保留/恢复原私钥，显式 enroll 才继续查替代证书或申请。
+      await DeviceIdentity.csrFor(backup.privateKeyPem);
+      if (!fileIo.accessSync(privateKeyPath)) {
+        const keyTmp = privateKeyPath + '.restore';
+        SigningIdentityRecovery.writeFile(keyTmp, backup.privateKeyPem);
+        fileIo.renameSync(keyTmp, privateKeyPath);
+      }
+      await new StoreClient(context).rememberSigningIdentity(account, backup);
+      return undefined;
     }
     const objectId = String(cert['certObjectId'] ?? '');
     if (objectId.length === 0) throw new Error('AGC 未提供已有证书的下载位置');
     const url = await agc.certificateUrl(objectId);
     const bytes = await agc.download(url);
-    const dir = SigningIdentityRecovery.materialDir(context);
     const keyTmp = dir + '/identity.pem.restore';
     const certTmp = dir + '/identity.cer.restore';
     const identity = new LocalSigningIdentity();
@@ -488,6 +736,7 @@ export class SigningIdentityRecovery {
       const store = await preferences.getPreferences(context, INDEX_NAME);
       await store.put('identity', JSON.stringify(identity));
       await store.flush();
+      await new StoreClient(context).rememberSigningIdentity(account, backup);
       return identity;
     } finally {
       if (fileIo.accessSync(keyTmp)) fileIo.unlinkSync(keyTmp);

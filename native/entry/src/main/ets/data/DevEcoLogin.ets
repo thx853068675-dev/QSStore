@@ -46,14 +46,15 @@ export class DevEcoLogin {
     allowPlainToken: boolean = false): Promise<Record<string, Object>> {
     const request = http.createHttp();
     try {
-      const response = await request.request(url, {
+      const options: http.HttpRequestOptions = {
         method: method,
         header: headers,
-        extraData: body,
         connectTimeout: 12000,
         readTimeout: 12000,
         maxLimit: 1024 * 1024
-      });
+      };
+      if (body.length > 0) options.extraData = body;
+      const response = await request.request(url, options);
       if (response.responseCode !== 200 || typeof response.result !== 'string') {
         const code = response.responseCode;
         // 5xx / 0 是服务端或网络问题，4xx 才可能是登录态本身有问题

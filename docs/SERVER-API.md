@@ -41,23 +41,19 @@ curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 |---|---|---|
 | GET | `/api/v1/apps` | 列表。支持 `q` `category` `sort` `featured` `page` `page_size` |
 | GET | `/api/v1/apps/{id}` | 详情 |
-| GET | `/api/v1/apps/{id}/releases` | 版本列表（含 asset 与镜像链）。支持 `page` `page_size`（上限 50） |
+| GET | `/api/v1/apps/{id}/releases` | 版本列表（含 asset 与镜像链）。支持 `page` `page_size`（上限 50），默认仅正式版；`prerelease=1` 手动查看预览版 |
 | GET | `/api/v1/apps/{id}/releases/{tag}` | 单版本 |
 | GET | `/api/v1/apps/{id}/icon` | 优先返回 HAP 图标，缺失时 302 跳转至 GitHub 头像 |
 | GET | `/api/v1/apps/{id}/reviews` | 评分与评论列表。支持 `page` `page_size`（上限 50） |
 | POST | `/api/v1/apps/{id}/reviews` | 已验证华为开发者账号新增评分与评论（同账号可多条） |
 | GET | `/api/v1/signing-identity` | 已验证账号取回加密保存的签名身份；无记录时 `identity` 为 `null` |
-| POST | `/api/v1/signing-identity` | 首台设备上传与 AGC 调试证书配对的 P-256 私钥；同账号首次写入生效 |
-| GET | `/api/v1/categories` | 分类统计 |
-| GET | `/api/v1/stats` | 全局统计 |
+| POST | `/api/v1/signing-identity` | 备份 P-256 签名身份；首次写入或携带已确认版本进行 CAS 轮换，冲突返回 409 |
 | POST | `/api/v1/submit/prepare` | 检查 GitHub Release，返回各 HAP 的实际应用名、包名与建议分类；需 Bearer 凭证 |
 | POST | `/api/v1/submit/confirm` | 携带 `draft_token`、`asset_name`、`category` 确认上架；重新核对所选 HAP |
+| GET | `/api/v1/categories` | 获取上架和配置共用的软件分类列表 |
+| POST | `/api/v1/me/apps/{id}/category` | 上架者修改 `category`；需要已验证账号，分类在后续采集中保留 |
 | GET | `/api/v1/me/apps` | 获取当前已验证华为账号上架的公开应用 |
 | DELETE | `/api/v1/me/apps/{id}` | 当前上架者删除应用的公开展示；保留历史数据以便重新上架 |
-| POST | `/api/v1/submit` | 兼容旧版客户端的上架接口 |
-| GET | `/api/v1/submit/{task_id}` | 上架进度 |
-| POST | `/api/v1/apps/{id}/download-event` | 匿名下载计数 |
-| POST | `/api/v1/apps/{id}/report` | 举报 |
 | GET | `/api/v1/admin/sync` | **仅本机** 探测采集通道 |
 | POST | `/api/v1/admin/sync` | **仅本机** 手动触发采集 |
 | POST | `/api/v1/admin/apps/{id}/hide` | **仅本机** 上下架 |
@@ -211,3 +207,19 @@ ssh -i ~/.ssh/ts_hapstore_ed25519 root@47.98.250.230 'systemctl restart hapstore
 | 归属验证 | 设计已定（`.hapstore/verify.txt` + nonce），未实现 |
 | 分类自动识别 | 已按仓库 topics 和简介映射，无法判断时显示「其他」 |
 | HTTPS | 已启用 IP 证书及客户端证书指纹校验 |
+
+## 签名身份备份版本
+
+`GET /api/v1/signing-identity` 的 `identity` 包含 `cert_id`、`private_key_pem` 和
+`revision`（从 1 开始）。旧数据库启动时自动补充 revision，不改动已保存的私钥。
+
+首次 POST 提交 `cert_id`、`private_key_pem`。轮换必须额外提交本机在**切换前已经
+确认并持久保存**的 `replace_cert_id`、`replace_revision`，服务端匹配成功后原子替换并
+递增版本。禁止把冲突响应或临时查询到的最新版本直接用作重试期望值。
+
+成功响应的 data 包含 `synced: true`、`cert_id`、`revision`、`created`、`replaced`。
+相同证书与私钥的重试幂等；未确认版本、旧版本或不同私钥的冲突返回
+`409 IDENTITY_CONFLICT`，客户端保留本机材料及原有期望版本。
+
+部署顺序：先更新服务端，再更新客户端。旧客户端仍能读取与首次备份；不携带 revision
+的旧式轮换会被拒绝，不能覆盖新设备的备份。

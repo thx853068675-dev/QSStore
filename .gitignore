@@ -22,6 +22,9 @@ __pycache__/
 **/.dart_tool/
 **/build/
 native/rust_signer/target/
+# hdc_transport 是独立的 cargo 工程，先前的规则只覆盖了 rust_signer，
+# 结果它的构建产物被 git add -A 带了进来（989 个文件 / 150MB）。
+native/hdc_transport/**/target/
 **/.hvigor/
 **/oh_modules/
 **/.ohpm/
@@ -32,6 +35,9 @@ app/.flutter-plugins*
 app/ohos/har/
 app/ohos/entry/libs/arm64-v8a/libapp.so
 app/plugins/ohos_adapter/example/
+
+# 构建产物：Rust 的 target/ 会到几百 MB，误提交一次就永久留在历史里
+**/target/
 
 # Keep only the final release artifact, added explicitly.
 dist/

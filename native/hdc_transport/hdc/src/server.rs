@@ -2810,6 +2810,14 @@ async fn handle_server_file_recv(
     result
 }
 
+fn app_install_succeeded(status: u8, message: &str) -> bool {
+    // Some daemons put zero in the result byte even when bm prints an error.
+    // Never discard that text or turn an unauthorized/unsigned HAP into success.
+    let text = message.to_ascii_lowercase();
+    status <= 1 && !text.contains("error:") && !text.contains("failed") &&
+        !text.contains("[fail]") && text.contains("install bundle successfully")
+}
+
 async fn handle_server_app_install(
     tcp_map: &TcpMap,
     usb_map: &UsbMap,
@@ -2973,9 +2981,14 @@ async fn install_single_hap(
     let data = concat_pack(&app_check);
     send_to_session(tcp_map, usb_map, session_id, &data).await?;
 
-    // Wait for AppBegin, skipping WakeupSlavetask
+    // Wait for AppBegin, skipping WakeupSlavetask.
+    //
+    // 15 秒对「替换一个正在运行的 App」不够：设备的包管理器要先停掉旧进程才会回
+    // AppBegin。**更新安装器自己**时尤其慢（被替换的正是发起安装的那个进程），
+    // 原来的 15 秒会稳定超时，用户看到「等待 app 响应超时」而其实设备还在装。
+    // 放到 60 秒；后面等安装结果本来就有 120 秒预算，放得下。
     loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(15), rx.recv()).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv()).await {
             Ok(Some(task)) => match task.command {
                 HdcCommand::KernelWakeupSlavetask => {
                     debug!("Received WakeupSlavetask from daemon, ignoring");
@@ -2988,7 +3001,10 @@ async fn install_single_hap(
                 )),
             },
             Ok(None) => return Err(Error::new(ErrorKind::ConnectionAborted, "Response channel closed")),
-            Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout waiting for AppBegin")),
+            Err(_) => return Err(Error::new(
+                ErrorKind::TimedOut,
+                "设备未在 60 秒内开始安装（可能仍在替换正在运行的旧版本，可稍后重试）"
+            )),
         }
     }
     info!("AppBegin received, daemon ready to receive data");
@@ -3036,8 +3052,8 @@ async fn install_single_hap(
                             let mode = task.payload[0];
                             // Official daemon bug: exitStatus is actually a bool result (true=success=1),
                             // but AsyncInstallFinish checks `exitStatus == 0`. So payload[1]=0 means success.
-                            let result = task.payload[1] == 0;
                             let msg = String::from_utf8_lossy(&task.payload[2..]);
+                            let result = app_install_succeeded(task.payload[1], &msg);
                             return (mode, result, msg.to_string());
                         } else {
                             return (0, false, "Invalid AppFinish payload".to_string());
@@ -3062,6 +3078,7 @@ async fn install_single_hap(
     match install_result {
         Ok((mode, result, msg)) => {
             if result {
+                tcp_map.send_channel_message(channel_id, msg.as_bytes()).await?;
                 tcp_map.send_channel_message(channel_id, format!("AppMod finish: {}\r\n", file_name).as_bytes()).await?;
             } else {
                 let mode_str = match mode {
@@ -4719,6 +4736,18 @@ async fn start_usb_session(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn install_result_uses_bm_response_instead_of_ambiguous_status_byte() {
+        for status in [0, 1] {
+            assert!(super::app_install_succeeded(status, "install bundle successfully."));
+            assert!(!super::app_install_succeeded(status,
+                "error: failed to install bundle. code:9568320 error: no signature file."));
+            assert!(!super::app_install_succeeded(status,
+                "error: Failed to install the HAP because the device is unauthorized"));
+            assert!(!super::app_install_succeeded(status, "AppMod finish"));
+            assert!(!super::app_install_succeeded(status, ""));
+        }
+    }
     use super::*;
     use std::io::Write;
     use zip::write::SimpleFileOptions;

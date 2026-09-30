@@ -2,7 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { AssetDownload } from './AssetDownload';
 import { FailureKind, InstallJob, InstallStage } from './InstallJob';
 import { JobStore } from './JobStore';
-import { inspectPackage, PackageInspectError } from './PackageInspector';
+import { checkCatalogIdentity, inspectPackage, PackageInspectError } from './PackageInspector';
 
 export class DownloadJobs {
   /**
@@ -19,6 +19,7 @@ export class DownloadJobs {
       job.stage = InstallStage.VERIFIED;
       await store.save(job);
       const identity = inspectPackage(job.cachePath);
+      checkCatalogIdentity(job.catalogBundleName, job.catalogVersionCode, identity);
       job.bundleName = identity.bundleName;
       job.versionCode = identity.versionCode;
       job.moduleName = identity.moduleName;

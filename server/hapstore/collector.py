@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -37,6 +38,8 @@ import urllib.request
 import zipfile
 from typing import Any, Callable
 from urllib.parse import urlparse
+
+from PIL import Image, UnidentifiedImageError
 
 from . import db
 
@@ -143,7 +146,7 @@ def parse_hap_metadata(path: str) -> dict[str, Any]:
     return out
 
 
-def _resource_string(data: bytes, resource_id: int) -> str:
+def _resource_string(data: bytes, resource_id: int, max_len: int = 100) -> str:
     """Resolve an app label from the bounded RestoolV2 resource index.
 
     The index maps the module's labelId to one or more localized string
@@ -157,12 +160,48 @@ def _resource_string(data: bytes, resource_id: int) -> str:
         return struct.unpack_from("<I", data, pos)[0]
 
     try:
-        if len(data) > 4 * 1024 * 1024 or not data.startswith(b"RestoolV2"):
+        if len(data) > 4 * 1024 * 1024:
             return ""
         if u32(128) != len(data):
             return ""
         key_count = u32(132)
         if key_count > 256:
+            return ""
+        if data.startswith(b"Restool 6."):
+            # Restool 6 uses a compact IDSS table per resource configuration.
+            # Each table maps ID -> entry offset; the entry stores a bounded
+            # UTF-8 value directly after its type and ID fields.
+            pos = 136
+            sections = []
+            for _ in range(key_count):
+                if data[pos:pos + 4] != b"KEYS":
+                    return ""
+                sections.append(u32(pos + 4))
+                config_count = u32(pos + 8)
+                if config_count > 64:
+                    return ""
+                pos += 12 + config_count * 8
+                if pos > len(data):
+                    return ""
+            for section in sections:
+                if data[section:section + 4] != b"IDSS":
+                    continue
+                count = u32(section + 4)
+                if count > 10000 or section + 8 + count * 8 > len(data):
+                    continue
+                for n in range(count):
+                    rid = u32(section + 8 + n * 8)
+                    if rid != resource_id:
+                        continue
+                    offset = u32(section + 12 + n * 8)
+                    if u32(offset + 8) != rid or offset + 14 > len(data):
+                        return ""
+                    size = struct.unpack_from("<H", data, offset + 12)[0]
+                    if size == 0 or size > 512 or offset + 14 + size > len(data):
+                        return ""
+                    return data[offset + 14:offset + 14 + size].rstrip(b"\0").decode("utf-8")[:max_len]
+            return ""
+        if not data.startswith(b"RestoolV2"):
             return ""
         pos = 140
         for _ in range(key_count):
@@ -200,55 +239,153 @@ def _resource_string(data: bytes, resource_id: int) -> str:
                         continue
                     value = data[value_at + 2:value_at + 2 + size].decode("utf-8")
                     if value and config_id == 0:
-                        return value[:100]
+                        return value[:max_len]
                     if value and not fallback:
-                        fallback = value[:100]
+                        fallback = value[:max_len]
                 return fallback
     except (ValueError, UnicodeError, struct.error):
         return ""
     return ""
 
 
-def extract_hap_icon(path: str) -> tuple[str, bytes] | None:
-    """Best-effort icon extraction from a digest-verified HAP.
+def _icon_entry(archive: zipfile.ZipFile, reference: str, index: bytes = b"") -> str:
+    """Resolve a manifest resource reference to its exact ZIP member."""
+    value = reference.strip()
+    if value.startswith("$media:"):
+        value = value[7:]
+    if value.isdecimal() and index:
+        value = _resource_string(index, int(value), 512)
+    if value.startswith("entry/resources/"):
+        value = value[len("entry/"):]
+    if value.startswith("resources/"):
+        return value if "/media/" in value and value in archive.namelist() else ""
+    if not value or "/" in value or "\\" in value or value.startswith("."):
+        return ""
+    base = value.rsplit(".", 1)[0]
+    matches = [name for name in archive.namelist()
+               if name.startswith("resources/") and "/media/" in name and
+               (name.rsplit("/", 1)[-1] == value or
+                name.rsplit("/", 1)[-1].rsplit(".", 1)[0].split("@", 1)[0] == base)]
+    if not matches:
+        return ""
+    return min(matches, key=lambda name: (not name.startswith("resources/base/media/"), name))
 
-    Compiled resource ids differ by build system, so only accept small image
-    entries whose filenames explicitly look like app icons.
+
+def _icon_image(archive: zipfile.ZipFile, name: str) -> tuple[str, bytes, Image.Image] | None:
+    if not name or not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+        return None
+    entry = archive.getinfo(name)
+    if not 100 <= entry.file_size <= 1024 * 1024:
+        return None
+    data = archive.read(entry)
+    try:
+        image = Image.open(io.BytesIO(data))
+        if not (32 <= image.width <= 2048 and 32 <= image.height <= 2048):
+            return None
+        image.load()
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError):
+        return None
+    mime = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}.get(image.format)
+    return (mime, data, image) if mime else None
+
+
+def extract_hap_icon(path: str) -> tuple[str, bytes] | None:
+    """Read the icon declared by module.json, including layered-image resources.
+
+    A filename containing "icon" is not evidence: startWindowIcon is often a
+    transparent 1×1 placeholder and packages contain unrelated toolbar icons.
     """
     try:
         with zipfile.ZipFile(path) as archive:
-            candidates = []
-            for entry in archive.infolist():
-                name = entry.filename.lower()
-                base = name.rsplit("/", 1)[-1]
-                if ("icon" not in base or entry.file_size < 100 or
-                        entry.file_size > 1024 * 1024 or
-                        not base.endswith((".png", ".jpg", ".jpeg", ".webp"))):
-                    continue
-                score = (20 if "app_icon" in base or "appicon" in base else 0)
-                score += 10 if "/media/" in name else 0
-                score += 5 if "foreground" not in base else 0
-                candidates.append((score, entry))
-            for _, entry in sorted(candidates, key=lambda item: item[0], reverse=True):
-                data = archive.read(entry)
-                if data.startswith(b"\x89PNG\r\n\x1a\n"):
-                    return "image/png", data
-                if data.startswith(b"\xff\xd8\xff"):
-                    return "image/jpeg", data
-                if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-                    return "image/webp", data
-    except (OSError, zipfile.BadZipFile, RuntimeError):
-        pass
-    return None
+            module = archive.getinfo("module.json")
+            if module.file_size > 1024 * 1024:
+                return None
+            app = (json.loads(archive.read(module)).get("app") or {})
+            reference = app.get("icon") or ""
+            if isinstance(reference, dict):
+                reference = reference.get("name") or ""
+            if not isinstance(reference, str):
+                return None
+            index = b""
+            if "resources.index" in archive.namelist():
+                entry = archive.getinfo("resources.index")
+                if entry.file_size <= 4 * 1024 * 1024:
+                    index = archive.read(entry)
+            # The compiled iconId identifies the exact resource even if a
+            # localized/configuration-specific source renamed its file.
+            icon_id = app.get("iconId")
+            resolved = _icon_entry(archive, str(icon_id), index) if type(icon_id) is int else ""
+            name = resolved or _icon_entry(archive, reference, index)
+            if name.endswith(".json"):
+                entry = archive.getinfo(name)
+                if entry.file_size > 16 * 1024:
+                    return None
+                layers = (json.loads(archive.read(entry)).get("layered-image") or {})
+                background = _icon_image(archive, _icon_entry(archive, str(layers.get("background") or ""), index))
+                foreground = _icon_image(archive, _icon_entry(archive, str(layers.get("foreground") or ""), index))
+                if not background or not foreground or background[2].size != foreground[2].size:
+                    return None
+                composed = Image.alpha_composite(background[2].convert("RGBA"), foreground[2].convert("RGBA"))
+                output = io.BytesIO()
+                composed.save(output, format="PNG", optimize=True)
+                data = output.getvalue()
+                return ("image/png", data) if len(data) <= 1024 * 1024 else None
+            image = _icon_image(archive, name)
+            return (image[0], image[1]) if image else None
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+        return None
 
 
 _CATEGORY_KEYWORDS = (
     ("游戏", ("game", "gaming", "游戏")),
-    ("开发工具", ("developer", "development", "ide", "编程", "开发")),
-    ("影音", ("music", "audio", "video", "player", "media", "音乐", "视频")),
-    ("效率", ("productivity", "notes", "todo", "calendar", "笔记", "效率")),
-    ("系统工具", ("system", "launcher", "settings", "系统")),
+    # 顺序即优先级：`classify_repo` 先命中先返回，所以更具体的类型排在更泛的
+    # 前面（「阅读」先于「工具」，「影音」先于「工具」）。每个词都在上架的
+    # SUBMIT_CATEGORIES 白名单里，命中后可以直接提交，不需要用户改。
+    ("社交通讯", ("chat", "messenger", "social", "mail", "email",
+                  "聊天", "社交", "通讯", "邮件", "短信")),
+    ("影音", ("music", "audio", "video", "player", "media", "podcast", "radio",
+              "音乐", "音频", "视频", "播放", "影视", "播客", "电台")),
+    ("摄影录像", ("camera", "photo", "gallery", "picture", "scan",
+                  "相机", "摄影", "拍照", "相册", "图片", "扫描")),
+    ("阅读", ("reader", "reading", "ebook", "book", "novel", "comic", "rss",
+              "阅读", "电子书", "小说", "漫画")),
+    ("新闻资讯", ("news", "feed", "资讯", "新闻", "头条")),
+    ("开发工具", ("developer", "development", "ide", "sdk", "debug", "compiler",
+                  "git", "api", "编程", "开发", "调试", "编译")),
+    ("办公", ("office", "document", "spreadsheet", "slides", "pdf", "wps",
+              "办公", "文档", "表格", "演示", "幻灯片")),
+    ("学习", ("learn", "learning", "study", "course", "exam", "dictionary", "language",
+              "tutor", "quiz", "学习", "课程", "考试", "词典", "背单词", "题库")),
+    ("效率", ("productivity", "notes", "todo", "task", "calendar", "reminder", "gtd",
+              "笔记", "待办", "日程", "提醒", "效率", "清单")),
+    ("安全隐私", ("security", "vpn", "password", "encrypt", "privacy", "firewall",
+                  "安全", "加密", "密码", "隐私", "防护")),
+    ("系统工具", ("system", "launcher", "settings", "kernel", "terminal", "shell",
+                  "系统", "启动器", "设置", "终端")),
+    ("出行导航", ("navigation", "transit", "travel", "taxi", "flight", "地图",
+                  "导航", "公交", "出行", "旅行", "打车", "航班")),
+    ("购物", ("shopping", "shop", "ecommerce", "mall", "coupon", "购物", "商城", "优惠")),
+    ("财务", ("finance", "bank", "wallet", "payment", "accounting", "stock", "budget",
+              "财务", "记账", "银行", "钱包", "支付", "股票", "账本")),
+    ("医疗健康", ("medical", "doctor", "hospital", "medicine", "clinic", "symptom",
+                  "医疗", "医生", "医院", "用药", "问诊", "症状")),
+    ("健康运动", ("fitness", "workout", "sport", "health", "sleep", "step",
+                  "健身", "运动", "锻炼", "睡眠", "步数", "跑步", "健康")),
+    ("美食菜谱", ("recipe", "cook", "food", "restaurant", "菜谱", "做饭", "美食", "餐厅")),
+    ("育儿母婴", ("baby", "parenting", "pregnancy", "育儿", "母婴", "宝宝", "孕期")),
+    ("儿童", ("kids", "children", "toy", "儿童", "少儿", "玩具")),
+    ("无障碍", ("accessibility", "blind", "无障碍", "读屏", "视障")),
+    ("政务民生", ("government", "citizen", "政务", "民生", "社保", "公积金")),
+    ("企业应用", ("enterprise", "erp", "crm", "oa", "企业", "商务", "考勤")),
+    ("个性化", ("theme", "wallpaper", "widget", "font", "主题", "壁纸",
+                "小组件", "图标包", "字体")),
+    ("居家生活", ("smart home", "smarthome", "appliance", "家居",
+                  "智能家居", "家电", "生活")),
+    ("实用工具", ("utility", "utilities", "toolbox", "calculator", "converter",
+                  "measure", "工具", "计算器", "换算", "测量")),
+    ("教育", ("education", "school", "university", "教育", "学校", "校园")),
     ("工具", ("utility", "utilities", "tools", "工具")),
+    ("生活", ("life", "lifestyle", "daily", "生活", "日常")),
 )
 
 
@@ -368,7 +505,8 @@ def fetch_app_metadata(repo: str, *, token: str = "") -> dict[str, Any]:
         "license": ((data.get("license") or {}) or {}).get("spdx_id") or "",
         "tags_json": json.dumps(data.get("topics") or [], ensure_ascii=False),
         "category": classify_repo(data.get("topics") or [], data.get("description") or ""),
-        "icon_url": f"https://github.com/{repo.split('/')[0]}.png",
+        # A repository owner's avatar is not the application's icon.
+        "icon_url": "",
     }
 
 
@@ -436,6 +574,7 @@ def enrich_assets_with_hap_metadata(
                     continue
                 meta = parse_hap_metadata(tmp)
                 a.update(meta)
+                a["_icon_checked"] = True
                 icon = extract_hap_icon(tmp)
                 if icon:
                     a["_icon"] = icon
@@ -463,11 +602,29 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
     if with_metadata and releases:
         enrich_assets_with_hap_metadata(releases, token=token, progress=progress)
 
+    # A temporary download failure must not erase metadata already verified
+    # against the same GitHub digest. This also keeps older releases usable:
+    # the normal scan only downloads the first few releases each run.
+    existing_row = db.connect().execute(
+        "SELECT id FROM app WHERE repo_full_name=?", (repo,)
+    ).fetchone()
+    if existing_row:
+        for release in releases:
+            for asset in release.get("assets") or []:
+                if asset.get("bundle_name") or not asset.get("sha256"):
+                    continue
+                previous = db.connect().execute(
+                    """SELECT a.bundle_name,a.version_code,a.version_name,a.min_api
+                       FROM asset a JOIN release r ON r.id=a.release_id
+                       WHERE r.app_id=? AND r.tag=? AND a.name=? AND a.sha256=?""",
+                    (existing_row["id"], release["tag"], asset["name"], asset["sha256"]),
+                ).fetchone()
+                if previous:
+                    for field in ("bundle_name", "version_code", "version_name", "min_api"):
+                        asset[field] = previous[field]
+
     if selection is None:
-        existing = db.connect().execute(
-            "SELECT id FROM app WHERE repo_full_name=?", (repo,)
-        ).fetchone()
-        selection = db.get_app_selection(existing["id"]) if existing else None
+        selection = db.get_app_selection(existing_row["id"]) if existing_row else None
     if selection:
         selected_name = selection["asset_name"]
         selected_bundle = selection.get("bundle_name") or ""
@@ -481,12 +638,20 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
         ):
             raise CollectError("所选 HAP 已从该 GitHub Release 移除，请重新预处理")
         for release in releases:
-            release["assets"] = [a for a in release.get("assets") or []
-                                 if (a.get("bundle_name") == selected_bundle
-                                     if selected_bundle else a["name"] == selected_name)]
+            matching = [a for a in release.get("assets") or []
+                        if (a.get("bundle_name") == selected_bundle
+                            if selected_bundle else a["name"] == selected_name)]
+            # Signed/unsigned or device variants may share a bundle name.
+            # Keep the user's exact choice wherever that filename exists.
+            preferred = [a for a in matching if a["name"] == selected_name]
+            release["assets"] = preferred or matching
 
     app_id = db.upsert_app(repo, sync_error="")
-    selected_label = next((a.get("display_name") for r in releases
+    chosen_category = db.get_app_category(app_id)
+    if chosen_category:
+        meta["category"] = chosen_category
+    presentation_releases = [r for r in releases if not r.get("prerelease")] or releases
+    selected_label = next((a.get("display_name") for r in presentation_releases
                            for a in r.get("assets") or [] if a.get("display_name")), "")
     if not selected_label:
         existing_app = db.get_app(app_id)
@@ -494,12 +659,14 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
     if selected_label:
         meta["display_name"] = selected_label
     n = db.replace_releases(app_id, releases)
-    for release in releases:
-        icon = next((asset["_icon"] for asset in release.get("assets", [])
-                     if "_icon" in asset), None)
+    checked = next((asset for release in presentation_releases for asset in release.get("assets", [])
+                    if asset.get("_icon_checked")), None)
+    if checked:
+        icon = checked.get("_icon")
         if icon:
             db.put_app_icon(app_id, icon[0], icon[1])
-            break
+        else:
+            db.delete_app_icon(app_id)
     db.upsert_app(repo, **meta, synced_at=int(time.time()), sync_error="")
     hap_count = sum(len(r.get("assets") or []) for r in releases)
     return {
@@ -510,10 +677,34 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
     }
 
 
+def sync_max_age_seconds() -> int:
+    """多久没采过的应用算「该重采了」。
+
+    **这是采集新鲜度的真正开关，不是 `HAPSTORE_SYNC_INTERVAL`。** 后台循环按
+    `SYNC_INTERVAL` 唤醒，但每次只采 `apps_needing_sync()` 挑出来的应用，而那个
+    函数原来硬编码 6 小时 —— 于是「每 30 分钟醒一次、却只采超过 6 小时没采的」，
+    改 `SYNC_INTERVAL` 完全没有效果。现在这个阈值可以配。
+
+    取值要和唤醒间隔匹配：阈值明显大于间隔，才会每轮都有活干。
+    """
+    raw = os.environ.get("HAPSTORE_SYNC_MAX_AGE", "")
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            print(f"sync: 忽略无效的 HAPSTORE_SYNC_MAX_AGE={raw!r}", flush=True)
+    # 默认 1 小时。原来写死 6 小时：配合 30 分钟的唤醒间隔，等于「醒两次才轮到
+    # 一个应用重采」，刚发布的版本最坏要等 6 小时才在客户端可见。
+    return 3600
+
+
 def sync_all(*, token: str = "", limit: int = 20,
              progress: Callable[[str], None] | None = None) -> dict[str, Any]:
     """采集需要更新的应用。"""
-    rows = db.apps_needing_sync(limit=limit)
+    rows = db.apps_needing_sync(limit=limit,
+                                max_age_seconds=sync_max_age_seconds())
     ok, failed = 0, 0
     errors: list[str] = []
     for row in rows:

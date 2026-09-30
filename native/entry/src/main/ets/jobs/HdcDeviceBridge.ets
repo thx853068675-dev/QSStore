@@ -1,3 +1,4 @@
+import { InstalledAppRegistry, InstalledSigningIdentity } from './InstalledAppRegistry';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
@@ -7,7 +8,7 @@ import { NativeDeviceBridge } from './NativeJobRuntime';
 // All commands share one in-process Rust HDC host. Serialize install and
 // verification so a second UI action cannot overtake an active transfer.
 export class HdcDeviceBridge implements NativeDeviceBridge {
-  /** 本进程是否建立过设备链路。断开或进程结束即复位。 */
+  /** 仅供界面显示最近的链路状态；不能作为安装前的在线证明。 */
   private static linked: boolean = false;
 
   private static queue: Promise<void> = Promise.resolve();
@@ -24,9 +25,12 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     await previous;
     try {
       const output = await hdcCommand(this.context.filesDir, operation, parameter);
-      // 只要命令真的跑过，服务端就建了到设备的链路
-      if (operation !== 0) HdcDeviceBridge.linked = true;
+      // HDC 返回 [Fail] 时 Promise 仍会 resolve；执行过命令不等于链路可用。
+      if (output.includes('[Fail]')) HdcDeviceBridge.linked = false;
       return output;
+    } catch (error) {
+      HdcDeviceBridge.linked = false;
+      throw new Error(String(error));
     } finally {
       release();
     }
@@ -44,10 +48,11 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
   static releaseDevice(): boolean {
     try {
       const dropped = hdcDisconnect() > 0;
-      HdcDeviceBridge.linked = false;
       return dropped;
     } catch (_) {
       return false;
+    } finally {
+      HdcDeviceBridge.linked = false;
     }
   }
 
@@ -74,41 +79,57 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
 
   private async liveUdid(): Promise<string> {
     const output = await this.command(2);
-    if (output.includes('[Fail]')) return '';
     const match = /\b[0-9a-fA-F]{40,128}\b/.exec(output);
-    return match ? match[0] : '';
+    const udid = !output.includes('[Fail]') && match ? match[0] : '';
+    HdcDeviceBridge.linked = udid.length > 0;
+    return udid;
   }
 
+  /**
+   * 链路是否可用。
+   *
+   * 无线调试端口会在进程仍存活时改变。每次真正需要安装/核对时查询 UDID，
+   * 避免把一次历史成功连接当成当前连接，导致安装失败后反复弹出重连框。
+   * 旧端口自动重连只试一次；完整的配对重试留给用户主动点击连接。
+   */
   async connected(): Promise<boolean> {
     try {
       if ((await this.liveUdid()).length > 0) return true;
       const port = await this.savedPort();
       if (port <= 0) return false;
-      return await this.connect(port, false);
+      return await this.connect(port, false, false);
     } catch (_) {
+      HdcDeviceBridge.linked = false;
       return false;
     }
   }
 
-  async connect(port: number, persist: boolean = true): Promise<boolean> {
+  async connect(port: number, persist: boolean = true,
+    retryTrust: boolean = true): Promise<boolean> {
     if (!Number.isInteger(port) || port < 1024 || port > 65535) {
       throw new Error('请输入无线调试页显示的端口号');
     }
-    for (const host of ['127.0.0.1', 'localhost']) {
-      for (let attempt = 0; attempt < (host === '127.0.0.1' ? 2 : 1); attempt++) {
-        await this.command(1, host + ':' + port);
-        if ((await this.liveUdid()).length > 0) {
-          if (persist) await this.rememberPort(port);
-          return true;
-        }
+    // 端口改变时旧会话仍留在内置 HDC 服务端，先释放才能切换目标。
+    HdcDeviceBridge.releaseDevice();
+    const hosts = retryTrust ? ['127.0.0.1', 'localhost'] : ['127.0.0.1'];
+    for (const host of hosts) {
+      for (let attempt = 0; attempt < (retryTrust && host === '127.0.0.1' ? 2 : 1); attempt++) {
+        try { await this.command(1, host + ':' + port); } catch (_) {}
+        try {
+          if ((await this.liveUdid()).length > 0) {
+            if (persist) await this.rememberPort(port);
+            return true;
+          }
+        } catch (_) {}
         // A first connection can finish while the system trust decision is
         // still being committed. Retry that same port once without asking the
         // user to press Connect again.
-        if (attempt === 0 && host === '127.0.0.1') {
+        if (retryTrust && attempt === 0 && host === '127.0.0.1') {
           await new Promise<void>((resolve: () => void) => setTimeout(resolve, 700));
         }
       }
     }
+    HdcDeviceBridge.linked = false;
     return false;
   }
 
@@ -119,20 +140,39 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     return value;
   }
 
-  async installedVersion(bundleName: string): Promise<number> {
+  async installedVersion(bundleName: string, persistResult: boolean = true): Promise<number> {
+    if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) {
+      throw new Error('应用包名无效');
+    }
+    await InstalledAppRegistry.load(this.context);
+    if (!await this.connected()) throw new Error('无线调试已断开');
+    const output = await this.command(3, bundleName);
+    try {
+      const version = InstalledAppRegistry.parseVersion(output, bundleName);
+      InstalledAppRegistry.remember(bundleName, version);
+      InstalledAppRegistry.rememberLauncher(output, bundleName);
+      if (persistResult) await InstalledAppRegistry.persist(this.context);
+      return version;
+    } catch (_) {
+      // bm dump -n 的报错也可能是链路故障，不能直接当成「没装」。
+      const names = InstalledAppRegistry.parseNames(await this.command(6));
+      if (names !== undefined && !names.has(bundleName)) {
+        InstalledAppRegistry.remember(bundleName, 0);
+        if (persistResult) await InstalledAppRegistry.persist(this.context);
+        return 0;
+      }
+      throw new Error('无法确认设备上的已安装版本');
+    }
+  }
+
+  /** 查询设备上的真实签名身份，供重签覆盖安装前比对。查询失败不推断为未安装。 */
+  async installedSigningIdentity(bundleName: string): Promise<InstalledSigningIdentity | undefined> {
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) {
       throw new Error('应用包名无效');
     }
     if (!await this.connected()) throw new Error('无线调试已断开');
     const output = await this.command(3, bundleName);
-    const firstBrace = output.indexOf('{');
-    if (firstBrace < 0) return 0;
-    try {
-      const row = JSON.parse(output.substring(firstBrace)) as Record<string, Object>;
-      return Number(row['versionCode'] ?? 0);
-    } catch (_) {
-      throw new Error('无法确认设备上的已安装版本');
-    }
+    return InstalledAppRegistry.parseSigningIdentity(output, bundleName);
   }
 
   async install(signedHapPath: string): Promise<void> {
@@ -141,11 +181,36 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     }
     if (!await this.connected()) throw new Error('无线调试已断开');
     const output = await this.command(4, signedHapPath);
-    if (output.includes('[Fail]')) {
+    if (output.includes('[Fail]') || /\berror\s*:|\bfailed\b|\bcode\s*:\s*[1-9]\d*/i.test(output)) {
       throw new Error(output.trim().length > 0 ? output.trim() : '设备未确认安装结果');
     }
     // The Rust HDC client can report only "AppMod finish". JobRunner queries
     // the device's installed version after this command; text is never proof.
+  }
+
+  async uninstall(bundleName: string): Promise<void> {
+    if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) {
+      throw new Error('应用包名无效');
+    }
+    if (!await this.connected()) throw new Error('无线调试已断开');
+    const output = await this.command(7, bundleName);
+    if (output.includes('[Fail]') || /\berror\s*:|\bfailed\b|\bcode\s*:\s*[1-9]\d*/i.test(output) ||
+      !/successfully|AppMod finish/i.test(output)) {
+      throw new Error(output.trim().length > 0 ? output.trim() : '设备未确认卸载结果');
+    }
+  }
+
+  async installSelfAfterUninstall(signedHapPath: string): Promise<void> {
+    if (!fileIo.accessSync(signedHapPath) || !signedHapPath.startsWith(this.context.filesDir + '/')) {
+      throw new Error('安装器更新包不在应用工作目录中');
+    }
+    if (!await this.connected()) throw new Error('无线调试已断开');
+    const staged = await this.command(8, signedHapPath);
+    if (!staged.includes('staged and verified')) {
+      throw new Error('更新包传送或校验失败，尚未卸载旧版');
+    }
+    const launched = await this.command(9);
+    if (launched.includes('[Fail]')) throw new Error('独立安装任务启动失败，尚未卸载旧版');
   }
 
   /**
@@ -164,6 +229,47 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     if (output.includes('[Fail]')) throw new Error('无法读取设备上的安装状态');
     // bm dump 只在包存在时才输出 versionCode
     return /"versionCode"\s*:\s*\d+/.test(output);
+  }
+
+  /** 先取存在性清单，再只查询目录关心的包版本；清单本身不含 versionCode。 */
+  async installedBundleVersions(bundleNames: string[] = []): Promise<Map<string, number> | undefined> {
+    await InstalledAppRegistry.load(this.context);
+    if (!await this.connected()) throw new Error('无线调试已断开');
+    const found = InstalledAppRegistry.parseNames(await this.command(6));
+    if (found === undefined) {
+      console.warn('InstalledApps: unrecognized device list');
+      return undefined;
+    }
+    const unique = new Set<string>(bundleNames);
+    for (const name of unique) {
+      if (!found.has(name)) {
+        InstalledAppRegistry.remember(name, 0);
+        continue;
+      }
+      try {
+        // 不把单包失败变成未安装；保留它在存在性清单中的位置。
+        found.set(name, await this.installedVersion(name, false));
+      } catch (error) {
+        console.warn('InstalledApps: version query failed for ' + name + ': ' + String(error));
+      }
+    }
+    await InstalledAppRegistry.persist(this.context);
+    return found;
+  }
+
+  /** Want 必须包含实际入口，外部侧载包不能只用包名启动。 */
+  async openApp(bundleName: string, moduleName: string = '', abilityName: string = ''): Promise<void> {
+    await InstalledAppRegistry.load(this.context);
+    let target = InstalledAppRegistry.launcher(bundleName);
+    if (target === undefined && abilityName.length === 0) {
+      await this.installedVersion(bundleName);
+      target = InstalledAppRegistry.launcher(bundleName);
+    }
+    const entryAbility = target?.abilityName ?? abilityName;
+    const entryModule = target?.moduleName ?? moduleName;
+    if (entryAbility.length === 0) throw new Error('尚未读取到应用启动入口，请连接无线调试后重试');
+    await this.context.startAbility({ bundleName: bundleName,
+      moduleName: entryModule, abilityName: entryAbility });
   }
 
   async openWirelessSettings(): Promise<void> {

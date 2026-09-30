@@ -47,6 +47,12 @@ RATE_SYNC = (6, 3600)
 # 客户端点「检查更新」会即时重采一个仓库。比 admin 宽一点（用户可能在几个
 # 应用间来回切），但仍按 IP 限流，避免被拿来刷 GitHub 配额。
 RATE_REFRESH = (10, 3600)
+# 批量重采：一次请求会采多个仓库，比单应用接口更贵，所以配额更紧、窗口更长。
+RATE_REFRESH_STALE = (6, 3600)
+# 一次批量重采最多采几个应用、总时长上限（秒）。GitHub 采集是慢操作，
+# 不能让一次下拉刷新把 HTTP 请求拖成几十秒。
+REFRESH_STALE_LIMIT = 4
+REFRESH_STALE_BUDGET_SECONDS = 12.0
 
 
 def _client_ip(handler: BaseHTTPRequestHandler) -> str:
@@ -201,8 +207,28 @@ def h_put_signing_identity(body: dict[str, Any], identity: tuple[str, str]) -> d
             raise ValueError("wrong curve")
     except (ValueError, TypeError, UnicodeError):
         raise ApiError(400, "INVALID_IDENTITY", "签名身份格式不正确") from None
-    created = identity_vault.put_once(identity[0], cert_id, pem)
-    return {"created": created, "cert_id": identity_vault.get(identity[0])["cert_id"]}
+    expect = str(body.get("replace_cert_id") or "")
+    revision = body.get("replace_revision")
+    if expect and (not expect.isdecimal() or len(expect) > 64 or
+                   type(revision) is not int or revision < 1):
+        raise ApiError(409, "IDENTITY_CONFLICT", "备份版本不完整，请更新安装器后核对身份")
+    created = not expect and identity_vault.put_once(identity[0], cert_id, pem)
+    replaced = False
+    stored = identity_vault.get(identity[0])
+    matches = stored and stored['cert_id'] == cert_id and stored['private_key_pem'].strip() == pem.strip()
+    if expect and not matches:
+        replaced = identity_vault.replace(identity[0], expect, cert_id, pem, revision)
+        stored = identity_vault.get(identity[0])
+    # A retried request is successful only if both certificate and key match.
+    if not stored or stored["cert_id"] != cert_id or stored["private_key_pem"].strip() != pem.strip():
+        raise ApiError(409, "IDENTITY_CONFLICT", "云端身份已变化，保留本机材料，未覆盖云端备份")
+    return {
+        "created": created,
+        "replaced": replaced,
+        "synced": True,
+        "cert_id": stored["cert_id"],
+        "revision": stored["revision"],
+    }
 
 
 def h_app_releases(app_id: str, q: dict[str, list[str]]) -> dict[str, Any]:
@@ -213,7 +239,7 @@ def h_app_releases(app_id: str, q: dict[str, list[str]]) -> dict[str, Any]:
         int(app_id),
         page=_int((q.get("page") or ["1"])[0], 1, 1, 10000),
         page_size=_int((q.get("page_size") or ["20"])[0], 20, 1, 50),
-        include_prerelease=(q.get("prerelease") or ["1"])[0] != "0",
+        include_prerelease=(q.get("prerelease") or ["0"])[0] == "1",
     )
 
 
@@ -231,7 +257,14 @@ def h_app_release(app_id: str, tag: str, q: dict[str, list[str]]) -> dict[str, A
 
 
 SUBMIT_CATEGORIES = (
-    "工具", "开发工具", "效率", "影音", "游戏", "教育", "生活", "系统工具", "其他"
+    # 原有取值全部保留：线上已有记录的 category 必须仍能通过校验，
+    # 否则这些应用重新上架或改分类时会被 INVALID_CATEGORY 挡下。
+    "工具", "开发工具", "效率", "影音", "游戏", "教育", "生活", "系统工具", "其他",
+    # 更细的类型。名字尽量短，滑动选择器一屏放得下。
+    "社交通讯", "实用工具", "安全隐私", "阅读", "新闻资讯",
+    "摄影录像", "个性化", "出行导航", "购物", "财务",
+    "健康运动", "医疗健康", "美食菜谱", "居家生活", "育儿母婴",
+    "学习", "办公", "企业应用", "儿童", "无障碍", "政务民生",
 )
 
 
@@ -333,9 +366,67 @@ def h_submit_confirm(body: dict[str, Any], identity: tuple[str, str]) -> dict[st
     if choice.get("display_name"):
         db.upsert_app(draft["repo"], display_name=choice["display_name"])
     db.upsert_app(draft["repo"], category=category, status="published")
+    db.set_app_category(info["app_id"], category)
     db.set_publisher(info["app_id"], identity[0], identity[1])
     db.finish_submit_draft(draft["token"])
     return {"app": db.get_app(info["app_id"]), "status": "ok"}
+
+
+def h_refresh_stale_apps(ip: str, limit: int, budget_seconds: float,
+                         app_ids: list[int] | None = None) -> dict[str, Any]:
+    """按需重采「已经不新鲜」的应用，供客户端下拉刷新使用。
+
+    为什么需要它：`GET /apps` 读的是缓存目录，里面的 `latest_asset` 要等采集周期
+    （默认 30 分钟）才会更新。所以用户下拉刷新时**看不到刚发布的版本**，必须进详情页
+    点「检查更新」——那条路会调单应用的 `/refresh` 即时重采。这里把同一件事批量化。
+
+    设计约束：
+
+    - **按 IP 限流**，且一次调用只采有限几个应用、总时长有上限。GitHub 采集是慢操作
+      （单个应用实测约 3~5 秒），不能让它把一次 HTTP 请求拖成几十秒。
+    - **只采过期的**（`synced_at` 早于 `max_age`），最近采过的直接跳过，避免连点下拉
+      把配额打满。
+    - 单个应用采集失败**不影响其它应用**，失败信息写在返回里而不是抛错：下拉刷新
+      宁可用旧数据，也不该因为某个仓库暂时不可达就整页报错。
+    """
+    if not _rate_ok(f"refresh-stale:{ip}", *RATE_REFRESH_STALE):
+        raise ApiError(429, "RATE_LIMITED", "刷新过于频繁，请稍后再试")
+
+    max_age = int(os.environ.get("HAPSTORE_REFRESH_MAX_AGE", "300"))
+    if app_ids:
+        # 客户端点名要查哪几个（通常是「本机已装、且目录里有更新」的那些）。
+        # 这比「把所有过期的都采一遍」准得多：用户关心的是自己装了的应用。
+        wanted = [i for i in app_ids if i > 0][:limit]
+        stale = [a for a in (db.get_app(i) for i in wanted)
+                 if a is not None and a.get("status") == "published"]
+    else:
+        stale = db.stale_published_apps(max_age_seconds=max_age, limit=limit)
+    refreshed: list[dict[str, Any]] = []
+    skipped: list[int] = []
+    failures: list[dict[str, Any]] = []
+    deadline = time.monotonic() + budget_seconds
+    for app in stale:
+        if time.monotonic() >= deadline:
+            skipped.append(int(app["id"]))
+            continue
+        repo = str(app.get("repo") or "")
+        if not repo:
+            continue
+        try:
+            info = collector.sync_app(repo, token=GITHUB_TOKEN)
+            refreshed.append({"app_id": int(app["id"]), "repo": repo,
+                              "releases": info.get("releases", 0)})
+        except collector.CollectError as e:
+            failures.append({"app_id": int(app["id"]), "repo": repo, "message": str(e)})
+        except Exception as e:  # noqa: BLE001 - 单个应用的意外不该拖垮整次刷新
+            failures.append({"app_id": int(app["id"]), "repo": repo, "message": str(e)})
+    return {
+        "refreshed": refreshed,
+        "skipped": skipped,
+        "failures": failures,
+        "considered": len(stale),
+        "max_age": max_age,
+    }
 
 
 def h_refresh_app(app_id: str, ip: str) -> dict[str, Any]:
@@ -377,6 +468,21 @@ def h_remove_my_app(app_id: str, identity: tuple[str, str]) -> dict[str, Any]:
     if not db.hide_published_app(int(app_id), identity[0]):
         raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
     return {"removed": True, "app_id": int(app_id)}
+
+
+def h_configure_my_app(app_id: str, body: dict[str, Any],
+                       identity: tuple[str, str]) -> dict[str, Any]:
+    published = db.get_app(int(app_id))
+    if not published or published["status"] != "published":
+        raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
+    if db.publisher_account_id(int(app_id)) != identity[0]:
+        raise ApiError(403, "PUBLISHER_MISMATCH", "只能配置自己上架的应用")
+    category = body.get("category")
+    if not isinstance(category, str) or category not in SUBMIT_CATEGORIES:
+        raise ApiError(400, "INVALID_CATEGORY", "请选择有效的软件分类")
+    if not db.configure_published_app(int(app_id), identity[0], category):
+        raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
+    return {"app": db.get_app(int(app_id))}
 
 
 def h_admin_sync(body: dict[str, Any], ip: str) -> dict[str, Any]:
@@ -421,8 +527,11 @@ router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/releases/(?P<tag>[^/]+)", h_app
 router.add("GET", r"/api/v1/healthz", lambda q: {"ok": True, "stage": "M1"})
 router.add("POST", r"/api/v1/submit/prepare", "SUBMIT_PREPARE")
 router.add("POST", r"/api/v1/submit/confirm", "SUBMIT_CONFIRM")
+router.add("POST", r"/api/v1/apps/refresh-stale", "APPS_REFRESH_STALE")
 router.add("POST", r"/api/v1/apps/(?P<app_id>\d+)/refresh", "APP_REFRESH")
 router.add("GET", r"/api/v1/me/apps", "MY_APPS")
+router.add("GET", r"/api/v1/categories", lambda q: {"items": SUBMIT_CATEGORIES})
+router.add("POST", r"/api/v1/me/apps/(?P<app_id>\d+)/category", "MY_APP_CONFIGURE")
 router.add("DELETE", r"/api/v1/me/apps/(?P<app_id>\d+)", "MY_APP_DELETE")
 router.add("GET", r"/api/v1/signing-identity", "IDENTITY_GET")
 router.add("POST", r"/api/v1/signing-identity", "IDENTITY_PUT")
@@ -512,7 +621,7 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         try:
-            # 图标重定向单独处理（要读 DB 里的真实地址）
+            # Only serve the image extracted from the selected HAP.
             m = re.match(r"^/api/v1/apps/(\d+)/icon$", path)
             if m and method == "GET":
                 app_id = int(m.group(1))
@@ -521,17 +630,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(404, "ICON_NOT_FOUND", "该应用没有图标")
                 icon = db.app_icon(app_id)
                 if icon:
-                    self._send(200, icon[1], icon[0], {"Cache-Control": "public, max-age=3600"})
+                    self._send(200, icon[1], icon[0])
                     return
-                url = db.app_icon_url(app_id)
-                if not url:
-                    raise ApiError(404, "ICON_NOT_FOUND", "该应用没有图标")
-                self.send_response(302)
-                self.send_header("Location", url)
-                self.send_header("Cache-Control", "public, max-age=3600")
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
+                raise ApiError(404, "ICON_NOT_FOUND", "该应用没有包内图标")
 
             if not _rate_ok(f"api:{ip}", *RATE_DEFAULT):
                 raise ApiError(429, "RATE_LIMITED", "请求过于频繁，请稍后再试")
@@ -548,12 +649,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(h_submit_prepare(self._read_body(), ip, self._identity()))
             elif fn == "SUBMIT_CONFIRM":
                 self._json(h_submit_confirm(self._read_body(), self._identity()))
+            elif fn == "APPS_REFRESH_STALE":
+                requested = self._read_body().get("app_ids")
+                ids = [int(v) for v in requested
+                       if isinstance(v, (int, float))] if isinstance(requested, list) else None
+                self._json(h_refresh_stale_apps(ip, REFRESH_STALE_LIMIT,
+                                                REFRESH_STALE_BUDGET_SECONDS, ids))
             elif fn == "APP_REFRESH":
                 self._json(h_refresh_app(params["app_id"], ip))
             elif fn == "MY_APPS":
                 self._json(h_my_apps(self._identity()))
             elif fn == "MY_APP_DELETE":
                 self._json(h_remove_my_app(params["app_id"], self._identity()))
+            elif fn == "MY_APP_CONFIGURE":
+                self._json(h_configure_my_app(params["app_id"], self._read_body(), self._identity()))
             elif fn == "REVIEW":
                 self._json(h_put_review(params["app_id"], self._read_body(), self._identity()))
             elif fn == "IDENTITY_GET":

@@ -41,8 +41,8 @@ export class LocalImport {
       }
       if (!fileIo.accessSync(cachePath)) fileIo.renameSync(temporary, cachePath);
       const job = await store.enqueueLocal(cachePath, signedPath, sha256,
-        identity.bundleName, identity.versionCode, identity.moduleName,
-        identity.mainAbility);
+        identity.bundleName, identity.versionCode, identity.versionName,
+        identity.moduleName, identity.mainAbility);
       return job;
     } finally {
       if (fileIo.accessSync(temporary)) fileIo.unlinkSync(temporary);

@@ -8,10 +8,12 @@ const STORE_NAME = 'catalog-cache';
 /** 缓存里的一条图标记录。ArkTS 不接受匿名对象字面量，必须显式声明。 */
 export class CachedIcon {
   id: string = '';
+  rev: string = '';
   data: string = '';
 }
 const KEY_CATALOG = 'catalog';
 const KEY_ICONS = 'icons';
+const ICON_PREFIX = 'icon-';
 
 /**
  * 目录快照缓存。
@@ -26,8 +28,6 @@ const KEY_ICONS = 'icons';
  * 追加页不写缓存，缓存永远等于「某一次干净的第一页」。
  */
 export class CatalogCache {
-  /** 缓存最多保留多少个图标，避免 preferences 条目过大。 */
-  private static readonly MAX_ICONS: number = 8;
   /** 单张图标的字节上限，超过就不缓存（不是真的图标）。 */
   private static readonly MAX_ICON_BYTES: number = 512 * 1024;
 
@@ -61,36 +61,52 @@ export class CatalogCache {
     }
   }
 
-  /**
-   * 缓存图标字节（base64）。只存前几个：列表首屏能立刻看到图标就够了，
-   * 剩下的由后台刷新补齐。
-   */
+  /** 每个应用单独存一条，避免整页图标挤进 preferences 的单个值。 */
   static async saveIcons(context: common.UIAbilityContext,
     icons: CachedIcon[]): Promise<void> {
     if (icons.length === 0) return;
     try {
       const store = await CatalogCache.store(context);
-      await store.put(KEY_ICONS, JSON.stringify(icons.slice(0, CatalogCache.MAX_ICONS)));
+      for (const icon of icons) {
+        const id = Number(icon.id);
+        if (!Number.isInteger(id) || id <= 0 || icon.rev.length === 0 ||
+          icon.data.length === 0 || icon.data.length > 700 * 1024) continue;
+        await store.put(ICON_PREFIX + id, JSON.stringify(icon));
+      }
       await store.flush();
     } catch (_) {
       // 同上
     }
   }
 
-  static async loadIcons(context: common.UIAbilityContext): Promise<Map<number, ArrayBuffer>> {
+  static async loadIcons(context: common.UIAbilityContext,
+    apps: CatalogApp[]): Promise<Map<number, ArrayBuffer>> {
     const out = new Map<number, ArrayBuffer>();
     try {
       const store = await CatalogCache.store(context);
-      const raw = await store.get(KEY_ICONS, '') as string;
-      if (raw.length === 0) return out;
-      const parsed = JSON.parse(raw) as Array<Record<string, Object>>;
-      for (const row of parsed) {
-        const id = Number(row['id'] ?? 0);
-        const base64 = String(row['data'] ?? '');
-        if (id <= 0 || base64.length === 0) continue;
-        const bytes = new util.Base64Helper().decodeSync(base64);
-        out.set(id, bytes.buffer.slice(bytes.byteOffset,
-          bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+      // Read the old combined cache once for upgrades from earlier versions.
+      const legacyRaw = await store.get(KEY_ICONS, '') as string;
+      let legacy: Array<Record<string, Object>> = [];
+      try {
+        if (legacyRaw.length > 0) legacy = JSON.parse(legacyRaw) as Array<Record<string, Object>>;
+      } catch (_) {}
+      for (const app of apps) {
+        try {
+          const raw = await store.get(ICON_PREFIX + app.id, '') as string;
+          const row = raw.length > 0 ? JSON.parse(raw) as Record<string, Object> :
+            legacy.find((item: Record<string, Object>) => Number(item['id'] ?? 0) === app.id);
+          if (row === undefined) continue;
+          const id = Number(row['id'] ?? 0);
+          const rev = String(row['rev'] ?? '');
+          const base64 = String(row['data'] ?? '');
+          if (id <= 0 || rev.length === 0 || base64.length === 0 ||
+            app.id !== id || app.iconRev !== rev) continue;
+          const bytes = new util.Base64Helper().decodeSync(base64);
+          out.set(id, bytes.buffer.slice(bytes.byteOffset,
+            bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+        } catch (_) {
+          // A broken icon record must not hide the rest of the catalog.
+        }
       }
     } catch (_) {
       // 图标缓存坏了就当没有

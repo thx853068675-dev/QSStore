@@ -1,4 +1,6 @@
-import { router } from '@kit.ArkUI';
+import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
+import { isPending } from '../jobs/RecoveryPlanner';
+import { promptAction, router } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { CatalogApp } from '../data/CatalogApp';
@@ -8,7 +10,9 @@ import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
 import { JobStore } from '../jobs/JobStore';
 import { JobRunner } from '../jobs/JobRunner';
 import { JobScheduler } from '../jobs/JobScheduler';
+import { errorText } from '../jobs/ErrorText';
 import { LocalBundles } from '../jobs/LocalBundles';
+import { InstalledAppRegistry } from '../jobs/InstalledAppRegistry';
 import { NativeJobRuntime } from '../jobs/NativeJobRuntime';
 import { InstallJob, InstallStage } from '../jobs/InstallJob';
 import { AppReview } from '../data/StoreActions';
@@ -33,7 +37,17 @@ struct Detail {
   @State @Watch('onPercentChanged') private downloadPercent: number = 0;
   private pulseSettings: RenderingContextSettings = new RenderingContextSettings(true);
   private pulseCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.pulseSettings);
-  @State private downloadMessage: string = '';
+  @State private installTasks: InstallTaskSnapshot[] = [];
+  private installSubscription: number = -1;
+  private detailAppId: number = 0;
+  /**
+   * 一次性提示文案。
+   *
+   * 原来它是「按钮上方那行进度文字」的数据源，但那行已经去掉 —— 按钮本身就是
+   * 进度显示。这里只保留它真正不可替代的用途：把安装失败、未登录、任务收尾中
+   * 这类**用户需要知道原因**的结果说出来，用 toast 呈现，不再长期占版面。
+   */
+  private lastNotice: string = '';
   @State private reviews: AppReview[] = [];
   /** 评论与版本都按服务端分页取；``*Page`` 是已加载到的页码，``*Total`` 是服务端总数。 */
   @State private reviewPage: number = 0;
@@ -43,6 +57,7 @@ struct Detail {
   @State private releaseTotal: number = 0;
   @State private releaseMoreBusy: boolean = false;
   @State private releaseMessage: string = '';
+  @State private showPreviewReleases: boolean = false;
   /** 发布评论默认收起，点编辑按钮再展开。 */
   @State private reviewComposeOpen: boolean = false;
   @State private reviewText: string = '';
@@ -54,6 +69,12 @@ struct Detail {
   @State private installedJobs: InstallJob[] = [];
   /** 系统查到的本机版本号（0 = 没装）。不依赖无线调试。 */
   @State private installedVersion: number = 0;
+  /**
+   * 本机版本是否「无法核实」（系统查询被拒，设备又没连上）。
+   *
+   * 为 true 时不能把状态当成未安装；仍允许用户主动发起安装或更新。
+   */
+  @State private installedUnknown: boolean = false;
   /** 「检查更新」的进行状态与结果提示。 */
   @State private refreshBusy: boolean = false;
   @State private refreshMessage: string = '';
@@ -84,27 +105,88 @@ struct Detail {
     });
   }
 
-  /**
-   * 回到页面时清掉残留的「正在安装」显示。
-   *
-   * downloadBusy 是在按下按钮时置位的，如果安装途中离开页面（甚至进程被回收），
-   * 回来时它可能还是 true，按钮就永远停在进度上。这里核对任务是不是真的还在跑。
-   */
   onPageShow(): void {
-    if (this.activeInstallId.length === 0) return;
-    if (JobScheduler.isRunning(this.activeInstallId)) return;
-    this.activeInstallId = '';
-    this.downloadBusy = false;
-    this.downloadMessage = '';
-    this.downloadPercent = 0;
-    this.refreshInstalledVersion();
+    this.observeInstallTasks();
+    this.syncInstallTask();
+    this.loadInstalledJobs();
   }
 
   aboutToAppear(): void {
+    const params = router.getParams() as Record<string, number>;
+    this.detailAppId = Number(params['id'] ?? 0);
+    this.observeInstallTasks();
     this.syncPalette();
     this.loadApp();
     this.restoreAccount();
     this.loadInstalledJobs();
+    InstalledAppRegistry.load(getContext(this) as common.UIAbilityContext)
+      .then(() => this.refreshInstalledVersion());
+  }
+
+  aboutToDisappear(): void {
+    InstallTaskState.unsubscribe(this.installSubscription);
+    this.installSubscription = -1;
+  }
+
+  private observeInstallTasks(): void {
+    if (this.installSubscription !== -1) return;
+    this.installSubscription = InstallTaskState.subscribe((rows: InstallTaskSnapshot[]) => {
+      this.installTasks = rows;
+      const installed = rows.map((row: InstallTaskSnapshot) => row.job).filter((job: InstallJob) =>
+        job.stage === InstallStage.INSTALLED);
+      const changed = installed.map((job: InstallJob) => job.id + ':' + job.updatedAt).join(',') !==
+        this.installedJobs.map((job: InstallJob) => job.id + ':' + job.updatedAt).join(',');
+      this.installedJobs = installed;
+      this.syncInstallTask();
+      if (changed) this.refreshInstalledVersion();
+    });
+  }
+
+  private currentInstallTask(): InstallTaskSnapshot | undefined {
+    if (this.selectedAsset.name.length > 0) {
+      return InstallTaskState.forAsset(this.installTasks, this.detailAppId,
+        this.selectedAsset.bundleName, this.selectedAsset.name,
+        this.selectedAsset.sha256, this.selectedAsset.versionCode);
+    }
+    return InstallTaskState.forApp(this.installTasks, this.detailAppId,
+      this.selectedAsset.bundleName);
+  }
+
+  private syncInstallTask(): void {
+    const row = this.currentInstallTask();
+    if (row === undefined) return;
+    this.activeInstallId = row.job.id;
+    this.downloadBusy = row.running;
+    this.downloadPercent = row.percent;
+    // 只把「失败原因」说出来。这里是每秒轮询的入口，若把正常阶段也弹一遍，
+    // 用户会被持续刷屏；阶段本身由按钮文案表达，不需要额外提示。
+    if (!row.running && row.job.lastError.length > 0) this.notify(row.job.lastError);
+  }
+
+  /**
+   * 提示一条结果。
+   *
+   * 同样的内容不重复弹（阶段轮询会反复给出同一个状态），失败与等待类信息一律
+   * 走这里，保证「点了没反应」不会发生。
+   */
+  private notify(text: string): void {
+    if (text.length === 0 || text === this.lastNotice) return;
+    this.lastNotice = text;
+    try {
+      promptAction.showToast({ message: text, duration: 2600 });
+    } catch (error) {
+      console.error('StarHub notify failed: ' + errorText(error));
+    }
+  }
+
+  private installButtonLabel(): string {
+    const row = this.currentInstallTask();
+    if (row !== undefined && row.running) return InstallTaskState.label(row);
+    if (row !== undefined && isPending(row.job.stage)) return InstallTaskState.label(row) + ' · 继续';
+    if (this.downloadBusy) return '准备中';
+    if (this.installedUnknown && this.installedForApp() === undefined) return '安装/更新';
+    return !this.installedForApp() ? '安装应用' :
+      (this.updateAvailable() ? '更新到 ' + this.selectedVersionLabel() : '打开应用');
   }
 
   onBusyChanged(): void {
@@ -144,19 +226,53 @@ struct Detail {
   private async loadInstalledJobs(): Promise<void> {
     try {
       const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
-      this.installedJobs = (await store.listAll()).filter((job: InstallJob) =>
-        job.stage === InstallStage.INSTALLED);
+      InstallTaskState.seed(await store.listAll());
     } catch (_) {
-      this.installedJobs = [];
+      // 保留已收到的任务快照。
     }
     this.refreshInstalledVersion();
   }
 
-  /** 查一次本机版本；查的是当前选中附件的包名（切换版本后包名一般不变）。 */
+  /**
+   * 查一次本机版本；查的是当前选中附件的包名（切换版本后包名一般不变）。
+   *
+   * 系统查询可能因权限不足而「无法核实」（返回 UNKNOWN）。那种情况下**不能**
+   * 当成未安装 —— 否则外部装好、或本应用装好但记录丢失时，会把「打开」错误地
+   * 显示成「安装」，有记录的应用还会一直显示「更新」。所以另用 unknown 标记，
+   * 由 `installedForApp` 决定是否回退到设备查询。
+   */
   private refreshInstalledVersion(): void {
     const bundleName = this.selectedAsset.bundleName;
-    this.installedVersion = bundleName.length > 0 ?
-      LocalBundles.installedVersion(bundleName) : 0;
+    if (bundleName.length === 0) {
+      this.installedVersion = 0;
+      this.installedUnknown = false;
+      return;
+    }
+    const version = LocalBundles.installedVersion(bundleName);
+    this.installedUnknown = !LocalBundles.isKnown(version);
+    this.installedVersion = version > 0 ? version : 0;
+    if (this.installedUnknown) this.confirmInstalledViaDevice(bundleName);
+  }
+
+  /**
+   * 系统查询无法核实时，退一步问设备（HDC 的 `bm dump` 不需要任何权限）。
+   *
+   * 问到了就补上版本号；设备没连或仍答不出来，就保持 unknown。
+   * 用户仍可发起安装，后续授权/安装步骤再要求连接设备。
+   */
+  private async confirmInstalledViaDevice(bundleName: string): Promise<void> {
+    try {
+      const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
+      const version = await bridge.installedVersion(bundleName);
+      // 期间用户可能已经切到别的附件，只认仍然对得上的结果。
+      if (this.selectedAsset.bundleName !== bundleName) return;
+      if (version >= 0) {
+        this.installedVersion = version;
+        this.installedUnknown = false;
+      }
+    } catch (_) {
+      // 设备没连/已断开：无法核实就保持无法核实
+    }
   }
 
   /** 本机是否装了这个应用：记录或系统查询任一命中即可。 */
@@ -180,8 +296,16 @@ struct Detail {
    * 选中版本是否比本机装的更新。
    *
    * 比较用 versionCode，展示用 versionName —— 后者对人可读。
+   *
+   * 无法核实本机版本时，有本应用的安装记录就用记录中的版本做展示判断；
+   * 没有记录则保持未知，由按钮显示「安装/更新」。设备最终版本仍由安装链核实。
    */
   private updateAvailable(): boolean {
+    if (this.installedUnknown) {
+      const recorded = this.installedForApp();
+      return recorded !== undefined && recorded.versionCode > 0 &&
+        this.selectedAsset.versionCode > recorded.versionCode;
+    }
     if (this.installedVersion <= 0 && this.installedForApp() === undefined) return false;
     return this.selectedAsset.versionCode > this.installedVersion;
   }
@@ -202,23 +326,14 @@ struct Detail {
   /**
    * 打开一个已装应用。
    *
-   * 记录里没有入口 ability 时（探测到的应用只知道包名），交给系统解析入口，
-   * 而不是当作「没装」再装一遍。
+   * 外部安装没有入口记录时，从设备包信息取得真实模块和 Ability，再发起启动。
    */
   private async openInstalled(job: InstallJob): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     try {
-      if (job.mainAbility.length > 0) {
-        await context.startAbility({
-          bundleName: job.bundleName,
-          abilityName: job.mainAbility,
-          moduleName: job.moduleName
-        });
-      } else {
-        await context.startAbility({ bundleName: job.bundleName });
-      }
+      await new HdcDeviceBridge(context).openApp(job.bundleName, job.moduleName, job.mainAbility);
     } catch (error) {
-      this.downloadMessage = '无法打开应用：' + String(error);
+      this.notify('无法打开应用：' + errorText(error));
     }
   }
 
@@ -244,18 +359,28 @@ struct Detail {
       // 服务端要现去 GitHub 采一次，给它一个上限：卡住时按钮要能自己恢复
       await Detail.withDeadline(client.refreshApp(this.app.id), Detail.CHECK_TIMEOUT_MS,
         '检查更新超时，请稍后再试');
-      const releases = await client.listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE);
+      const releases = await client.listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE,
+        this.showPreviewReleases);
       const before = this.releaseTotal;
+      const previousTags = this.releases.map((release: ReleaseInfo) => release.tag).join(',');
+      const selectedUrl = this.selectedAsset.url;
+      const selectedName = this.selectedAsset.name;
       this.releases = releases.items;
       this.releasePage = releases.page;
       this.releaseTotal = releases.total;
+      // 已选附件可能随上游 Release 删除而消失，不能让底部按钮继续安装旧地址。
+      this.reconcileSelectedAsset(selectedUrl, selectedName);
+      this.releaseMessage = '';
       // 先取本机版本，再判断按钮该显示「安装」还是「更新」
       this.refreshInstalledVersion();
       this.refreshMessage = releases.total > before ?
-        '发现 ' + (releases.total - before) + ' 个新版本' : '已是最新';
+        '发现 ' + (releases.total - before) + ' 个新版本' :
+        (releases.total < before ? '已移除 ' + (before - releases.total) + ' 个失效版本' :
+          (previousTags !== this.releases.map((release: ReleaseInfo) => release.tag).join(',') ?
+            '版本列表已更新' : '已是最新'));
     } catch (error) {
       // 检查失败不影响已有内容，只提示这一次
-      this.refreshMessage = '检查更新失败：' + String(error);
+      this.refreshMessage = '检查更新失败：' + errorText(error);
     } finally {
       this.refreshBusy = false;
     }
@@ -275,7 +400,7 @@ struct Detail {
       return new Promise<T>(() => {});
     }, (error: Object) => {
       // ArkTS 只允许抛 Error 实例，原始错误转成文案再抛
-      if (!settled) throw new Error(String(error));
+      if (!settled) throw new Error(errorText(error));
       return new Promise<T>(() => {});
     });
     const limit = new Promise<T>((_resolve, reject) => {
@@ -309,13 +434,15 @@ struct Detail {
   private currentReleaseLabel(): string {
     const release = this.currentRelease();
     if (release === undefined) return '选择版本';
-    return (release.name.length > 0 ? release.name : release.tag) +
+    return (release.prerelease ? '预览版 · ' : '') +
+      (release.name.length > 0 ? release.name : release.tag) +
       (release.publishedAt.length >= 10 ? '  ·  ' + release.publishedAt.substring(0, 10) : '');
   }
 
   private releaseOptions(): SelectOption[] {
     return this.releases.map((release: ReleaseInfo) => {
-      const label = (release.name.length > 0 ? release.name : release.tag) +
+      const label = (release.prerelease ? '预览版 · ' : '') +
+        (release.name.length > 0 ? release.name : release.tag) +
         (release.publishedAt.length >= 10 ? '  ·  ' + release.publishedAt.substring(0, 10) : '');
       return { value: label } as SelectOption;
     });
@@ -343,7 +470,35 @@ struct Detail {
 
   private releaseSelected(release: ReleaseInfo): boolean {
     return release.assets.some((asset: HapAsset) =>
-      asset.sha256 === this.selectedAsset.sha256 && asset.name === this.selectedAsset.name);
+      asset.url === this.selectedAsset.url && asset.name === this.selectedAsset.name);
+  }
+
+  /** 重新拉取版本后，沿用仍存在的附件；附件已下架时改选最新可安装版本。 */
+  private reconcileSelectedAsset(preferredUrl: string, preferredName: string): void {
+    let chosen = new HapAsset();
+    let chosenIndex = 0;
+    if (preferredUrl.length > 0) {
+      for (let index = 0; index < this.releases.length; index++) {
+        const match = this.releases[index].assets.find((asset: HapAsset) =>
+          asset.url === preferredUrl && asset.name === preferredName);
+        if (match !== undefined) {
+          chosen = match;
+          chosenIndex = index;
+          break;
+        }
+      }
+    }
+    if (chosen.url.length === 0) {
+      for (let index = 0; index < this.releases.length; index++) {
+        if (this.releases[index].assets.length > 0) {
+          chosen = this.releases[index].assets[0];
+          chosenIndex = index;
+          break;
+        }
+      }
+    }
+    this.selectedReleaseIndex = chosenIndex;
+    this.selectedAsset = chosen;
   }
 
   private async restoreAccount(): Promise<void> {
@@ -354,10 +509,33 @@ struct Detail {
   private selectRelease(index: number): void {
     this.selectedReleaseIndex = index;
     const release = this.releases[index];
-    if (release && release.assets.length > 0) this.selectedAsset = release.assets[0];
+    this.selectedAsset = release && release.assets.length > 0 ? release.assets[0] : new HapAsset();
     this.expandedReleaseTag = '';
     // 换了附件就可能换了包名，按钮状态要跟着重算
     this.refreshInstalledVersion();
+  }
+
+  private async togglePreviewReleases(): Promise<void> {
+    if (this.releaseMoreBusy || this.app.id <= 0) return;
+    const next = !this.showPreviewReleases;
+    const selectedUrl = this.selectedAsset.url;
+    const selectedName = this.selectedAsset.name;
+    this.releaseMoreBusy = true;
+    try {
+      const result = await new StoreClient(getContext(this) as common.UIAbilityContext)
+        .listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE, next);
+      this.showPreviewReleases = next;
+      this.releases = result.items;
+      this.releasePage = result.page;
+      this.releaseTotal = result.total;
+      this.reconcileSelectedAsset(selectedUrl, selectedName);
+      this.refreshInstalledVersion();
+      this.releaseMessage = '';
+    } catch (error) {
+      this.releaseMessage = '无法读取版本：' + errorText(error);
+    } finally {
+      this.releaseMoreBusy = false;
+    }
   }
 
   /** 取服务端的第 page 页（从 1 开始）。失败时保留当前页，只提示错误。 */
@@ -371,7 +549,7 @@ struct Detail {
       this.reviewPage = result.page;
       this.reviewTotal = result.total;
     } catch (error) {
-      this.reviewMessage = String(error);
+      this.reviewMessage = errorText(error);
     } finally {
       this.reviewPageBusy = false;
     }
@@ -387,7 +565,8 @@ struct Detail {
     this.releaseMoreBusy = true;
     try {
       const result = await new StoreClient(getContext(this) as common.UIAbilityContext)
-        .listReleases(this.app.id, this.releasePage + 1, Detail.RELEASES_PER_PAGE);
+        .listReleases(this.app.id, this.releasePage + 1, Detail.RELEASES_PER_PAGE,
+          this.showPreviewReleases);
       const known = this.releases.map((release: ReleaseInfo) => release.tag);
       this.releases = this.releases.concat(result.items.filter(
         (release: ReleaseInfo) => known.indexOf(release.tag) < 0));
@@ -396,7 +575,7 @@ struct Detail {
       this.releaseMessage = '';
     } catch (error) {
       // 续取失败不能清空页面：已加载的版本仍然可用，只提示这一行。
-      this.releaseMessage = '无法加载更早的版本：' + String(error);
+      this.releaseMessage = '无法加载更早的版本：' + errorText(error);
     } finally {
       this.releaseMoreBusy = false;
     }
@@ -422,7 +601,7 @@ struct Detail {
       this.reviewText = '';
       this.reviewMessage = '评价已发布';
     } catch (error) {
-      this.reviewMessage = String(error);
+      this.reviewMessage = errorText(error);
     } finally {
       this.reviewBusy = false;
     }
@@ -436,41 +615,29 @@ struct Detail {
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
       this.app = await client.appDetail(id);
       this.appIcon = await client.appIcon(this.app) ?? null;
-      const releases = await client.listReleases(id, 1, Detail.RELEASES_PER_PAGE);
+      const releases = await client.listReleases(id, 1, Detail.RELEASES_PER_PAGE,
+        this.showPreviewReleases);
       this.releases = releases.items;
       this.releasePage = releases.page;
       this.releaseTotal = releases.total;
       // 图标到位后再取主色调，头部底色跟着图标变
       this.refreshHeroColor();
       await this.loadReviews();
-      if (this.releases.length > 0 && this.releases[0].assets.length > 0) {
-        this.selectedAsset = this.releases[0].assets[0];
-      }
+      this.reconcileSelectedAsset('', '');
       // 必须在选中附件之后重算：aboutToAppear 里 loadInstalledJobs 跑在
       // loadApp 之前，那时 selectedAsset 还是空的，查不到包名就会一直显示「安装应用」。
       this.refreshInstalledVersion();
+      this.syncInstallTask();
       this.loaded = true;
       this.error = '';
     } catch (error) {
-      this.error = String(error);
+      this.error = errorText(error);
     }
   }
 
-
-  private progressForStage(stage: InstallStage): number {
-    switch (stage) {
-      case InstallStage.VERIFIED: return 70;
-      case InstallStage.PACKAGE_INSPECTED: return 74;
-      case InstallStage.PROFILE_READY: return 82;
-      case InstallStage.SIGNED: return 89;
-      case InstallStage.SIGNATURE_VERIFIED: return 93;
-      case InstallStage.INSTALLING: return 97;
-      case InstallStage.INSTALLED: return 100;
-      default: return this.downloadPercent;
-    }
-  }
 
   private async resumeInstall(id: string): Promise<void> {
+    if (JobScheduler.isRunning(id)) { this.syncInstallTask(); return; }
     this.downloadBusy = true;
     this.activeInstallId = id;
     try {
@@ -478,29 +645,57 @@ struct Detail {
       const store = await JobStore.open(context);
       const runner = new JobRunner(store,
         new NativeJobRuntime(context, store, this.signedIn ? this.account : undefined,
-          new HdcDeviceBridge(context)),
-        (stage: InstallStage) => { this.downloadPercent = this.progressForStage(stage); });
+          new HdcDeviceBridge(context)));
       const result = await runner.run(id);
       if (result.stage === InstallStage.INSTALLED) {
         this.downloadPercent = 100;
-        this.downloadMessage = '安装完成';
+        this.lastNotice = '';
         await this.loadInstalledJobs();
       } else if (result.stage === InstallStage.WAITING_DEVICE) {
-        this.downloadMessage = '安装已暂停，重新连接后会从当前步骤继续';
+        this.notify('安装已暂停，重新连接后会从当前步骤继续');
         this.reconnectMessage = '';
         this.showReconnect = true;
       } else if (result.stage === InstallStage.WAITING_ACCOUNT) {
-        this.downloadMessage = '请先在「我的」登录华为开发者账号';
+        this.notify('请先在「我的」登录华为开发者账号');
+      } else if (result.stage === InstallStage.WAITING_CONFIRMATION) {
+        this.confirmDataLoss(result);
       } else {
-        this.downloadMessage = result.lastError.length > 0 ? result.lastError :
-          '安装任务已保存，可在「管理」中继续';
+        this.notify(result.lastError.length > 0 ? result.lastError :
+          '安装任务已保存，可在「管理」中继续');
       }
     } catch (error) {
-      this.downloadMessage = String(error).includes('正在执行') ?
-        '该任务已在执行中，请稍候' : String(error);
+      const text = errorText(error);
+      if (String(error).includes('安装任务已取消')) return;
+      // 超时只结束了「等待」，旧执行还在收尾（锁没放）。说清楚原因，否则用户
+      // 立刻点重试会收到「正在执行」，看起来像卡住了。
+      this.notify(JobScheduler.stillFinishing(id) ?
+        text + '（本次执行仍在后台收尾，请等它结束后再重试）' :
+        (text.includes('正在执行') ? '该任务已在执行中，请稍候' : text));
     } finally {
       this.downloadBusy = false;
+      this.syncInstallTask();
     }
+  }
+
+  private confirmDataLoss(job: InstallJob): void {
+    const message = LocalBundles.isSelfBundle(job.bundleName) ?
+      '继续会先卸载轻启·安装器，再安装新版。登录状态、本地安装记录、无线调试配对和本地签名材料会清除；签名身份会在卸载前备份。是否继续？' :
+      '系统无法保留数据覆盖更新。继续会先卸载旧版，再安装新版；该应用的缓存、设置和登录状态都会清除。是否继续？';
+    AlertDialog.show({
+      title: '需要卸载旧版',
+      message: message,
+      primaryButton: { value: '取消', action: () => {} },
+      secondaryButton: { value: '清除数据并安装', action: async () => {
+        try {
+          const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
+          const installed = await new HdcDeviceBridge(getContext(this) as common.UIAbilityContext)
+            .installedSigningIdentity(job.bundleName);
+          if (!installed) throw new Error('无法核对当前安装身份，请连接无线调试后重试');
+          await store.approveDataLoss(job.id, installed);
+          await this.resumeInstall(job.id);
+        } catch (error) { this.notify(errorText(error)); }
+      } }
+    });
   }
 
   private async reconnect(): Promise<void> {
@@ -517,44 +712,37 @@ struct Detail {
       this.reconnectMessage = '';
       await this.resumeInstall(this.activeInstallId);
     } catch (error) {
-      this.reconnectMessage = String(error);
+      this.reconnectMessage = errorText(error);
     } finally {
       this.reconnectBusy = false;
     }
   }
 
   private async downloadSelected(): Promise<void> {
+    if (this.downloadBusy || this.currentInstallTask()?.running) return;
     const asset = this.selectedAsset;
-    if (!/^https:\/\//.test(asset.url) || !/^[0-9a-f]{64}$/.test(asset.sha256)) {
-      this.downloadMessage = '该附件缺少可信下载地址或 SHA-256，暂不能下载';
+    if (!/^https:\/\//.test(asset.url)) {
+      this.notify('该附件缺少 HTTPS 下载地址，暂不能下载');
       return;
     }
     this.downloadBusy = true;
     this.downloadPercent = 0;
-    this.downloadMessage = '正在下载并校验完整性';
+    this.notify('正在下载安装包');
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const store = await JobStore.open(context);
       const job = await store.enqueue(this.app.id, asset.name, asset.url,
-        asset.sha256, asset.mirrorUrls, asset.versionName);
+        asset.sha256, asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode);
       if (job.stage === InstallStage.QUEUED || job.stage === InstallStage.DOWNLOADING ||
         job.stage === InstallStage.WAITING_NETWORK) {
-        await JobScheduler.runDownload(context, store, job,
-          (received: number, total: number) => {
-            if (total > 0) {
-              this.downloadPercent = Math.min(68, Math.floor(received * 68 / total));
-              this.downloadMessage = '正在下载并校验完整性 · ' +
-                this.downloadPercent + '%';
-            }
-          });
+        await JobScheduler.runDownload(context, store, job);
       }
-      this.downloadPercent = 70;
-      this.downloadBusy = false;
       await this.resumeInstall(job.id);
     } catch (error) {
-      this.downloadMessage = String(error);
+      this.notify(errorText(error));
     } finally {
       this.downloadBusy = false;
+      this.syncInstallTask();
     }
   }
 
@@ -636,7 +824,7 @@ struct Detail {
         uri: 'https://' + this.repoHost() + '/' + path
       });
     } catch (error) {
-      this.downloadMessage = '无法打开来源仓库：' + String(error);
+      this.notify('无法打开来源仓库：' + errorText(error));
     }
   }
 
@@ -697,12 +885,9 @@ struct Detail {
                     .backgroundColor(Palette.accentSoft).borderRadius(7)
                   Text('来源仓库').fontSize(11).fontColor(Palette.textTertiary)
                     .layoutWeight(1).maxLines(1)
-                  Text('↗').fontSize(17).fontColor(Palette.accent)
                 }.width('100%')
                 Text(this.repoPath()).fontSize(14).fontWeight(FontWeight.Medium)
                   .fontColor(Palette.text).maxLines(1)
-                Text('点击用浏览器打开 ' + this.repoHost())
-                  .fontSize(10).fontColor(Palette.textTertiary).maxLines(1)
               }.alignItems(HorizontalAlign.Start).width('100%').padding(16)
                 .backgroundColor(Palette.surface).borderRadius(17)
                 .onClick(() => this.openRepo())
@@ -720,6 +905,14 @@ struct Detail {
                     .onClick(() => this.checkForUpdates())
                 }
               }.width('100%')
+              Row() {
+                Text(this.showPreviewReleases ? '已显示预览版，安装前请确认版本' : '查看预览版')
+                  .fontSize(11).fontColor(this.showPreviewReleases ? Palette.accent : Palette.textSecondary)
+                  .layoutWeight(1)
+                Text(this.showPreviewReleases ? '关闭' : '手动选择')
+                  .fontSize(11).fontColor(Palette.accent)
+              }.width('100%').padding({ top: 2, bottom: 2 })
+                .onClick(() => this.togglePreviewReleases())
               if (this.currentRelease()) {
                 Column({ space: 11 }) {
                   // 版本下拉全宽：发布时间并进下拉标签，收起时也能看到
@@ -756,14 +949,14 @@ struct Detail {
                   }
                   ForEach(this.currentRelease()!.assets, (asset: HapAsset) => {
                     Row({ space: 10 }) {
-                      Text(this.selectedAsset.sha256 === asset.sha256 &&
+                      Text(this.selectedAsset.url === asset.url &&
                         this.selectedAsset.name === asset.name ? '已选' : '选择')
-                        .fontSize(10).fontColor(this.selectedAsset.sha256 === asset.sha256 &&
+                        .fontSize(10).fontColor(this.selectedAsset.url === asset.url &&
                         this.selectedAsset.name === asset.name ? Palette.accent : Palette.textTertiary)
                       Text(asset.name).fontSize(12).fontColor(Palette.textBody)
                         .maxLines(2).layoutWeight(1)
                     }.width('100%').padding({ left: 11, right: 11, top: 9, bottom: 9 })
-                      .backgroundColor(this.selectedAsset.sha256 === asset.sha256 &&
+                      .backgroundColor(this.selectedAsset.url === asset.url &&
                         this.selectedAsset.name === asset.name ? Palette.accentSoft : Palette.fill)
                       .borderRadius(10)
                       .onClick(() => { this.selectedAsset = asset; })
@@ -912,22 +1105,16 @@ struct Detail {
             }.width('100%').padding({ left: 20, right: 20, top: 10, bottom: 115 })
           }.width('100%').height('100%')
           Column({ space: 7 }) {
-            if (this.downloadMessage.length > 0) {
-              Text(this.downloadMessage).fontSize(12).fontColor(Palette.textBody)
-                .maxLines(2).padding({ left: 14, right: 14, top: 7, bottom: 7 })
-                .backgroundColor(Palette.fill).borderRadius(10)
-            }
-            // 整颗按钮就是进度条：安装中由 Canvas 画出波浪前沿，
-            // 不再叠一条细进度条。
+            // 按钮上方原本还有一行进度文字（downloadMessage）。按钮本身就是进度
+            // 显示（Canvas 波浪前沿 + 文案带百分比），上面再挂一行纯文字既重复
+            // 又占高度，已去掉。
             Stack({ alignContent: Alignment.Center }) {
               if (this.downloadBusy) {
                 Canvas(this.pulseCtx)
                   .width('100%').height(52)
                   .onReady(() => this.paintInstallButton())
               }
-              Text(this.downloadBusy ? '正在安装  ' + this.downloadPercent + '%' :
-                (!this.installedForApp() ? '安装应用' :
-                  (this.updateAvailable() ? '更新到 ' + this.selectedVersionLabel() : '打开应用')))
+              Text(this.installButtonLabel())
                 .fontSize(17).fontWeight(FontWeight.Medium)
                 .fontColor(Palette.onAccent)
             }
@@ -936,6 +1123,11 @@ struct Detail {
             .borderRadius(18).clip(true)
             .onClick(() => {
               if (this.downloadBusy) return;
+              const task = this.currentInstallTask();
+              if (task !== undefined && isPending(task.job.stage)) {
+                this.resumeInstall(task.job.id);
+                return;
+              }
               const installed = this.installedForApp();
               // 已装且没有更新可装：打开；否则安装或更新
               if (installed !== undefined && !this.updateAvailable()) this.openInstalled(installed);

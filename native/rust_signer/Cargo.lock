@@ -1233,10 +1233,13 @@ dependencies = [
  "hapsigner",
  "memmap2",
  "p256",
+ "p384",
  "qingqi-hdc-transport",
  "serde_json",
+ "sha2",
  "x509-cert",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

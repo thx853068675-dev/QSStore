@@ -1,5 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+import { util } from '@kit.ArkTS';
 import { profileMatchesCertificate, readSignedProfile } from 'libhap_core.so';
 import { AgcClient } from './AgcClient';
 import { DeveloperAccount } from './DeveloperAccount';
@@ -56,6 +58,34 @@ const GRANTABLE_ACLS: string[] = [
 ];
 
 export class AgcProfile {
+  private static async fingerprintOfPem(pem: string): Promise<string> {
+    const match = /-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\s]+)-----END CERTIFICATE-----/.exec(pem);
+    if (!match) throw new Error('签名证书格式无效');
+    const der = new util.Base64Helper().decodeSync(match[1].replace(/\s/g, ''));
+    const md = cryptoFramework.createMd('SHA256');
+    await md.update({ data: der });
+    const digest = (await md.digest()).data;
+    let fingerprint = '';
+    for (let i = 0; i < digest.length; i++) {
+      fingerprint += digest[i].toString(16).padStart(2, '0');
+    }
+    return fingerprint.toUpperCase();
+  }
+
+  /** 对 Profile 内实际签包证书求指纹，而不是误用 .cer 文件里的根证书。 */
+  static async signingFingerprint(path: string): Promise<string> {
+    const profile = JSON.parse(readSignedProfile(path)) as Record<string, Object>;
+    const bundle = profile['bundle-info'] as Record<string, Object> | undefined;
+    const pem = String(bundle?.['development-certificate'] ?? '');
+    return AgcProfile.fingerprintOfPem(pem);
+  }
+
+  static appIdentifier(path: string): string {
+    const profile = JSON.parse(readSignedProfile(path)) as Record<string, Object>;
+    const bundle = profile['bundle-info'] as Record<string, Object> | undefined;
+    return String(bundle?.['app-identifier'] ?? '');
+  }
+
   static effectiveAcls(requested: string[]): string[] {
     return requested.filter((name: string, index: number) =>
       GRANTABLE_ACLS.includes(name) && requested.indexOf(name) === index).sort();

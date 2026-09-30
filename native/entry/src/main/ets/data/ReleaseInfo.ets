@@ -29,6 +29,7 @@ export class ReleaseInfo {
   name: string = '';
   publishedAt: string = '';
   notes: string = '';
+  prerelease: boolean = false;
   assets: HapAsset[] = [];
 
   static fromJson(row: Record<string, Object>): ReleaseInfo {
@@ -37,6 +38,7 @@ export class ReleaseInfo {
     release.name = String(row['name'] ?? '');
     release.publishedAt = String(row['published_at'] ?? '');
     release.notes = String(row['body'] ?? '');
+    release.prerelease = row['prerelease'] === true;
     const raw = row['assets'] as Array<Record<string, Object>> | undefined;
     release.assets = (raw ?? [])
       .map((asset: Record<string, Object>) => HapAsset.fromJson(asset))

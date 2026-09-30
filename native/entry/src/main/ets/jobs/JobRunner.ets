@@ -2,6 +2,7 @@ import { FailureKind, InstallJob, InstallStage, RecoveryEvidence } from './Insta
 import { JobScheduler } from './JobScheduler';
 import { JobStore } from './JobStore';
 import { recoveryStage } from './RecoveryPlanner';
+import { JobCancellation } from './JobCancellation';
 
 export class PackageIdentity {
   bundleName: string = '';
@@ -53,7 +54,9 @@ export class JobRunner {
 
   async run(id: string): Promise<InstallJob> {
     // 一个任务同一时刻只能有一条流水线在跑：页面自己的忙标记挡不住另一个页面。
-    return JobScheduler.runExclusive(id, () => this.runLocked(id));
+    // 用 runInstall 而不是默认上限：底层 hdc install 自己允许跑 5 分钟，外层若
+    // 先放弃会留下「设备还在装、我们已经报超时」的错位。
+    return JobScheduler.runInstall(id, () => this.runLocked(id));
   }
 
   private async runLocked(id: string): Promise<InstallJob> {
@@ -72,6 +75,7 @@ export class JobRunner {
       }
       const evidence = await this.runtime.inspectEvidence(job);
       job.stage = recoveryStage(job, evidence);
+      if (job.stage === InstallStage.INSTALLED) this.clearDataLossApproval(job);
       await this.store.save(job);
       if (job.stage === InstallStage.INSTALLED || job.stage === InstallStage.TERMINAL_ERROR) {
         return job;
@@ -115,16 +119,27 @@ export class JobRunner {
       }
       if (job.stage === InstallStage.INSTALLING) {
         // After a timeout, inspect the real installed version before retrying.
-        if (await this.runtime.installedVersion(job.bundleName) !== job.versionCode) {
+        if (job.reinstallRequired || await this.runtime.installedVersion(job.bundleName) !== job.versionCode) {
+          JobCancellation.assertActive(job.id);
           await this.runtime.install(job);
         }
-        if (await this.runtime.installedVersion(job.bundleName) !== job.versionCode) {
-          throw new JobFailure(FailureKind.DEVICE, '设备尚未确认安装结果');
+        // **等设备把新版本反映出来，而不是立刻重装。**
+        // `hdc install` 返回后，设备的包管理器还要一点时间才更新版本信息；
+        // 自己更新自己时（安装器更新安装器）旧进程还在跑，窗口更长。立刻查一次
+        // 会读到旧版本号 → 判失败 → 再装一遍 → 还是旧版本 → 报「设备尚未确认
+        // 安装结果」。用户看到的就是「卡在 95%，然后还得再点一次」。
+        if (!await this.confirmInstalledVersion(job)) {
+          // 版本仍旧并不等于无线调试断了。尤其安装器更新自己时，包管理器
+          // 可能先完成安装、随后才结束旧进程；这时要求用户反复配对只会重装。
+          throw new JobFailure(FailureKind.TRANSIENT,
+            '安装已提交，但新版本尚未生效。请重新打开应用确认；若版本仍旧，再点继续安装');
         }
+        job.reinstallRequired = false;
         await this.advance(job, InstallStage.INSTALLED);
       }
       return job;
     } catch (error) {
+      if (JobCancellation.isCancelled(id)) throw new Error('安装任务已取消');
       const failure = error instanceof JobFailure ? error :
         new JobFailure(FailureKind.TRANSIENT, String(error));
       await this.store.recordFailure(job, failure.kind, failure.message);
@@ -134,8 +149,49 @@ export class JobRunner {
 
   private async advance(job: InstallJob, stage: InstallStage): Promise<void> {
     job.stage = stage;
+    if (stage === InstallStage.INSTALLED) this.clearDataLossApproval(job);
     job.lastError = '';
     await this.store.save(job);
     this.onStage?.(stage);
+  }
+
+  private clearDataLossApproval(job: InstallJob): void {
+    job.allowDataLoss = false;
+    job.approvedInstalledVersion = 0;
+    job.approvedInstalledFingerprint = '';
+    job.approvedInstalledAppIdentifier = '';
+  }
+
+  /**
+   * 轮询等待设备把新版本反映出来。
+   *
+   * `hdc install` 返回「安装成功」之后，设备的包管理器仍可能短暂返回旧版本号：
+   * 安装是异步落盘的，自己更新自己时旧进程还在跑，窗口更长。只查一次就判定
+   * 失败会导致「明明装好了却报没确认」，用户要再点一次。
+   *
+   * 这里给一个有限的等待：每次间隔 [PROBE_INTERVAL_MS]，最多等
+   * [PROBE_TOTAL_MS]；链路查询失败时保留原始失败类型，不把查询错误
+   * 误报成「设备尚未确认」或盲目重新安装。
+   */
+  private static readonly PROBE_INTERVAL_MS: number = 1500;
+  private static readonly PROBE_TOTAL_MS: number = 15000;
+
+  private async confirmInstalledVersion(job: InstallJob): Promise<boolean> {
+    const deadline = Date.now() + JobRunner.PROBE_TOTAL_MS;
+    for (;;) {
+      JobCancellation.assertActive(job.id);
+      let current = -1;
+      try {
+        current = await this.runtime.installedVersion(job.bundleName);
+      } catch (error) {
+        if (error instanceof JobFailure) throw error;
+        throw new JobFailure(FailureKind.TRANSIENT,
+          '安装结果暂时无法核实：' + String(error));
+      }
+      if (current === job.versionCode) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, JobRunner.PROBE_INTERVAL_MS));
+    }
   }
 }

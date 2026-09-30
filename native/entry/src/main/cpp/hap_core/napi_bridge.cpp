@@ -1,7 +1,9 @@
 #include "zip_reader.h"
+#include "signing_block.h"
 
 #include <napi/native_api.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -14,11 +16,23 @@ extern "C" int qingqi_sign_hap(const char* input, const char* output,
                                 const char* profile, char* error_buffer,
                                 size_t error_capacity);
 extern "C" int qingqi_key_matches_certificate(const char* private_key,
-                                                 const char* certificate);
+                                                 const char* certificate,
+                                                 char* error_buffer,
+                                                 size_t error_capacity);
+extern "C" int qingqi_certificate_fingerprint(const char* certificate,
+                                                unsigned char* output, size_t output_capacity,
+                                                char* error_buffer, size_t error_capacity);
+extern "C" int qingqi_generate_csr(const char* private_key_pem,
+                                    unsigned char* output, size_t output_capacity,
+                                    size_t* output_length, char* error_buffer,
+                                    size_t error_capacity);
 extern "C" int qingqi_read_signed_profile(const char* profile_path,
                                             unsigned char* output, size_t output_capacity,
                                             size_t* output_length, char* error_buffer,
                                             size_t error_capacity);
+extern "C" int qingqi_read_install_permissions(const char* input,
+                                                unsigned char* output, size_t capacity,
+                                                size_t* length, char* error, size_t error_capacity);
 extern "C" int qingqi_profile_matches_certificate(const char* profile_path,
                                                      const char* certificate_path);
 extern "C" int qingqi_verify_hap(const char* file_path, char* error_buffer,
@@ -73,6 +87,36 @@ napi_value ReadModule(napi_env env, napi_callback_info info) {
 
 napi_value ReadPack(napi_env env, napi_callback_info info) {
   return ReadManifest(env, info, true);
+}
+
+// Only reports whether a structurally valid HAP signing block exists. It does
+// not claim that its signature or device authorization has been verified.
+napi_value HasSigningBlock(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value arg = nullptr;
+  if (napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr) != napi_ok || argc != 1) {
+    napi_throw_type_error(env, nullptr, "Expected a HAP path");
+    return nullptr;
+  }
+  size_t length = 0;
+  if (napi_get_value_string_utf8(env, arg, nullptr, 0, &length) != napi_ok ||
+      length == 0 || length > 4096) {
+    napi_throw_type_error(env, nullptr, "Invalid HAP path");
+    return nullptr;
+  }
+  std::vector<char> path(length + 1);
+  if (napi_get_value_string_utf8(env, arg, path.data(), path.size(), &length) != napi_ok) {
+    napi_throw_type_error(env, nullptr, "Invalid HAP path");
+    return nullptr;
+  }
+  bool signed_block = false;
+  try {
+    qingqi::hap::InspectSigningBlock(std::string(path.data(), length));
+    signed_block = true;
+  } catch (const std::exception&) {}
+  napi_value result = nullptr;
+  napi_get_boolean(env, signed_block, &result);
+  return result;
 }
 
 // Returns the app icon bytes embedded in a local HAP, or an empty ArrayBuffer
@@ -152,11 +196,19 @@ napi_value MatchMaterialPair(napi_env env, napi_callback_info info, bool profile
     }
     paths[i].assign(buffer.data(), length);
   }
+  // 失败原因要带出来：只回一句 "Cannot verify..." 时，上层无法区分
+  // 「确实不配对」和「材料读不了」，排查只能靠改代码重编。
+  std::array<char, 512> failure{};
+  failure[0] = '\0';
   const int result = profile ?
     qingqi_profile_matches_certificate(paths[0].c_str(), paths[1].c_str()) :
-    qingqi_key_matches_certificate(paths[0].c_str(), paths[1].c_str());
+    qingqi_key_matches_certificate(paths[0].c_str(), paths[1].c_str(),
+                                   failure.data(), failure.size());
   if (result < 0) {
-    napi_throw_error(env, "SIGNING_MATERIAL", "Cannot verify key and certificate");
+    const std::string detail = failure[0] != '\0' ?
+      std::string("Cannot verify key and certificate: ") + failure.data() :
+      std::string("Cannot verify key and certificate");
+    napi_throw_error(env, "SIGNING_MATERIAL", detail.c_str());
     return nullptr;
   }
   napi_value matched = nullptr;
@@ -168,40 +220,116 @@ napi_value KeyMatchesCertificate(napi_env env, napi_callback_info info) {
   return MatchMaterialPair(env, info, false);
 }
 
-napi_value ProfileMatchesCertificate(napi_env env, napi_callback_info info) {
-  return MatchMaterialPair(env, info, true);
-}
-
-napi_value ReadSignedProfile(napi_env env, napi_callback_info info) {
+napi_value CertificateFingerprint(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value arg = nullptr;
   if (napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr) != napi_ok || argc != 1) {
-    napi_throw_type_error(env, nullptr, "Expected a signed profile path");
+    napi_throw_type_error(env, nullptr, "Expected a certificate path");
     return nullptr;
   }
   size_t length = 0;
   if (napi_get_value_string_utf8(env, arg, nullptr, 0, &length) != napi_ok ||
       length == 0 || length > 4096) {
-    napi_throw_type_error(env, nullptr, "Invalid signed profile path");
+    napi_throw_type_error(env, nullptr, "Invalid certificate path");
     return nullptr;
   }
   std::vector<char> path(length + 1);
   if (napi_get_value_string_utf8(env, arg, path.data(), path.size(), &length) != napi_ok) {
-    napi_throw_type_error(env, nullptr, "Invalid signed profile path");
+    napi_throw_type_error(env, nullptr, "Invalid certificate path");
+    return nullptr;
+  }
+  std::array<unsigned char, 65> output{};
+  std::array<char, 256> error{};
+  if (qingqi_certificate_fingerprint(path.data(), output.data(), output.size(),
+                                    error.data(), error.size()) != 0) {
+    napi_throw_error(env, "SIGNING_MATERIAL", error.data());
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  napi_create_string_utf8(env, reinterpret_cast<const char*>(output.data()), 64, &result);
+  return result;
+}
+
+napi_value ProfileMatchesCertificate(napi_env env, napi_callback_info info) {
+  return MatchMaterialPair(env, info, true);
+}
+
+napi_value ReadVerifiedJson(napi_env env, napi_callback_info info, bool permissions) {
+  size_t argc = 1;
+  napi_value arg = nullptr;
+  if (napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr) != napi_ok || argc != 1) {
+    napi_throw_type_error(env, nullptr, "Expected a file path");
+    return nullptr;
+  }
+  size_t length = 0;
+  if (napi_get_value_string_utf8(env, arg, nullptr, 0, &length) != napi_ok ||
+      length == 0 || length > 4096) {
+    napi_throw_type_error(env, nullptr, "Invalid file path");
+    return nullptr;
+  }
+  std::vector<char> path(length + 1);
+  if (napi_get_value_string_utf8(env, arg, path.data(), path.size(), &length) != napi_ok) {
+    napi_throw_type_error(env, nullptr, "Invalid file path");
     return nullptr;
   }
   std::vector<unsigned char> content(256 * 1024);
   size_t content_length = 0;
   std::array<char, 1024> error{};
-  if (qingqi_read_signed_profile(path.data(), content.data(), content.size(), &content_length,
-                                 error.data(), error.size()) != 0) {
-    napi_throw_error(env, "PROFILE_VERIFY", error.data());
+  const auto reader = permissions ? qingqi_read_install_permissions : qingqi_read_signed_profile;
+  if (reader(path.data(), content.data(), content.size(), &content_length,
+             error.data(), error.size()) != 0) {
+    napi_throw_error(env, permissions ? "HAP_INSPECT" : "PROFILE_VERIFY", error.data());
     return nullptr;
   }
   napi_value result = nullptr;
   if (napi_create_string_utf8(env, reinterpret_cast<const char*>(content.data()),
                               content_length, &result) != napi_ok) {
     napi_throw_error(env, nullptr, "Cannot return verified profile");
+    return nullptr;
+  }
+  return result;
+}
+
+napi_value ReadSignedProfile(napi_env env, napi_callback_info info) {
+  return ReadVerifiedJson(env, info, false);
+}
+
+napi_value ReadInstallPermissions(napi_env env, napi_callback_info info) {
+  return ReadVerifiedJson(env, info, true);
+}
+
+napi_value GenerateCsr(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value arg = nullptr;
+  if (napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr) != napi_ok || argc != 1) {
+    napi_throw_type_error(env, nullptr, "Expected a PKCS#8 private key");
+    return nullptr;
+  }
+  size_t length = 0;
+  if (napi_get_value_string_utf8(env, arg, nullptr, 0, &length) != napi_ok ||
+      length == 0 || length > 4096) {
+    napi_throw_type_error(env, nullptr, "Invalid private key length");
+    return nullptr;
+  }
+  std::vector<char> key(length + 1);
+  if (napi_get_value_string_utf8(env, arg, key.data(), key.size(), &length) != napi_ok) {
+    napi_throw_type_error(env, nullptr, "Invalid private key text");
+    return nullptr;
+  }
+  std::array<unsigned char, 8192> csr{};
+  size_t csr_length = 0;
+  std::array<char, 256> error{};
+  const int status = qingqi_generate_csr(key.data(), csr.data(), csr.size(),
+                                         &csr_length, error.data(), error.size());
+  std::fill(key.begin(), key.end(), '\0');
+  if (status != 0) {
+    napi_throw_error(env, "CSR_GENERATION", error[0] ? error.data() : "Cannot generate CSR");
+    return nullptr;
+  }
+  napi_value result = nullptr;
+  if (napi_create_string_utf8(env, reinterpret_cast<const char*>(csr.data()),
+                              csr_length, &result) != napi_ok) {
+    napi_throw_error(env, nullptr, "Cannot return CSR");
     return nullptr;
   }
   return result;
@@ -253,7 +381,7 @@ napi_value HdcCommand(napi_env env, napi_callback_info info) {
   std::vector<char> root(length + 1);
   if (napi_get_value_string_utf8(env, args[0], root.data(), root.size(), &length) != napi_ok ||
       napi_get_value_uint32(env, args[1], &state->operation) != napi_ok ||
-      state->operation > 5 ||
+      state->operation > 9 ||
       napi_get_value_string_utf8(env, args[2], nullptr, 0, &length) != napi_ok ||
       length > 4096) {
     delete state;
@@ -450,12 +578,17 @@ napi_value SignHap(napi_env env, napi_callback_info info) {
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
     {"readModuleJson", nullptr, ReadModule, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"readInstallPermissions", nullptr, ReadInstallPermissions, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readPackInfo", nullptr, ReadPack, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"hasSigningBlock", nullptr, HasSigningBlock, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readHapIcon", nullptr, ReadIcon, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"keyMatchesCertificate", nullptr, KeyMatchesCertificate, nullptr, nullptr, nullptr,
      napi_default, nullptr},
+    {"certificateFingerprint", nullptr, CertificateFingerprint, nullptr, nullptr, nullptr,
+     napi_default, nullptr},
     {"readSignedProfile", nullptr, ReadSignedProfile, nullptr, nullptr, nullptr, napi_default,
      nullptr},
+    {"generateCsr", nullptr, GenerateCsr, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"profileMatchesCertificate", nullptr, ProfileMatchesCertificate, nullptr, nullptr,
      nullptr, napi_default, nullptr},
     {"verifyHap", nullptr, VerifyHap, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -463,7 +596,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"hdcCommand", nullptr, HdcCommand, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"hdcDisconnect", nullptr, HdcDisconnect, nullptr, nullptr, nullptr, napi_default, nullptr}
   };
-  napi_define_properties(env, exports, 10, properties);
+  napi_define_properties(env, exports, 13, properties);
   return exports;
 }
 

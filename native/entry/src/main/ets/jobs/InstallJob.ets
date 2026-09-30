@@ -9,6 +9,7 @@ export enum InstallStage {
   WAITING_NETWORK = 'waiting_network',
   WAITING_ACCOUNT = 'waiting_account',
   WAITING_DEVICE = 'waiting_device',
+  WAITING_CONFIRMATION = 'waiting_confirmation',
   INSTALLING = 'installing',
   INSTALLED = 'installed',
   RETRYABLE_ERROR = 'retryable_error',
@@ -27,7 +28,11 @@ export class InstallJob {
   assetName: string = '';
   sourceUrl: string = '';
   mirrorUrls: string[] = [];
+  /** 本机缓存的实际摘要；在线任务下载前可为空，不要求匹配商店元数据。 */
   expectedSha256: string = '';
+  /** 目录声明的身份，仅用于核对下载的 HAP；空值表示旧任务或本地导入。 */
+  catalogBundleName: string = '';
+  catalogVersionCode: number = 0;
   bundleName: string = '';
   versionCode: number = 0;
   moduleName: string = '';
@@ -48,6 +53,15 @@ export class InstallJob {
   deviceUdid: string = '';
   profileSha256: string = '';
   signedProfileSha256: string = '';
+  /** 任务选用的证书 ID，恢复时不能无意改用新的默认身份。 */
+  signingCertId: string = '';
+  /** 同版本修复内嵌工作模块时，不能只凭外包版本相同跳过安装。 */
+  reinstallRequired: boolean = false;
+  /** 用户明确接受卸载重装导致应用数据丢失，只对当前任务生效。 */
+  allowDataLoss: boolean = false;
+  approvedInstalledVersion: number = 0;
+  approvedInstalledFingerprint: string = '';
+  approvedInstalledAppIdentifier: string = '';
   transferTaskId: string = '';
   attempt: number = 0;
   lastError: string = '';
@@ -78,6 +92,7 @@ export enum FailureKind {
   NETWORK = 'network',
   ACCOUNT = 'account',
   DEVICE = 'device',
+  CONFIRMATION = 'confirmation',
   TRANSIENT = 'transient',
   INTERNAL = 'internal',
   INVALID_PACKAGE = 'invalid_package'

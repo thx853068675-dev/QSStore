@@ -1,4 +1,4 @@
-import { readModuleJson, readPackInfo, readHapIcon } from 'libhap_core.so';
+import { readModuleJson, readPackInfo, readHapIcon, readInstallPermissions } from 'libhap_core.so';
 
 export class PackageInspectError extends Error {
   constructor(message: string) {
@@ -9,6 +9,8 @@ export class PackageInspectError extends Error {
 export class PackageIdentity {
   bundleName: string = '';
   versionCode: number = 0;
+  /** 清单里的 `app.versionName`，如 0.4.13；缺省时为空。 */
+  versionName: string = '';
   moduleName: string = '';
   mainAbility: string = '';
 }
@@ -23,6 +25,9 @@ export function inspectPackage(path: string): PackageIdentity {
     const identity = new PackageIdentity();
     identity.bundleName = String(app?.['bundleName'] ?? '');
     identity.versionCode = Number(app?.['versionCode'] ?? 0);
+    // 版本名要一起取出来。界面上显示 versionCode 会得到 2026092910 这种
+    // 看着像日期的数字；本地安装没有目录可比对，只能从包里读。
+    identity.versionName = String(app?.['versionName'] ?? '');
     const module = manifest['module'] as Record<string, Object> | undefined;
     identity.moduleName = String(module?.['name'] ?? '');
     identity.mainAbility = String(module?.['mainElement'] ?? '');
@@ -34,10 +39,13 @@ export function inspectPackage(path: string): PackageIdentity {
       const packName = String(packApp?.['bundleName'] ?? '');
       const version = packApp?.['version'] as Record<string, Object> | undefined;
       const packCode = Number(version?.['code'] ?? 0);
+      const packNameText = String(version?.['name'] ?? '');
       if (packName !== identity.bundleName || !Number.isSafeInteger(packCode) || packCode <= 0) {
         throw new PackageInspectError('pack.info 与 HAP 清单的应用身份不一致');
       }
       identity.versionCode = packCode;
+      // 两边都有版本名时以 pack.info 为准（Package Manager 用它）；只有一边有就用那边。
+      if (packNameText.length > 0) identity.versionName = packNameText;
     }
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(identity.bundleName) ||
       !Number.isSafeInteger(identity.versionCode) || identity.versionCode <= 0) {
@@ -50,16 +58,25 @@ export function inspectPackage(path: string): PackageIdentity {
   }
 }
 
+/** 放宽目录 SHA-256 后，仍拒绝与用户所选应用或版本不符的附件。 */
+export function checkCatalogIdentity(bundleName: string, versionCode: number,
+  actual: PackageIdentity): void {
+  if (bundleName.length > 0 && actual.bundleName !== bundleName) {
+    throw new PackageInspectError('下载的 HAP 包名与所选应用不一致');
+  }
+  if (versionCode > 0 && actual.versionCode !== versionCode) {
+    throw new PackageInspectError('下载的 HAP 版本与所选版本不一致');
+  }
+}
+
 export function requestedPermissions(path: string): string[] {
   try {
-    const manifest = JSON.parse(readModuleJson(path)) as Record<string, Object>;
-    const module = manifest['module'] as Record<string, Object> | undefined;
-    const rows = module?.['requestPermissions'] as Array<Record<string, Object>> | undefined;
-    return (rows ?? []).map((row: Record<string, Object>) => String(row['name'] ?? ''))
+    const rows = JSON.parse(readInstallPermissions(path)) as string[];
+    return rows
       .filter((name: string, index: number, names: string[]) =>
         /^ohos\.permission\.[A-Za-z0-9_.]+$/.test(name) && names.indexOf(name) === index);
   } catch (_) {
-    throw new PackageInspectError('无法读取 HAP 声明的权限');
+    throw new PackageInspectError('无法读取 HAP 及内包声明的权限');
   }
 }
 

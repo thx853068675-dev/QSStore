@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.tonghongxiang.hapstore.nativepreview",
     "vendor": "tonghongxiang",
-    "versionCode": 2026092904,
-    "versionName": "0.4.7",
+    "versionCode": 2026093013,
+    "versionName": "0.4.47",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

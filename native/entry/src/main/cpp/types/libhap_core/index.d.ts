@@ -16,5 +16,6 @@ export const verifyHap: (path: string) => Promise<void>;
 export const signHap: (input: string, output: string, privateKey: string,
   certificates: string, profile: string) => Promise<void>;
 export const hdcCommand: (keyRoot: string, operation: number, parameter: string) => Promise<string>;
+export const hdcInstallProgress: (path: string, reset?: boolean) => string;
 /** 断开所有设备调试链路，返回断开数量。失败按 0 处理。 */
 export const hdcDisconnect: () => number;

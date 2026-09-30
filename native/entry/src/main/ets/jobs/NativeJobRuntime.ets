@@ -13,6 +13,7 @@ import { JobStore } from './JobStore';
 import { InstalledSigningIdentity } from './InstalledAppRegistry';
 import { checkCatalogIdentity, inspectPackage, PackageInspectError, requestedPermissions } from './PackageInspector';
 import { JobCancellation } from './JobCancellation';
+import { InstallTaskState } from './InstallTaskState';
 
 // A concrete adapter must query the device after reconnecting. Installed
 // version is the final proof; a successful HDC command alone is insufficient.
@@ -21,7 +22,8 @@ export interface NativeDeviceBridge {
   udid(): Promise<string>;
   installedVersion(bundleName: string): Promise<number>;
   installedSigningIdentity(bundleName: string): Promise<InstalledSigningIdentity | undefined>;
-  install(signedHapPath: string): Promise<void>;
+  install(signedHapPath: string,
+    onProgress?: (phase: string, sent: number, total: number) => void): Promise<void>;
   uninstall(bundleName: string): Promise<void>;
   installSelfAfterUninstall(signedHapPath: string): Promise<void>;
 }
@@ -406,7 +408,11 @@ export class NativeJobRuntime implements JobRuntime {
       }
     }
     if (!replacing) JobCancellation.assertActive(job.id);
-    try { await this.device.install(path); }
+    try {
+      await this.device.install(path, (phase: string, sent: number, total: number) =>
+        InstallTaskState.installProgress(job.id, phase, sent, total));
+      InstallTaskState.installProgress(job.id, 'verifying', 0, 0);
+    }
     catch (error) {
       // 自更新可能先让 HDC 宿主断开，随后才把成功响应送回来。系统版本
       // 已经是目标版本时直接让 JobRunner 完成，不再要求用户重新配对。

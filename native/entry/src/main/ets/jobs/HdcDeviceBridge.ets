@@ -1,8 +1,9 @@
+import { ConnectionHint } from './ConnectionHint';
 import { InstalledAppRegistry, InstalledSigningIdentity } from './InstalledAppRegistry';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
-import { hdcCommand, hdcDisconnect } from 'libhap_core.so';
+import { hdcCommand, hdcDisconnect, hdcInstallProgress } from 'libhap_core.so';
 import { NativeDeviceBridge } from './NativeJobRuntime';
 
 // All commands share one in-process Rust HDC host. Serialize install and
@@ -13,17 +14,20 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
 
   private static queue: Promise<void> = Promise.resolve();
   private context: common.UIAbilityContext;
+  private connectFailure: string = '';
 
   constructor(context: common.UIAbilityContext) {
     this.context = context;
   }
 
-  private async command(operation: number, parameter: string = ''): Promise<string> {
+  private async command(operation: number, parameter: string = '',
+    onStart?: () => void): Promise<string> {
     const previous = HdcDeviceBridge.queue;
     let release: () => void = () => {};
     HdcDeviceBridge.queue = new Promise<void>((resolve: () => void) => { release = resolve; });
     await previous;
     try {
+      onStart?.();
       const output = await hdcCommand(this.context.filesDir, operation, parameter);
       // HDC 返回 [Fail] 时 Promise 仍会 resolve；执行过命令不等于链路可用。
       if (output.includes('[Fail]')) HdcDeviceBridge.linked = false;
@@ -66,7 +70,7 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     return HdcDeviceBridge.linked;
   }
 
-  private async savedPort(): Promise<number> {
+  async savedPort(): Promise<number> {
     const store = await preferences.getPreferences(this.context, 'wireless-debug');
     return Number(await store.get('port', 0));
   }
@@ -104,17 +108,27 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     }
   }
 
+  connectionFailureMessage(): string { return ConnectionHint.message(this.connectFailure); }
+
   async connect(port: number, persist: boolean = true,
     retryTrust: boolean = true): Promise<boolean> {
     if (!Number.isInteger(port) || port < 1024 || port > 65535) {
       throw new Error('请输入无线调试页显示的端口号');
     }
+    this.connectFailure = '';
     // 端口改变时旧会话仍留在内置 HDC 服务端，先释放才能切换目标。
     HdcDeviceBridge.releaseDevice();
     const hosts = retryTrust ? ['127.0.0.1', 'localhost'] : ['127.0.0.1'];
     for (const host of hosts) {
       for (let attempt = 0; attempt < (retryTrust && host === '127.0.0.1' ? 2 : 1); attempt++) {
-        try { await this.command(1, host + ':' + port); } catch (_) {}
+        try {
+          const response = await this.command(1, host + ':' + port);
+          if (response.includes('[Fail]') && this.connectFailure.length === 0) this.connectFailure = response;
+        } catch (error) {
+          if (this.connectFailure.length === 0) this.connectFailure = String(error);
+        }
+        // 明确拒绝连接时重试同一端口无法恢复，不再浪费授权等待时间。
+        if (ConnectionHint.closed(this.connectFailure)) return false;
         try {
           if ((await this.liveUdid()).length > 0) {
             if (persist) await this.rememberPort(port);
@@ -146,6 +160,11 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     }
     await InstalledAppRegistry.load(this.context);
     if (!await this.connected()) throw new Error('无线调试已断开');
+    return this.readInstalledVersion(bundleName, persistResult);
+  }
+
+  /** 批量扫描已经核过链路，不为每个包重复读取 UDID 或重连。 */
+  private async readInstalledVersion(bundleName: string, persistResult: boolean): Promise<number> {
     const output = await this.command(3, bundleName);
     try {
       const version = InstalledAppRegistry.parseVersion(output, bundleName);
@@ -175,12 +194,34 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     return InstalledAppRegistry.parseSigningIdentity(output, bundleName);
   }
 
-  async install(signedHapPath: string): Promise<void> {
+  async install(signedHapPath: string,
+    onProgress?: (phase: string, sent: number, total: number) => void): Promise<void> {
     if (!fileIo.accessSync(signedHapPath) || !signedHapPath.startsWith(this.context.filesDir + '/')) {
       throw new Error('签名包不在应用工作目录中');
     }
     if (!await this.connected()) throw new Error('无线调试已断开');
-    const output = await this.command(4, signedHapPath);
+    let timer = -1;
+    const report = (): void => {
+      try {
+        const row = JSON.parse(hdcInstallProgress(signedHapPath)) as Record<string, Object>;
+        onProgress?.(String(row['phase'] ?? 'waiting'), Number(row['sent'] ?? 0),
+          Number(row['total'] ?? 0));
+      } catch (_) {
+        // 反馈读取失败不能中断设备安装。
+      }
+    };
+    let output = '';
+    try {
+      output = await this.command(4, signedHapPath, () => {
+        if (onProgress === undefined) return;
+        try { hdcInstallProgress(signedHapPath, true); } catch (_) {}
+        report();
+        timer = setInterval(report, 150);
+      });
+      if (onProgress !== undefined) report();
+    } finally {
+      if (timer !== -1) clearInterval(timer);
+    }
     if (output.includes('[Fail]') || /\berror\s*:|\bfailed\b|\bcode\s*:\s*[1-9]\d*/i.test(output)) {
       throw new Error(output.trim().length > 0 ? output.trim() : '设备未确认安装结果');
     }
@@ -248,7 +289,7 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
       }
       try {
         // 不把单包失败变成未安装；保留它在存在性清单中的位置。
-        found.set(name, await this.installedVersion(name, false));
+        found.set(name, await this.readInstalledVersion(name, false));
       } catch (error) {
         console.warn('InstalledApps: version query failed for ' + name + ': ' + String(error));
       }

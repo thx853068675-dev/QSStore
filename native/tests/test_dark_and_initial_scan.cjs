@@ -34,7 +34,7 @@ function deferred() {
 function fixture() {
   const f = { snapshot: false, snapshots: 0, probes: [], reconciles: [] };
   const ui = page('Index', ['updateInstallScanPrompt', 'openInstallScan',
-    'confirmCatalogVersionsViaDevice'], {
+    'confirmCatalogVersionsViaDevice', 'reconcileCatalogInstallState'], {
     getContext: () => ({}),
     InstalledAppRegistry: {
       hasCatalogSnapshot: () => f.snapshot,
@@ -48,7 +48,7 @@ function fixture() {
     }
   });
   Object.assign(ui, { apps: [{ id: 1, latestAsset: { bundleName: 'com.example.one' } }],
-    installedVersions: new Map(), catalogProbeBusy: false, catalogProbePending: [],
+    installedJobs: [], forgetInstalledVersions() {}, installedVersions: new Map(), catalogProbeNames: [], catalogProbeBusy: false, catalogProbePending: [],
     updateCatalogReady: true, accountChecked: true, signedIn: true,
     initialScanDismissed: false, showReconnect: false, showSubmit: false, showAppConfig: false,
     activeJobId: '', pendingJobs: [], reconnectBusy: false,
@@ -166,4 +166,13 @@ test('an old icon color request cannot put a light hero background into a dark p
   requests[1].resolve('#152030'); await new Promise(resolve => setImmediate(resolve));
   requests[0].resolve('#eaf0ff'); await new Promise(resolve => setImmediate(resolve));
   assert.equal(ui.heroColor, '#152030');
+});
+
+test('an inventory already in flight covers repeated requests for the same packages', async () => {
+  const f = fixture(), ui = f.ui;
+  const work = ui.confirmCatalogVersionsViaDevice(['com.example.one']);
+  await ui.confirmCatalogVersionsViaDevice(['com.example.one', 'com.example.one']);
+  f.probes[0].resolve(new Map([['com.example.one', 1]])); await work;
+  assert.equal(f.probes.length, 1);
+  assert.equal(ui.installedVersions.get(1), 1);
 });

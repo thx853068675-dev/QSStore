@@ -844,6 +844,26 @@ pub extern "C" fn qingqi_hdc_disconnect(
 }
 
 #[no_mangle]
+pub extern "C" fn qingqi_hdc_install_progress(
+    file_path: *const c_char, reset: u32, output: *mut u8,
+    capacity: usize, length: *mut usize,
+) -> i32 {
+    let result = panic::catch_unwind(|| -> Result<String, String> {
+        let file = path(file_path)?;
+        if reset != 0 { qingqi_hdc_transport::reset_install_progress(&file); }
+        let (phase, sent, total) = qingqi_hdc_transport::install_progress(&file);
+        Ok(serde_json::json!({ "phase": phase, "sent": sent, "total": total }).to_string())
+    });
+    let Ok(Ok(text)) = result else { return 1; };
+    if output.is_null() || length.is_null() || text.len() > capacity { return 1; }
+    unsafe {
+        std::ptr::copy_nonoverlapping(text.as_ptr(), output, text.len());
+        *length = text.len();
+    }
+    0
+}
+
+#[no_mangle]
 pub extern "C" fn qingqi_hdc_command(
     key_root: *const c_char,
     port: u16,

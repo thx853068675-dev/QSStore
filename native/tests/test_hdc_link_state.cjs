@@ -28,7 +28,8 @@ function fixture(responses, savedPort = 0) {
     'libhap_core.so': native,
     '@kit.ArkData': { preferences: { getPreferences: async () => preference } },
     '@kit.CoreFileKit': { fileIo: {} },
-    './InstalledAppRegistry': { InstalledAppRegistry: {} }
+    './InstalledAppRegistry': { InstalledAppRegistry: {} },
+    './ConnectionHint': { ConnectionHint: { closed: detail => /connection refused/i.test(detail) } }
   })[name] || {} });
   return { bridge: new exports.HdcDeviceBridge({ filesDir: '/data/app/files' }),
     Bridge: exports.HdcDeviceBridge, calls, get savedPort() { return savedPort; } };

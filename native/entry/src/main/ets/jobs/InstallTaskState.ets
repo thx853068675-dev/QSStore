@@ -1,3 +1,4 @@
+import { InstallReconnect } from './InstallReconnect';
 import { InstallJob, InstallStage } from './InstallJob';
 
 /** 进程内的任务视图：阶段来自已落盘记录，进度来自下载器，执行状态来自调度器。 */
@@ -6,6 +7,9 @@ export class InstallTaskSnapshot {
   running: boolean = false;
   finishing: boolean = false;
   percent: number = 0;
+  phase: string = '';
+  received: number = 0;
+  total: number = 0;
 }
 
 export class InstallTaskState {
@@ -15,6 +19,7 @@ export class InstallTaskState {
   private static removed: Set<string> = new Set();
   private static listeners: Map<number, (rows: InstallTaskSnapshot[]) => void> = new Map();
   private static nextListener: number = 0;
+  private static pulseTimer: number = -1;
 
   static snapshot(): InstallTaskSnapshot[] {
     return Array.from(InstallTaskState.tasks.values()).sort((a, b) => b.job.updatedAt - a.job.updatedAt);
@@ -24,11 +29,13 @@ export class InstallTaskState {
     const id = ++InstallTaskState.nextListener;
     InstallTaskState.listeners.set(id, listener);
     listener(InstallTaskState.snapshot());
+    InstallTaskState.syncPulse();
     return id;
   }
 
   static unsubscribe(id: number): void {
     InstallTaskState.listeners.delete(id);
+    InstallTaskState.syncPulse();
   }
 
   private static emit(): void {
@@ -37,6 +44,20 @@ export class InstallTaskState {
       // 页面被销毁或渲染失败不能中断任务流水线。
       try { listener(rows); } catch (_) {}
     });
+    InstallTaskState.syncPulse();
+  }
+
+  /** 无数字反馈的阶段每秒重绘用时；无订阅者或没有活动任务即停止。 */
+  private static syncPulse(): void {
+    const active = InstallTaskState.listeners.size > 0 &&
+      InstallTaskState.snapshot().some((row: InstallTaskSnapshot) =>
+        row.running && row.job.stage !== InstallStage.INSTALLED && !InstallTaskState.determinate(row));
+    if (active && InstallTaskState.pulseTimer === -1) {
+      InstallTaskState.pulseTimer = setInterval(() => InstallTaskState.emit(), 1000);
+    } else if (!active && InstallTaskState.pulseTimer !== -1) {
+      clearInterval(InstallTaskState.pulseTimer);
+      InstallTaskState.pulseTimer = -1;
+    }
   }
 
   /** 启动时恢复快照，慢查询不能覆盖期间的进度、阶段或删除。 */
@@ -62,13 +83,16 @@ export class InstallTaskState {
   static publish(job: InstallJob): void {
     const old = InstallTaskState.tasks.get(job.id);
     const row = InstallTaskState.make(job);
-    if (old !== undefined && job.stage === old.job.stage) row.percent = old.percent;
+    if (old !== undefined && job.stage === old.job.stage) InstallTaskState.copyProgress(old, row);
     InstallTaskState.removed.delete(job.id);
     InstallTaskState.tasks.set(job.id, row);
+    if (job.stage === InstallStage.WAITING_DEVICE && row.running) InstallReconnect.request(job.id);
+    else if (job.stage !== InstallStage.WAITING_DEVICE) InstallReconnect.clear(job.id);
     InstallTaskState.emit();
   }
 
   static remove(id: string): void {
+    InstallReconnect.clear(id);
     InstallTaskState.removed.add(id);
     InstallTaskState.tasks.delete(id);
     InstallTaskState.emit();
@@ -82,21 +106,50 @@ export class InstallTaskState {
     const old = InstallTaskState.tasks.get(id);
     if (old !== undefined) {
       const row = InstallTaskState.make(old.job);
-      row.percent = old.percent;
+      InstallTaskState.copyProgress(old, row);
       InstallTaskState.tasks.set(id, row);
     }
     InstallTaskState.emit();
   }
 
+  private static copyProgress(old: InstallTaskSnapshot, row: InstallTaskSnapshot): void {
+    row.percent = old.percent;
+    row.phase = old.phase;
+    row.received = old.received;
+    row.total = old.total;
+  }
+
   static downloadProgress(id: string, received: number, total: number): void {
     const old = InstallTaskState.tasks.get(id);
-    if (old === undefined || old.job.stage !== InstallStage.DOWNLOADING || total <= 0) return;
-    const percent = Math.min(68, Math.max(0, Math.floor(received * 68 / total)));
-    if (percent === old.percent) return;
+    if (old === undefined || old.job.stage !== InstallStage.DOWNLOADING ||
+      !Number.isFinite(received) || !Number.isFinite(total) || total <= 0) return;
+    const bytes = Math.min(total, Math.max(0, received));
+    const percent = Math.floor(bytes * 100 / total);
+    if (percent === old.percent && bytes === old.received && total === old.total) return;
     const row = InstallTaskState.make(old.job);
-    row.percent = percent;
+    row.phase = 'download'; row.received = bytes; row.total = total; row.percent = percent;
     InstallTaskState.tasks.set(id, row);
     InstallTaskState.emit();
+  }
+
+  /** 传包按真实字节计数；包管理器只给最终结果，不能伪造总百分比。 */
+  static installProgress(id: string, phase: string, received: number, total: number): void {
+    const old = InstallTaskState.tasks.get(id);
+    if (old === undefined || !old.running || old.job.stage !== InstallStage.INSTALLING ||
+      !['waiting', 'transfer', 'installing', 'verifying'].includes(phase)) return;
+    const size = Number.isFinite(total) && total > 0 ? total : 0;
+    const bytes = Number.isFinite(received) ? Math.min(size, Math.max(0, received)) : 0;
+    const percent = phase === 'transfer' && size > 0 ? Math.floor(bytes * 100 / size) : 0;
+    if (phase === old.phase && bytes === old.received && size === old.total) return;
+    const row = InstallTaskState.make(old.job);
+    row.phase = phase; row.received = bytes; row.total = size; row.percent = percent;
+    InstallTaskState.tasks.set(id, row);
+    InstallTaskState.emit();
+  }
+
+  static determinate(row: InstallTaskSnapshot): boolean {
+    return row.total > 0 && (row.job.stage === InstallStage.DOWNLOADING ||
+      (row.job.stage === InstallStage.INSTALLING && row.phase === 'transfer'));
   }
 
   static forApp(rows: InstallTaskSnapshot[], appId: number, bundleName: string = ''):
@@ -126,25 +179,10 @@ export class InstallTaskState {
   }
 
   static stagePercent(stage: InstallStage): number {
-    switch (stage) {
-      case InstallStage.VERIFIED: return 70;
-      case InstallStage.PACKAGE_INSPECTED: return 75;
-      case InstallStage.PROFILE_READY: return 80;
-      case InstallStage.SIGNED: return 90;
-      case InstallStage.SIGNATURE_VERIFIED: return 92;
-      case InstallStage.INSTALLING: return 95;
-      case InstallStage.INSTALLED: return 100;
-      default: return 0;
-    }
+    return stage === InstallStage.INSTALLED ? 100 : 0;
   }
 
-  /**
-   * 当前阶段已经过去多久（毫秒）。
-   *
-   * 用 `stageHistory` 里最后一条的时间戳，不需要额外字段。**安装那一段没有任何
-   * 中间进度**（设备只在结束时回结果），界面就是一个不动的「95%」——看起来和
-   * 卡死完全一样。有了它就能显示「已用 47 秒」，让用户知道还在走。
-   */
+  /** 安装处理没有分母，显示阶段和耗时，不将里程碑冒充精确百分比。 */
   static stageElapsedMs(row: InstallTaskSnapshot, now: number = Date.now()): number {
     const marks = row.job.stageHistory;
     for (let i = marks.length - 1; i >= 0; i--) {
@@ -160,20 +198,21 @@ export class InstallTaskState {
     if (row.finishing) return '正在收尾';
     switch (row.job.stage) {
       case InstallStage.QUEUED: return '排队中';
-      case InstallStage.DOWNLOADING: return row.running ? '下载中 ' + row.percent + '%' : '等待继续下载';
-      case InstallStage.VERIFIED: return '读取安装包 ' + row.percent + '%';
-      case InstallStage.PACKAGE_INSPECTED: return '准备授权 ' + row.percent + '%';
-      case InstallStage.PROFILE_READY: return '签名中 ' + row.percent + '%';
+      case InstallStage.DOWNLOADING: return row.running ? '下载中' +
+        (row.total > 0 ? ' ' + row.percent + '%' : '') : '等待继续下载';
+      case InstallStage.VERIFIED: return '读取安装包';
+      case InstallStage.PACKAGE_INSPECTED: return '准备授权';
+      case InstallStage.PROFILE_READY: return '签名中';
       case InstallStage.SIGNED:
-      case InstallStage.SIGNATURE_VERIFIED: return '准备安装 ' + row.percent + '%';
+      case InstallStage.SIGNATURE_VERIFIED: return '准备安装';
       case InstallStage.INSTALLING: {
         if (!row.running) return '等待确认安装';
-        // 这一段可能是几分钟（设备要先停掉正在运行的旧版本，自更新时更慢）。
-        // 只有百分比的话界面完全静止，所以补上已用时间。
+        if (row.phase === 'transfer' && row.total > 0) return '传送中 ' + row.percent + '%';
+        const currentPhase = row.phase ?? '';
+        const phase = currentPhase === 'verifying' ? '确认安装结果' :
+          (currentPhase === 'waiting' || currentPhase.length === 0 ? '等待设备接收' : '系统安装中');
         const elapsed = InstallTaskState.stageElapsedMs(row, now);
-        return elapsed >= 1000 ?
-          '安装中 ' + row.percent + '% · 已用 ' + Math.floor(elapsed / 1000) + ' 秒' :
-          '安装中 ' + row.percent + '%';
+        return elapsed >= 1000 ? phase + ' · ' + Math.floor(elapsed / 1000) + ' 秒' : phase;
       }
       case InstallStage.INSTALLED: return '安装完成';
       case InstallStage.WAITING_DEVICE: return '等待连接';

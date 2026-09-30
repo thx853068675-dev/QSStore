@@ -16,7 +16,7 @@ function fixture(kits = {}) {
     const code = ts.transpileModule(fs.readFileSync(path.join(root, name + '.ets'), 'utf8'), {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
     }).outputText;
-    vm.runInNewContext(code, { exports, setTimeout, clearTimeout,
+    vm.runInNewContext(code, { exports, setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {},
       require: dep => dep.startsWith('.') ? load(path.posix.join(path.posix.dirname(name), dep)) : (kits[dep] || {}) });
     return exports;
   }
@@ -62,7 +62,7 @@ function pages(f) {
       selectedAsset: { name: 'app.hap', sha256: 'a'.repeat(64),
         bundleName: 'test.bundle', versionCode: 2 },
       installTasks: [], installedJobs: [], downloadBusy: false, downloadPercent: 0,
-      refreshInstalledVersion() {}, installedForApp() { return this.installedJobs[0]; },
+      paintInstallButton() {}, refreshInstalledVersion() {}, installedForApp() { return this.installedJobs[0]; },
       selectedVersionLabel: () => '2' });
     ui.observeInstallTasks(); return ui;
   }
@@ -90,14 +90,14 @@ test('Discover, a newly opened Detail, and Management consume the same running t
   const work = f.scheduler.runExclusive(f.job.id, () => gate);
   f.state.downloadProgress(f.job.id, 50, 100);
   const d = detail();
-  assert.equal(index.taskLabel(42), '下载中 34%');
+  assert.equal(index.taskLabel(42), '下载中 50%');
   assert.equal(d.installButtonLabel(), index.taskLabel(42));
-  assert.equal(d.downloadPercent, 34); assert.equal(d.downloadBusy, true);
+  assert.equal(d.downloadPercent, 50); assert.equal(d.downloadBusy, true);
   assert.equal(index.pendingJobs.length, 1);
   assert.equal(index.taskJobLabel(index.pendingJobs[0]), d.installButtonLabel());
   await assert.rejects(f.scheduler.runExclusive(f.job.id, async () => {}), /正在执行/);
   f.job.stage = f.InstallStage.PROFILE_READY; await f.store.save(f.job);
-  assert.equal(d.installButtonLabel(), '签名中 80%');
+  assert.equal(d.installButtonLabel(), '签名中');
   assert.equal(index.taskLabel(42), d.installButtonLabel());
   f.job.stage = f.InstallStage.INSTALLED; await f.store.save(f.job); release(); await work;
   assert.equal(d.downloadBusy, false); assert.equal(d.installButtonLabel(), '打开应用');
@@ -127,7 +127,7 @@ test('slow seed and removal cannot resurrect obsolete records or reset byte prog
   const f = fixture(); f.job.stage = f.InstallStage.DOWNLOADING;
   const stale = JSON.parse(JSON.stringify(f.job)); await f.store.save(f.job);
   f.state.downloadProgress(f.job.id, 70, 100); f.state.seed([stale]);
-  assert.equal(f.state.snapshot()[0].percent, 47);
+  assert.equal(f.state.snapshot()[0].percent, 70);
   await f.store.forget(f.job.id); f.state.seed([stale]);
   assert.equal(f.state.snapshot().length, 0);
 });
@@ -367,8 +367,8 @@ test('installing label shows elapsed time so a long install does not look frozen
   f.job.stageHistory = [{ stage: f.InstallStage.INSTALLING, at: start }];
   const row = { job: f.job, running: true, finishing: false, percent: 95 };
   // 设备只在结束时回结果，中途百分比不动；没有耗时的话界面完全静止
-  assert.equal(f.state.label(row, start + 400), '安装中 95%');
-  assert.equal(f.state.label(row, start + 47000), '安装中 95% · 已用 47 秒');
+  assert.equal(f.state.label(row, start + 400), '等待设备接收');
+  assert.equal(f.state.label(row, start + 47000), '等待设备接收 · 47 秒');
 });
 
 test('installing label omits elapsed time when the stage just started', () => {
@@ -377,7 +377,7 @@ test('installing label omits elapsed time when the stage just started', () => {
   f.job.stage = f.InstallStage.INSTALLING;
   f.job.stageHistory = [{ stage: f.InstallStage.INSTALLING, at: start }];
   const row = { job: f.job, running: true, finishing: false, percent: 95 };
-  assert.equal(f.state.label(row, start), '安装中 95%');
+  assert.equal(f.state.label(row, start), '等待设备接收');
 });
 
 test('a paused install still says waiting instead of showing elapsed time', () => {
@@ -394,7 +394,7 @@ test('stageElapsedMs falls back to zero when the stage has no mark yet', () => {
   f.job.stageHistory = [];
   const row = { job: f.job, running: true, finishing: false, percent: 95 };
   assert.equal(f.state.stageElapsedMs(row, 5000), 0);
-  assert.equal(f.state.label(row, 5000), '安装中 95%');
+  assert.equal(f.state.label(row, 5000), '等待设备接收');
 });
 
 test('cancel removes the task immediately, blocks late saves, and cleans after live work settles', async () => {
@@ -513,4 +513,34 @@ test('same-version module repair submits installation rather than accepting vers
   assert.equal(calls, 1);
   assert.equal(result.stage, f.InstallStage.INSTALLED);
   assert.equal(result.reinstallRequired, false);
+});
+
+test('device transfer has real byte percentages; system install never pretends to be at 95 percent', async () => {
+  const f = fixture(), { index, detail } = pages(f), d = detail();
+  f.job.stage = f.InstallStage.INSTALLING; await f.store.save(f.job);
+  f.state.setRunning(f.job.id, true);
+  f.state.installProgress(f.job.id, 'transfer', 25, 100);
+  assert.equal(index.taskLabel(42), '传送中 25%');
+  assert.equal(d.installButtonLabel(), index.taskLabel(42));
+  assert.equal(f.state.determinate(f.state.snapshot()[0]), true);
+  // Updating another job field must not erase the live transfer observation.
+  await f.store.save(f.job); assert.equal(d.downloadPercent, 25);
+  f.state.installProgress(f.job.id, 'installing', 100, 100);
+  assert.match(d.installButtonLabel(), /^系统安装中/);
+  assert.equal(f.state.determinate(f.state.snapshot()[0]), false);
+  assert.doesNotMatch(d.installButtonLabel(), /95|100%/);
+  f.state.installProgress(f.job.id, 'verifying', 0, 0);
+  assert.match(index.taskLabel(42), /^确认安装结果/);
+  f.job.stage = f.InstallStage.INSTALLED; await f.store.save(f.job);
+  f.state.setRunning(f.job.id, false);
+  assert.equal(f.state.snapshot()[0].percent, 100);
+});
+
+test('late native progress cannot revive a completed or canceled task', async () => {
+  const f = fixture();
+  f.job.stage = f.InstallStage.INSTALLED; await f.store.save(f.job);
+  f.state.installProgress(f.job.id, 'transfer', 1, 100);
+  assert.equal(f.state.snapshot()[0].percent, 100);
+  f.state.remove(f.job.id); f.state.installProgress(f.job.id, 'transfer', 50, 100);
+  assert.equal(f.state.snapshot().length, 0);
 });

@@ -7,6 +7,7 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 
 function loadRuntime(mocks) {
+  mocks['./InstallTaskState'] = { InstallTaskState: { installProgress: () => {} } };
   const file = path.join(__dirname, '../entry/src/main/ets/jobs/NativeJobRuntime.ets');
   const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }

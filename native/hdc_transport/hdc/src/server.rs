@@ -2463,6 +2463,7 @@ async fn handle_server_file_send(
         Error::new(ErrorKind::NotFound, format!("Local file not found: {e}"))
     })?;
     let file_size = metadata.len();
+
     info!("file send: local={local_path}, remote={remote_path}, size={file_size}");
 
     let local_filename = std::path::Path::new(&local_path)
@@ -2946,6 +2947,7 @@ async fn install_single_hap(
     let file_size = metadata.len();
 
     // Step 1: Send AppInit to daemon (creates daemon slave task, no direct response).
+    crate::report_install_progress(app_path_str, "waiting", 0, file_size);
     let app_init = TaskMessage {
         channel_id,
         command: HdcCommand::AppInit,
@@ -3009,6 +3011,8 @@ async fn install_single_hap(
     }
     info!("AppBegin received, daemon ready to receive data");
 
+    crate::report_install_progress(app_path_str, "transfer", 0, file_size);
+
     // Step 3: Stream app data with TransferPayload header (same as file send)
     let chunk_size = MAX_SIZE_IOBUF - 64;
     let mut file = tokio::fs::File::open(app_path).await?;
@@ -3038,10 +3042,12 @@ async fn install_single_hap(
         let data = concat_pack(&app_data);
         send_to_session(tcp_map, usb_map, session_id, &data).await?;
         offset += n as u64;
+        crate::report_install_progress(app_path_str, "transfer", offset, file_size);
     }
 
     // Step 4: Wait for daemon install result (AppFinish).
     info!("App data sent, waiting for daemon install result...");
+    crate::report_install_progress(app_path_str, "installing", offset, file_size);
     let timeout = tokio::time::Duration::from_secs(120);
     let install_result = tokio::time::timeout(timeout, async {
         loop {

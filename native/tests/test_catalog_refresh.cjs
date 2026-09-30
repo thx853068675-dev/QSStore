@@ -23,7 +23,7 @@ const code = ts.transpileModule(`class Index {
   static REFRESH_MIN_VISIBLE_MS = 600;
   static STAR_FIELD_COUNT = 46;
   static STARRED_MIN_STARS = 100;
-  ${['catalogHasMore', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'flushIconCache', 'iconFor',
+  ${['catalogHasMore', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
     'refreshCatalogInstallState', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice',
     'displayApps', 'featuredTier', 'featuredColors']
     .map(method).join('\n')}
@@ -59,7 +59,7 @@ function fixture() {
     }
     /** 批量查询：一次拿到全部包名与版本号，避免「一个包一次往返」。 */
     async installedBundleVersions() {
-      if (f.deviceThrows) throw new Error('offline');
+      if (f.deviceThrows || !f.deviceConnected) throw new Error('offline');
       calls.push('installedBundleVersions');
       if (f.deviceUnparsable) return undefined;
       const out = new Map();
@@ -96,6 +96,7 @@ function fixture() {
     image: { createImageSource: () => ({ createPixelMap: () => f.decode(),
       release: async () => releases.push('source') }) },
     util: { Base64Helper: class { encodeToStringSync(bytes) { return Buffer.from(bytes).toString('base64'); } } },
+    InstalledAppRegistry: { markCatalogSnapshot: async () => {} },
     LocalBundles: f.localBundles,
     HdcDeviceBridge: f.bridgeClass,
     JobStore: { open: async () => f.store }
@@ -103,10 +104,10 @@ function fixture() {
   vm.runInNewContext(code, sandbox);
   sandbox.Page.REFRESH_MIN_VISIBLE_MS = 20;
   const ui = new sandbox.Page();
-  Object.assign(ui, { catalogToken: 0, activeQuery: '', apps: [], appIcons: [], pendingIconCache: [],
+  Object.assign(ui, { catalogToken: 0, activeQuery: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
     catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false,
     catalogRefreshing: false, catalogRefreshBusy: false, catalogError: '',
-    installedVersions: new Map(), installedJobs: [], refreshCatalogInstallState() {},
+    installedVersions: new Map(), installedJobs: [], catalogProbeBusy: false, catalogProbeNames: [], catalogProbePending: [], updateCatalogReady: false, updateInstallScanPrompt() {}, refreshCatalogInstallState() {},
     updateApps() { return this.apps; }, syncDetectedInstalled() {}, reconcileDetectedJobs: async () => {}, forgetInstalledVersions() {}, loadUpdateCatalog() {}, checkInstalledUpdates() {},
     refreshCatalogInstallState() {} });
   Object.assign(f, f2);
@@ -155,9 +156,9 @@ test('late icon download cannot overwrite search metadata, icons or first-page c
   const old = ui.loadApps(); f.requests[0].resolve(page([1], 99)); await tick();
   ui.activeQuery = 'new'; const latest = ui.loadApps();
   f.requests[1].resolve(page([2])); await latest;
-  icon.resolve(new ArrayBuffer(4)); await old;
+  icon.resolve(new ArrayBuffer(4)); await old; await tick();
   assert.equal(ui.catalogTotal, 1); assert.equal(ui.apps[0].id, 2);
-  assert.equal(ui.appIcons.length, 0); assert.equal(f.saved.length, 0); assert.equal(f.savedIcons.length, 0);
+  assert.equal(ui.appIcons.length, 0); assert.deepEqual(f.saved, [[1]]); assert.equal(f.savedIcons.length, 0);
 });
 test('stale decoded pixels are released instead of appended to newer results', async () => {
   const f = fixture(), ui = f.ui, decode = deferred();
@@ -165,14 +166,14 @@ test('stale decoded pixels are released instead of appended to newer results', a
   f.decode = () => decode.promise;
   const old = ui.loadApps(); f.requests[0].resolve(page([1])); await tick();
   ui.activeQuery = 'new'; const latest = ui.loadApps(); f.requests[1].resolve(page([2])); await latest;
-  decode.resolve({ release: async () => f.releases.push('pixels') }); await old;
+  decode.resolve({ release: async () => f.releases.push('pixels') }); await old; await tick();
   assert.equal(ui.appIcons.length, 0); assert.deepEqual(f.releases, ['pixels', 'source']);
 });
 test('refresh retries missing icons of existing apps but retains available icons', async () => {
   const f = fixture(), ui = f.ui;
   ui.apps = page([1, 2]).items; ui.appIcons = [{ id: 2, rev: 'rev-1', pixels: {} }];
   f.icon = async () => new ArrayBuffer(4);
-  const work = ui.loadApps(); f.requests[0].resolve(page([1, 2])); await work;
+  const work = ui.loadApps(); f.requests[0].resolve(page([1, 2])); await work; await tick();
   assert.deepEqual(f.icons, [1]); assert.equal(ui.appIcons.length, 2);
   assert.equal(f.savedIcons[0][0].id, '1');
 });
@@ -192,7 +193,7 @@ test('a new icon revision replaces the discovery icon and fetches new bytes', as
   f.icon = async () => new ArrayBuffer(4);
   const work = ui.loadApps();
   f.requests[0].resolve(page([{ id: 1, iconRev: 'rev-2' }]));
-  await work;
+  await work; await tick();
   assert.deepEqual(f.icons, [1]);
   assert.equal(ui.appIcons.length, 1);
   assert.equal(ui.appIcons[0].rev, 'rev-2');
@@ -200,7 +201,7 @@ test('a new icon revision replaces the discovery icon and fetches new bytes', as
 test('a transient icon miss gets one retry in the same refresh', async () => {
   const f = fixture(), ui = f.ui;
   f.icon = async () => f.icons.length === 1 ? undefined : new ArrayBuffer(4);
-  const work = ui.loadApps(); f.requests[0].resolve(page([1])); await work;
+  const work = ui.loadApps(); f.requests[0].resolve(page([1])); await work; await tick();
   assert.deepEqual(f.icons, [1, 1]);
   assert.equal(ui.appIcons.length, 1);
 });
@@ -237,7 +238,7 @@ test('reconcile drops install records the device no longer has', async () => {
   ui.installedJobs = [{ id: 'j1', bundleName: 'gone.b' }, { id: 'j2', bundleName: 'here.b' }];
   f.knownBundles = ['gone.b', 'here.b'];
   f.deviceMissing = ['gone.b'];
-  await ui.reconcileCatalogInstallState();
+  await ui.confirmCatalogVersionsViaDevice(ui.apps.map(a => a.latestAsset.bundleName));
 
   // 设备明确报「不存在」的记录要删掉，仍在的保留
   assert.deepEqual(f.removed, ['j1']);
@@ -250,7 +251,7 @@ test('reconcile keeps records when the device cannot be reached', async () => {
   ui.installedJobs = [{ id: 'j1', bundleName: 'gone.b' }];
   f.knownBundles = ['gone.b'];
   f.deviceThrows = true;
-  await ui.reconcileCatalogInstallState();
+  await ui.confirmCatalogVersionsViaDevice(ui.apps.map(a => a.latestAsset.bundleName));
   // 连不上设备时按「不确定」处理：断线一次就清空历史是不可接受的
   assert.deepEqual(f.removed, []);
   assert.deepEqual(ui.installedJobs.map(j => j.id), ['j1']);
@@ -262,7 +263,7 @@ test('reconcile does not touch records while the device is disconnected', async 
   ui.installedJobs = [{ id: 'j1', bundleName: 'gone.b' }];
   f.knownBundles = ['gone.b'];
   f.deviceConnected = false;
-  await ui.reconcileCatalogInstallState();
+  await ui.confirmCatalogVersionsViaDevice(ui.apps.map(a => a.latestAsset.bundleName));
   assert.deepEqual(f.removed, []);
   assert.deepEqual(ui.installedJobs.map(j => j.id), ['j1']);
 });
@@ -273,7 +274,7 @@ test('reconcile asks the device once, not once per app', async () => {
   ui.apps = [];
   for (let i = 0; i < 30; i++) ui.apps.push({ id: i + 1, latestAsset: { bundleName: 'app' + i + '.b' } });
   f.knownBundles = ui.apps.map(a => a.latestAsset.bundleName);
-  await ui.reconcileCatalogInstallState();
+  await ui.confirmCatalogVersionsViaDevice(ui.apps.map(a => a.latestAsset.bundleName));
   const perBundle = f.calls.filter(c => String(c).startsWith('isInstalled:'));
   assert.deepEqual(perBundle, [], '不应逐个查询');
   assert.deepEqual(f.calls, ['installedBundleVersions'], '只应有一次批量查询');
@@ -284,7 +285,7 @@ test('unparsable device list keeps every record', async () => {
   ui.apps = [{ id: 1, latestAsset: { bundleName: 'gone.b' } }];
   ui.installedJobs = [{ id: 'j1', bundleName: 'gone.b' }];
   f.deviceUnparsable = true;   // bm dump -a 输出解析不出包名 → 无法核实
-  await ui.reconcileCatalogInstallState();
+  await ui.confirmCatalogVersionsViaDevice(ui.apps.map(a => a.latestAsset.bundleName));
   assert.deepEqual(f.removed, []);
   assert.deepEqual(ui.installedJobs.map(j => j.id), ['j1']);
 });
@@ -297,7 +298,7 @@ test('reconcile records the version actually on the device', async () => {
   f.deviceVersions = { 'app.b': 2026092908 };
   let updatesChecked = 0;
   ui.checkInstalledUpdates = () => { updatesChecked++; };
-  await ui.reconcileCatalogInstallState();
+  await ui.confirmCatalogVersionsViaDevice(ui.apps.map(a => a.latestAsset.bundleName));
   // 记录里是旧版本 1，设备上是 2026092908 —— 必须以设备为准，
   // 否则卡片会一直显示「更新」
   assert.equal(ui.installedVersions.get(7), 2026092908);
@@ -309,7 +310,7 @@ test('reconcile leaves version state alone when the device is unparsable', async
   ui.apps = [{ id: 7, latestAsset: { bundleName: 'app.b' } }];
   f.deviceUnparsable = true;
   ui.checkInstalledUpdates = () => { throw new Error('不应触发'); };
-  await ui.reconcileCatalogInstallState();
+  await ui.confirmCatalogVersionsViaDevice(ui.apps.map(a => a.latestAsset.bundleName));
   assert.equal(ui.installedVersions.size, 0);
 });
 
@@ -363,4 +364,47 @@ test('featured card thresholds cover hundreds, thousands, and ten thousands', ()
     [0, 1, 1, 2, 2, 3]);
   assert.notEqual(ui.featuredColors(101)[0][0], ui.featuredColors(1000)[0][0]);
   assert.notEqual(ui.featuredColors(1000)[0][0], ui.featuredColors(10000)[0][0]);
+});
+
+test('pull refresh ends while an icon and a device inventory are still pending', async () => {
+  const f = fixture(), ui = f.ui, icon = deferred(), device = deferred();
+  f.icon = () => icon.promise;
+  f.bridgeClass.prototype.installedBundleVersions = () => device.promise;
+  delete ui.refreshCatalogInstallState; // execute the production dispatcher
+  ui.updateInstallScanPrompt = () => {};
+  const run = ui.pullRefreshCatalog();
+  f.requests[0].resolve(page([{ id: 1, latestAsset: { bundleName: 'app.one' } }]));
+  await run;
+  assert.equal(ui.catalogRefreshing, false);
+  assert.equal(ui.catalogPage, 1);
+  assert.equal(ui.catalogTotal, 1);
+  assert.equal(ui.catalogProbeBusy, true);
+  assert.equal(ui.appIcons.length, 0);
+  icon.resolve(new ArrayBuffer(4)); device.resolve(new Map([['app.one', 123]]));
+  await tick();
+  assert.equal(ui.appIcons.length, 1);
+  assert.equal(ui.installedVersions.get(1), 123);
+  assert.equal(f.savedIcons[0][0].id, '1');
+});
+
+test('repeated refresh and pagination reuse an unfinished icon without losing the first page', async () => {
+  const f = fixture(), ui = f.ui, icon = deferred();
+  f.icon = app => app.id === 1 ? icon.promise : Promise.resolve(new ArrayBuffer(4));
+  let run = ui.loadApps(); f.requests[0].resolve(page([1], 2)); await run;
+  run = ui.loadApps(); f.requests[1].resolve(page([1], 2)); await run;
+  assert.deepEqual(f.icons, [1]);
+  run = ui.loadApps(false); f.requests[2].resolve(page([2], 2)); await run;
+  icon.resolve(new ArrayBuffer(4)); await tick();
+  assert.deepEqual(ui.appIcons.map(i => i.id).sort(), [1, 2]);
+  assert.equal(f.icons.filter(id => id === 1).length, 1);
+});
+
+test('old icon revisions cannot replace a new icon after a background download finishes', async () => {
+  const f = fixture(), ui = f.ui, old = deferred();
+  f.icon = app => app.iconRev === 'rev-1' ? old.promise : Promise.resolve(new ArrayBuffer(4));
+  let run = ui.loadApps(); f.requests[0].resolve(page([1])); await run;
+  run = ui.loadApps(); f.requests[1].resolve(page([{ id: 1, iconRev: 'rev-2' }])); await run;
+  await tick(); old.resolve(new ArrayBuffer(4)); await tick();
+  assert.equal(ui.appIcons.length, 1); assert.equal(ui.appIcons[0].rev, 'rev-2');
+  assert.ok(f.savedIcons.flat().every(icon => icon.rev === 'rev-2'));
 });

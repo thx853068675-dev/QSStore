@@ -38,6 +38,9 @@ extern "C" int qingqi_profile_matches_certificate(const char* profile_path,
 extern "C" int qingqi_verify_hap(const char* file_path, char* error_buffer,
                                    size_t error_capacity);
 extern "C" int qingqi_hdc_disconnect(char* error_buffer, size_t error_capacity);
+extern "C" int qingqi_hdc_install_progress(const char* file_path, uint32_t reset,
+                                            unsigned char* output, size_t capacity,
+                                            size_t* length);
 
 extern "C" int qingqi_hdc_command(const char* key_root, uint16_t port,
                                   uint32_t operation, const char* parameter,
@@ -575,6 +578,31 @@ napi_value SignHap(napi_env env, napi_callback_info info) {
   return promise;
 }
 
+napi_value HdcInstallProgress(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2] = {};
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  size_t size = 0;
+  if (argc < 1 || napi_get_value_string_utf8(env, args[0], nullptr, 0, &size) != napi_ok ||
+      size == 0 || size > 4096) {
+    napi_throw_type_error(env, nullptr, "Invalid installation path");
+    return nullptr;
+  }
+  std::vector<char> file(size + 1);
+  napi_get_value_string_utf8(env, args[0], file.data(), file.size(), &size);
+  bool reset = false;
+  if (argc > 1) napi_get_value_bool(env, args[1], &reset);
+  unsigned char output[256] = {};
+  size_t length = 0;
+  if (qingqi_hdc_install_progress(file.data(), reset ? 1 : 0, output, sizeof(output), &length) != 0) {
+    napi_throw_error(env, nullptr, "Cannot read installation progress");
+    return nullptr;
+  }
+  napi_value value = nullptr;
+  napi_create_string_utf8(env, reinterpret_cast<const char*>(output), length, &value);
+  return value;
+}
+
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
     {"readModuleJson", nullptr, ReadModule, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -594,6 +622,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"verifyHap", nullptr, VerifyHap, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"signHap", nullptr, SignHap, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"hdcCommand", nullptr, HdcCommand, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"hdcInstallProgress", nullptr, HdcInstallProgress, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"hdcDisconnect", nullptr, HdcDisconnect, nullptr, nullptr, nullptr, napi_default, nullptr}
   };
   napi_define_properties(env, exports, 13, properties);

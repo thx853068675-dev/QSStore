@@ -1,3 +1,4 @@
+import { InstallReconnect } from '../jobs/InstallReconnect';
 import { LocalInstallTimeline, LocalTimelineView, LocalTimelineStep } from '../jobs/LocalInstallTimeline';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
 import { router, SymbolGlyphModifier } from '@kit.ArkUI';
@@ -160,6 +161,8 @@ struct Index {
   @State private localTimelineView: LocalTimelineView = new LocalTimelineView();
   /** 发现页搜索：输入框内容与当前生效的关键词（输入即搜，带防抖）。 */
   @State private searchText: string = '';
+  private discoverScroller: Scroller = new Scroller();
+  @State private discoverHeaderPinned: boolean = false;
   /** 防抖定时器（-1 表示空闲）。 */
   private searchTimer: number = -1;
   /** 目录请求序号：用来丢弃过期响应。 */
@@ -171,12 +174,14 @@ struct Index {
   @State private needsInstallScan: boolean = false;
   private initialScanDismissed: boolean = false;
   private catalogProbePending: string[] = [];
+  private catalogProbeNames: string[] = [];
   /** 入队写库中的应用；只锁住被重复点击的那张卡。 */
   @State private enqueuingAppIds: number[] = [];
   private queueDraining: boolean = false;
   private queueRecoveryReady: boolean = false;
   @State private installTasks: InstallTaskSnapshot[] = [];
   private installSubscription: number = -1;
+  private reconnectSubscription: number = -1;
   /** 与设备核对卸载状态。 */
   @State private syncBusy: boolean = false;
   @State private syncMessage: string = '';
@@ -194,7 +199,7 @@ struct Index {
   @State private apps: CatalogApp[] = [];
   @State private appIcons: AppIcon[] = [];
   /** 本轮首屏加载到的图标字节，攒起来一次性写缓存。 */
-  private pendingIconCache: CachedIcon[] = [];
+  private catalogIconFlights: Map<string, Promise<CachedIcon | undefined>> = new Map();
   /** 本地 HAP 的包内图标，按任务 ID 缓存。 */
   @State private localIcons: LocalIcon[] = [];
   @State private catalogError: string = '';
@@ -247,7 +252,7 @@ struct Index {
   @State private configCategory: string = '';
   @State private configBusy: boolean = false;
   @State private configMessage: string = '';
-  @State private showReconnect: boolean = false;
+  @State @Watch('onReconnectVisibilityChanged') private showReconnect: boolean = false;
   @State private reconnectPort: string = '';
   @State private reconnectBusy: boolean = false;
   @State private reconnectMessage: string = '';
@@ -281,6 +286,7 @@ struct Index {
   private colors(): Palette { return Palette.forMode(this.darkMode); }
 
   aboutToAppear(): void {
+    this.observeReconnect();
     this.observeInstallTasks();
     InstalledAppRegistry.load(getContext(this) as common.UIAbilityContext)
       .then(() => this.refreshCatalogInstallState());
@@ -304,7 +310,9 @@ struct Index {
    * 任务标成可重试，让用户看到「继续安装」而不是一个永远转圈的进度。
    */
   onPageShow(): void {
+    this.observeReconnect();
     this.observeInstallTasks();
+    this.drainInstallQueue();
     this.refreshCatalogInstallState();
     this.reconcileInterruptedInstalls().then(() => this.reconcileStuckJobs());
     // Detail always fetches its icon afresh. Refresh the catalog when returning
@@ -315,6 +323,8 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    InstallReconnect.unsubscribe(this.reconnectSubscription);
+    this.reconnectSubscription = -1;
     InstallTaskState.unsubscribe(this.installSubscription);
     this.installSubscription = -1;
     // 页面离开就停掉阶段轮询与搜索防抖，别让定时器在后台空转
@@ -839,7 +849,7 @@ struct Index {
     return this.apps.length < this.catalogTotal && !this.catalogMoreBusy;
   }
 
-  private async loadApps(reset: boolean = true): Promise<void> {
+  private async loadApps(reset: boolean = true, rescanInstalled: boolean = false): Promise<void> {
     if (reset) {
       this.catalogLoading = true;
     } else if (!this.catalogHasMore()) {
@@ -851,7 +861,6 @@ struct Index {
     const token = ++this.catalogToken;
     const query = this.activeQuery;
     const nextPage = reset ? 1 : this.catalogPage + 1;
-    this.pendingIconCache = [];
     try {
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
       const page = await client.listApps(nextPage, Index.CATALOG_PAGE_SIZE,
@@ -869,29 +878,19 @@ struct Index {
           keep.has(entry.id) && page.items.some((app: CatalogApp) =>
             app.id === entry.id && app.iconRev.length > 0 && app.iconRev === entry.rev));
       }
-      // 首屏这一轮要等图标拿到再写缓存，否则缓存里只会有目录没有图标；
-      // 追加页不需要等，图标照旧异步补上。
+      // 目录先提交，图标下载、解码和缓存都不占用刷新动画。
       const cacheablePage = reset && this.activeQuery.length === 0;
-      const iconLoads: Promise<void>[] = [];
-      for (const app of reset ? page.items : fresh) {
-        // 服务端修正图标后，修订号变化就必须重新下载。
-        if (this.iconFor(app.id) !== undefined) continue;
-        const load = this.loadAppIcon(client, app, token, query, cacheablePage);
-        if (cacheablePage) iconLoads.push(load);
-      }
-      if (cacheablePage) await Promise.all(iconLoads);
-      if (token !== this.catalogToken || query !== this.activeQuery) return;
       this.catalogPage = nextPage;
       this.catalogTotal = page.total;
       this.catalogError = '';
       // 目录变了就重算「装没装」，卡片按钮跟着更新
-      this.refreshCatalogInstallState();
+      this.refreshCatalogInstallState(rescanInstalled);
       // 只缓存干净的第一页：缓存与分页混在一起会得到半新半旧的列表
       if (cacheablePage) {
         const context = getContext(this) as common.UIAbilityContext;
         CatalogCache.save(context, page.items, page.rawItems);
-        this.flushIconCache(context);
       }
+      this.loadCatalogIcons(client, this.apps, query, cacheablePage);
     } catch (error) {
       if (token !== this.catalogToken || query !== this.activeQuery) return;
       this.catalogError = errorText(error);
@@ -913,7 +912,7 @@ struct Index {
    * catalogRefreshing 置回 false，Refresh 的动画还没画出来就被收回，手感是
    * 「拉一下闪一下就弹回去」。给一个下限，让这次刷新看起来确实发生过。
    */
-  private static readonly REFRESH_MIN_VISIBLE_MS: number = 600;
+  private static readonly REFRESH_MIN_VISIBLE_MS: number = 250;
   /** 超过这个星数用大卡。 */
   private static readonly STARRED_MIN_STARS: number = 100;
 
@@ -924,8 +923,7 @@ struct Index {
     const startedAt = Date.now();
     try {
       // 只读取服务端已有目录；GitHub 采集由服务端周期任务或详情页主动检查负责。
-      await this.loadApps();
-      await this.reconcileCatalogInstallState();
+      await this.loadApps(true, true);
       this.loadUpdateCatalog();
     } finally {
       const elapsed = Date.now() - startedAt;
@@ -938,82 +936,34 @@ struct Index {
     }
   }
 
-  /**
-   * 按设备实际情况校正目录卡片的安装状态。
-   *
-   * 卡片是否显示「打开」有两个来源：库里的安装记录与 `installedVersions`。
-   * 记录不会因为用户在系统设置里卸载而消失，所以刷新时必须跟设备核一次，
-   * 否则装过又卸掉的应用会一直显示「打开」，点了当然打不开。
-   *
-   * 只在设备明确回答「没有这个包」时才删记录；查询失败（设备没连、命令超时）
-   * 一律按「不确定」处理并保留记录 —— 断线一次就清空历史是不可接受的。
-   *
-   * **一次问完，不逐个查。** 逐个 `isInstalled` 是「一个包一次设备往返」，
-   * 目录里有多少应用就要多少次；应用一多，刷新会慢到十几秒。这里用
-   * `bm dump -a` 读取包名清单，再对目录涉及的包读取版本。
-   *
-   * **设备版本要覆盖安装记录。** 记录的版本是「当时装的那个」，用户之后可能装了
-   * 别的版本；只看记录会让卡片一直显示「更新」。这里把设备上的真实版本写进
-   * `installedVersions`（`installedVersionOf` 取两者的较大值），装完刷新即可收敛。
-   */
-  private async reconcileCatalogInstallState(): Promise<void> {
-    const bundles: string[] = [];
-    for (const app of this.apps) {
-      const bundleName = app.latestAsset?.bundleName ?? '';
-      if (bundleName.length > 0 && !bundles.includes(bundleName)) bundles.push(bundleName);
+  /** 只有设备明确确认卸载才清理旧记录；批量扫描统一由 confirm 方法调度。 */
+  private async reconcileCatalogInstallState(bundleNames: string[],
+    versions: Map<string, number>): Promise<void> {
+    const missing = bundleNames.filter((name: string) => !versions.has(name));
+    const dropped = this.installedJobs.filter((job: InstallJob) =>
+      job.bundleName.length > 0 && missing.includes(job.bundleName));
+    this.installedJobs = this.installedJobs.filter((job: InstallJob) =>
+      !missing.includes(job.bundleName));
+    const next = new Map(this.installedVersions);
+    for (const app of this.updateApps()) {
+      const name = app.latestAsset?.bundleName ?? '';
+      if (!bundleNames.includes(name)) continue;
+      const version = versions.get(name);
+      if (version === undefined) next.set(app.id, 0);
+      else if (version > 0) next.set(app.id, version);
+      // 包存在但版本查询失败时保留原值，不能误判为未装。
     }
-    if (bundles.length === 0) return;
-    try {
-      const context = getContext(this) as common.UIAbilityContext;
-      const bridge = new HdcDeviceBridge(context);
-      const onDevice = await bridge.installedBundleVersions(bundles);
-      if (onDevice === undefined) return;   // 解析不出包名 → 无法核实，保持原状
-      const missing = bundles.filter((bundleName: string) => !onDevice.has(bundleName));
-      if (missing.length > 0) {
-        // 要删的记录先取快照：下面会先把 installedJobs 过滤掉（界面立刻正确），
-        // 之后就没法再从它里面挑出待删的条目了。
-        const dropped = this.installedJobs.filter((job: InstallJob) =>
-          job.bundleName.length > 0 && missing.includes(job.bundleName));
-        // 先把界面状态改掉：删库与清缓存都属于「收尾」，它们失败也不该让卡片
-        // 继续显示一个设备上并不存在的「打开」。
-        this.installedJobs = this.installedJobs.filter((job: InstallJob) =>
-          job.bundleName.length === 0 || !missing.includes(job.bundleName));
-        try {
-          this.forgetInstalledVersions();
-        } catch (error) {
-          console.error('StarHub forgetInstalledVersions failed: ' + errorText(error));
-        }
-        this.refreshCatalogInstallState();
-        try {
-          const store = await JobStore.open(context);
-          for (const job of dropped) await store.forget(job.id);
-        } catch (error) {
-          console.error('StarHub dropping uninstalled records failed: ' + errorText(error));
-        }
+    this.installedVersions = next;
+    this.syncDetectedInstalled();
+    this.checkInstalledUpdates();
+    if (dropped.length > 0) {
+      this.forgetInstalledVersions();
+      try {
+        const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
+        for (const job of dropped) await store.forget(job.id);
+      } catch (error) {
+        console.error('StarHub dropping uninstalled records failed: ' + errorText(error));
       }
-      // **设备版本最后写。** 上面的 refreshCatalogInstallState 会重建
-      // installedVersions；先写就会被它盖掉，卡片又会回到安装记录里的旧版本，
-      // 表现为「装完了刷新还显示更新」。
-      //
-      // 记录里存的是「当时装的那个版本」；设备上的才是真实情况。把设备版本写进
-      // installedVersions（installedVersionOf 取两者较大值），装完刷新即可收敛。
-      let versionChanged = false;
-      for (const app of this.apps) {
-        const bundleName = app.latestAsset?.bundleName ?? '';
-        const version = bundleName.length > 0 ? onDevice.get(bundleName) : undefined;
-        if (version !== undefined && version > 0 && this.installedVersions.get(app.id) !== version) {
-          this.installedVersions.set(app.id, version);
-          versionChanged = true;
-        }
-      }
-      if (versionChanged) {
-        this.installedVersions = new Map(this.installedVersions);
-        this.checkInstalledUpdates();
-      }
-    } catch (error) {
-      // 对账失败不影响已经拉到的列表，但要留下痕迹：被吞掉的异常会让
-      // 「卸载后仍显示打开」这类问题完全无从排查。
-      console.error('StarHub reconcileCatalogInstallState failed: ' + errorText(error));
     }
   }
 
@@ -1036,56 +986,74 @@ struct Index {
     return collected;
   }
 
-  private async loadAppIcon(client: StoreClient, app: CatalogApp, token: number,
-    query: string, cacheable: boolean): Promise<void> {
+  /** 同查询、同图标修订只下载一次；翻页和重复刷新共用尚未完成的请求。 */
+  private async loadCatalogIcons(client: StoreClient, apps: CatalogApp[], query: string,
+    cacheable: boolean): Promise<void> {
+    const loads: Promise<CachedIcon | undefined>[] = [];
+    for (const app of apps) {
+      if (this.iconFor(app.id) !== undefined || app.iconRev.length === 0) continue;
+      const key = app.id + ':' + app.iconRev + ':' + query;
+      let load = this.catalogIconFlights.get(key);
+      if (load === undefined) {
+        load = this.loadAppIcon(client, app, query);
+        this.catalogIconFlights.set(key, load);
+        load.then(() => this.catalogIconFlights.delete(key));
+      }
+      loads.push(load);
+    }
+    const records = await Promise.all(loads);
+    if (!cacheable || query !== this.activeQuery) return;
+    const current = records.filter((record: CachedIcon | undefined) =>
+      record !== undefined && this.apps.some((app: CatalogApp) =>
+        String(app.id) === record.id && app.iconRev === record.rev)) as CachedIcon[];
+    if (current.length > 0) {
+      await CatalogCache.saveIcons(getContext(this) as common.UIAbilityContext, current);
+    }
+  }
+
+  private isCurrentCatalogIcon(app: CatalogApp, query: string): boolean {
+    return query === this.activeQuery && this.apps.some((row: CatalogApp) =>
+      row.id === app.id && row.iconRev === app.iconRev);
+  }
+
+  private async loadAppIcon(client: StoreClient, app: CatalogApp,
+    query: string): Promise<CachedIcon | undefined> {
     try {
-      if (app.iconRev.length === 0 || app.iconUrl.length === 0) return;
+      if (app.iconRev.length === 0 || app.iconUrl.length === 0) return undefined;
       let bytes: ArrayBuffer | undefined;
       for (let attempt = 0; attempt < 2; attempt++) {
-        if (token !== this.catalogToken || query !== this.activeQuery) return;
+        if (!this.isCurrentCatalogIcon(app, query)) return undefined;
         try { bytes = await client.appIconBytes(app); }
         catch (_) { bytes = undefined; }
         if (bytes !== undefined) break;
       }
-      if (bytes === undefined || token !== this.catalogToken || query !== this.activeQuery) return;
+      if (bytes === undefined || !this.isCurrentCatalogIcon(app, query)) return undefined;
       const source = image.createImageSource(bytes);
       try {
         const pixels = await source.createPixelMap();
-        if (token !== this.catalogToken || query !== this.activeQuery || this.iconFor(app.id) !== undefined) {
+        if (!this.isCurrentCatalogIcon(app, query) || this.iconFor(app.id) !== undefined) {
           await pixels.release();
-          return;
+          return undefined;
         }
         const icon = new AppIcon();
         icon.id = app.id;
         icon.rev = app.iconRev;
         icon.pixels = pixels;
         this.appIcons = this.appIcons.concat([icon]);
-        if (cacheable && CatalogCache.iconWithinLimit(bytes)) {
+        if (CatalogCache.iconWithinLimit(bytes)) {
           const record = new CachedIcon();
           record.id = String(app.id);
           record.rev = app.iconRev;
           record.data = new util.Base64Helper().encodeToStringSync(new Uint8Array(bytes));
-          this.pendingIconCache = this.pendingIconCache.concat([record]);
+          return record;
         }
+        return undefined;
       } finally {
         await source.release();
       }
     } catch (_) {
-      // 单张图标下载或解码失败不影响目录，下次刷新会重试缺失图标。
+      return undefined;
     }
-  }
-
-  /**
-   * 把本轮加载到的图标字节写入缓存。
-   *
-   * 图标是异步逐个到的，所以攒在 pendingIconCache 里，等首屏这一轮结束后
-   * 一次性落盘，避免多次写 preferences。
-   */
-  private flushIconCache(context: common.UIAbilityContext): void {
-    if (this.pendingIconCache.length === 0) return;
-    const records = this.pendingIconCache;
-    this.pendingIconCache = [];
-    CatalogCache.saveIcons(context, records);
   }
 
   /**
@@ -1572,6 +1540,25 @@ struct Index {
     }
   }
 
+  onPageHide(): void {
+    InstallReconnect.deactivate(this.reconnectSubscription);
+  }
+
+  private observeReconnect(): void {
+    if (this.reconnectSubscription === -1) {
+      this.reconnectSubscription = InstallReconnect.subscribe((jobId: string) => {
+        if (jobId.length > 0) {
+          this.resumeJobId = jobId;
+          this.reconnectMessage = '';
+          this.showReconnect = true;
+        } else if (this.resumeJobId.length > 0) {
+          this.showReconnect = false;
+        }
+      });
+    }
+    InstallReconnect.activate(this.reconnectSubscription);
+  }
+
   private observeInstallTasks(): void {
     if (this.installSubscription !== -1) return;
     this.installSubscription = InstallTaskState.subscribe((rows: InstallTaskSnapshot[]) => {
@@ -1997,13 +1984,14 @@ struct Index {
    *   3. 上次由 HDC 确认并落盘的本机版本（系统权限不足且调试离线时使用）
    * 三者都没有才显示状态未知；未知仍可主动安装或更新。
    */
-  private refreshCatalogInstallState(): void {
+  private refreshCatalogInstallState(rescanInstalled: boolean = false): void {
     const next = new Map<number, number>();
     const unresolved: string[] = [];
     for (const app of this.updateApps()) {
       const asset = app.latestAsset;
       if (asset === undefined || asset.bundleName.length === 0) continue;
       const version = LocalBundles.installedVersion(asset.bundleName);
+      if (rescanInstalled) unresolved.push(asset.bundleName);
       if (version > 0) {
         next.set(app.id, version);
         continue;
@@ -2011,7 +1999,7 @@ struct Index {
       // 只有「确认没装」才能就此收手；「无法核实」需要退一步问设备。
       if (!LocalBundles.isKnown(version)) {
         next.set(app.id, this.installedVersions.get(app.id) ?? -1);
-        unresolved.push(asset.bundleName);
+        if (!rescanInstalled) unresolved.push(asset.bundleName);
       } else {
         next.set(app.id, 0);
       }
@@ -2053,26 +2041,19 @@ struct Index {
 
   private async confirmCatalogVersionsViaDevice(bundleNames: string[]): Promise<void> {
     if (this.catalogProbeBusy) {
-      this.catalogProbePending = this.catalogProbePending.concat(bundleNames)
+      // 正在读取的包已经涵盖本次请求，只有新增包需要下一批。
+      const additional = bundleNames.filter((name: string) => !this.catalogProbeNames.includes(name));
+      this.catalogProbePending = this.catalogProbePending.concat(additional)
         .filter((name: string, index: number, all: string[]) => all.indexOf(name) === index);
       return;
     }
     this.catalogProbeBusy = true;
+    this.catalogProbeNames = bundleNames;
     try {
       const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
       const versions = await bridge.installedBundleVersions(bundleNames);
       if (versions === undefined) return;
-      const next = new Map(this.installedVersions);
-      for (const app of this.updateApps()) {
-        const name = app.latestAsset?.bundleName ?? '';
-        if (!bundleNames.includes(name)) continue;
-        const version = versions.get(name);
-        if (version === undefined) next.set(app.id, 0);
-        else if (version > 0) next.set(app.id, version);
-      }
-      this.installedVersions = next;
-      this.syncDetectedInstalled();
-      this.checkInstalledUpdates();
+      await this.reconcileCatalogInstallState(bundleNames, versions);
       await this.reconcileDetectedJobs(versions);
       if (this.updateCatalogReady && this.updateApps().every((app: CatalogApp) =>
         (app.latestAsset?.bundleName.length ?? 0) === 0 || this.installedVersionOf(app.id) >= 0)) {
@@ -2082,6 +2063,7 @@ struct Index {
       // 不可核实不等于未安装，保持最后一次已知状态。
     } finally {
       this.catalogProbeBusy = false;
+      this.catalogProbeNames = [];
       const pending = this.catalogProbePending;
       this.catalogProbePending = [];
       if (pending.length > 0) await this.confirmCatalogVersionsViaDevice(pending);
@@ -2524,7 +2506,7 @@ struct Index {
       const result = await runner.run(job.id);
       if (result.stage === InstallStage.WAITING_DEVICE) {
         this.reconnectMessage = '';
-        this.showReconnect = true;
+        InstallReconnect.request(job.id);
       } else if (result.stage === InstallStage.WAITING_ACCOUNT) {
         this.jobsError = '请先在「我的」登录华为开发者账号';
       } else if (result.stage === InstallStage.WAITING_CONFIRMATION) {
@@ -2587,13 +2569,23 @@ struct Index {
     setTimeout(() => { this.deviceMessage = ''; }, 4000);
   }
 
+  onReconnectVisibilityChanged(): void {
+    if (!this.showReconnect || this.reconnectPort.length > 0) return;
+    new HdcDeviceBridge(getContext(this) as common.UIAbilityContext).savedPort().then((port: number) => {
+      // 异步读取期间用户已经输入时，不覆盖输入。
+      if (this.showReconnect && this.reconnectPort.length === 0 && port >= 1024 && port <= 65535) {
+        this.reconnectPort = String(port);
+      }
+    }).catch(() => {});
+  }
+
   private async reconnect(): Promise<void> {
     this.reconnectBusy = true;
     this.reconnectMessage = '正在连接，请在系统弹窗中信任本机';
     try {
       const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
       if (!await bridge.connect(Number(this.reconnectPort.trim()))) {
-        this.reconnectMessage = '未连上此端口，请核对无线调试页显示的端口';
+        this.reconnectMessage = bridge.connectionFailureMessage();
         return;
       }
       this.showReconnect = false;
@@ -2604,6 +2596,7 @@ struct Index {
       const bundles = this.updateApps().map((app: CatalogApp) => app.latestAsset?.bundleName ?? '')
         .filter((name: string) => name.length > 0);
       await this.confirmCatalogVersionsViaDevice(bundles);
+      InstallReconnect.clear(this.resumeJobId);
       const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
       const job = await store.get(this.resumeJobId);
       if (job && job.stage !== InstallStage.INSTALLED) await this.continueInstall(job);
@@ -2626,17 +2619,52 @@ struct Index {
   }
 
   @Builder
+  private discoverSearchHeader() {
+    Stack({ alignContent: Alignment.Top }) {
+      // 离屏 alpha 蒙版让背景模糊与色调一起向下消退，不模糊搜索文字。
+      Stack() {
+        Column().width('100%').height(82)
+          .backgroundColor(this.darkMode ? '#D90B1220' : '#DCF9FAFD')
+          .backgroundBlurStyle(BlurStyle.Thick, { colorMode: ThemeColorMode.SYSTEM })
+        Column().width('100%').height(82)
+          .linearGradient({ angle: 180, colors: [['#FFFFFFFF', 0],
+            ['#FFFFFFFF', 0.56], ['#AFFFFFFF', 0.74], ['#00FFFFFF', 1]] })
+          .blendMode(BlendMode.DST_IN)
+      }.width('100%').height(82)
+        .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+        .opacity(this.discoverHeaderPinned ? 1 : 0)
+        .animation({ duration: 180, curve: Curve.EaseOut })
+        .hitTestBehavior(HitTestMode.None)
+      Row({ space: 8 }) {
+        SymbolGlyph($r('sys.symbol.magnifyingglass')).fontSize(17)
+          .fontColor([this.colors().textSecondary])
+        TextInput({ placeholder: '搜索应用名或仓库', text: this.searchText })
+          .layoutWeight(1).height(44).fontSize(14)
+          .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
+          .backgroundColor('#00000000').caretColor(this.colors().accent)
+          .padding({ left: 0, right: 0 })
+          .onChange((value: string) => this.onSearchInput(value))
+          .onSubmit(() => this.applySearch())
+        if (this.searchText.length > 0) {
+          Text('✕').fontSize(14).fontColor(this.colors().textSecondary)
+            .width(30).height(44).textAlign(TextAlign.Center)
+            .onClick(() => this.clearSearch())
+        }
+      }.width('calc(100% - 48vp)').height(46).padding({ left: 13, right: 7 })
+        .backgroundColor(this.darkMode ? '#DF1B2638' : '#EDEDF1F7')
+        .border({ width: 0.5, color: this.colors().border }).borderRadius(15)
+        .margin({ top: 8 })
+    }.width('100%').height(70)
+  }
+
+  @Builder
   private discoverPage() {
     Column() {
       // Refresh 放在最外层：嵌在 if/else 里时下拉手势不会被它接管。
       // 加载态与错误态改为列表项，列表本身始终存在。
       Refresh({ refreshing: $$this.catalogRefreshing }) {
-        List({ space: 0 }) {
-            // 标题与搜索框放在列表**里面**，跟着一起滚。
-            //
-            // 放在列表外面时它们固定占着顶部：下方列表只剩中间一段能滚，看起来就是
-            // 「上下各被一块挡住」。管理页一直把 heading 作为列表项，这里对齐同样的
-            // 做法，整页一起滚、卡片也能占满整屏。
+        List({ space: 0, scroller: this.discoverScroller }) {
+            // 大标题随列表滚出，搜索框由 ListItemGroup 的 header 原生吸顶。
             ListItem() {
               Row() {
                 Column({ space: 5 }) {
@@ -2651,6 +2679,7 @@ struct Index {
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
               }.width('100%').padding({ top: 20, bottom: 14 })
             }.width('100%').padding({ left: PAGE_INSET, right: PAGE_INSET })
+            ListItemGroup({ header: this.discoverSearchHeader }) {
             if (this.needsInstallScan) {
               ListItem() {
                 Row({ space: 12 }) {
@@ -2666,22 +2695,6 @@ struct Index {
                 }.width('100%').padding(14).backgroundColor(this.colors().surface).borderRadius(16)
               }.width('100%').padding({ left: PAGE_INSET, right: PAGE_INSET, bottom: 12 })
             }
-            // 搜索框常驻：输入即搜（带防抖），没有单独的搜索按钮
-            ListItem() {
-              Row({ space: 9 }) {
-                TextInput({ placeholder: '搜索应用名或仓库', text: this.searchText })
-                  .layoutWeight(1).height(44).fontSize(14)
-                  .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
-                  .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
-                  .onChange((value: string) => this.onSearchInput(value))
-                  .onSubmit(() => this.applySearch())
-                if (this.searchText.length > 0) {
-                  Text('✕').fontSize(15).fontColor(this.colors().textTertiary)
-                    .width(34).height(44).textAlign(TextAlign.Center)
-                    .onClick(() => this.clearSearch())
-                }
-              }.width('100%').padding({ bottom: 10 })
-            }.width('100%').padding({ left: PAGE_INSET, right: PAGE_INSET })
             if (this.activeQuery.length > 0) {
               ListItem() {
                 Text('搜索「' + this.activeQuery + '」· ' + this.catalogTotal + ' 个结果')
@@ -2826,7 +2839,13 @@ struct Index {
             ListItem() {
               Row().width('100%').height(110)
             }
+            }
         }.width('100%')
+          .sticky(StickyStyle.Header)
+          .onDidScroll(() => {
+            const pinned = this.discoverScroller.currentOffset().yOffset >= 86;
+            if (pinned !== this.discoverHeaderPinned) this.discoverHeaderPinned = pinned;
+          })
           .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
           .onReachEnd(() => this.loadMoreApps())
         }
@@ -3167,17 +3186,18 @@ struct Index {
           .fontSize(22).fontWeight(FontWeight.Bold)
           .fontColor(this.colors().text).layoutWeight(1)
         Text('×').fontSize(26).fontColor(this.colors().textSecondary)
-          .onClick(() => { if (!this.reconnectBusy) this.showReconnect = false; })
+          .onClick(() => { if (!this.reconnectBusy) { InstallReconnect.clear(this.resumeJobId); this.showReconnect = false; } })
       }.width('100%')
-      Text(this.resumeJobId.length > 0 ? '任务已保存。连接后会从刚才的步骤继续。' :
-        '首次连接后会识别已经侧载的应用，并将状态缓存到本机，避免重复安装。可以关闭此窗口，稍后在发现页识别。')
-        .fontSize(13).fontColor(this.colors().textSecondary).width('100%')
-      Button('打开无线调试设置').height(42).width('100%')
-        .backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
+      Text('前往系统设置，开启无线调试').fontSize(12).padding({ top: 3, bottom: 3 })
+        .fontColor(this.colors().accent).width('100%')
+        .decoration({ type: TextDecorationType.Underline, color: this.colors().accent })
         .onClick(() => new HdcDeviceBridge(getContext(this) as common.UIAbilityContext)
           .openWirelessSettings())
+      Text(this.resumeJobId.length > 0 ? '任务已保存。连接后会从刚才的步骤继续。' :
+        '首次连接后会识别已经侧载的应用，并将状态缓存到本机，避免重复安装。')
+        .fontSize(13).fontColor(this.colors().textSecondary).width('100%')
       TextInput({ placeholder: '输入无线调试端口', text: this.reconnectPort })
-        .type(InputType.Number).height(48)
+        .type(InputType.Number).height(48).textAlign(TextAlign.Center)
         .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
         .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
         .onChange((value: string) => { this.reconnectPort = value; })
@@ -3469,7 +3489,7 @@ struct Index {
                 Button('连接')
                   .height(34).fontSize(12).fontColor(this.colors().onAccent)
                   .backgroundColor(this.colors().accent).borderRadius(11)
-                  .onClick(() => { this.reconnectPort = ''; this.showReconnect = true; })
+                  .onClick(() => { this.showReconnect = true; })
               }
             }.width('100%')
             if (this.deviceMessage.length > 0) {

@@ -22,6 +22,45 @@ use std::time::{Duration, Instant};
 
 static ACTIVE_PORT: Mutex<Option<u16>> = Mutex::new(None);
 
+// Read-only UI observations never issue another HDC command or wait for the
+// install queue. Bytes count successful host transport writes, not bm work.
+static INSTALL_PROGRESS: Mutex<Option<(String, &'static str, u64, u64)>> = Mutex::new(None);
+
+pub fn reset_install_progress(path: &str) {
+    if let Ok(mut row) = INSTALL_PROGRESS.lock() {
+        *row = Some((path.into(), "waiting", 0, 0));
+    }
+}
+
+pub(crate) fn report_install_progress(path: &str, phase: &'static str, sent: u64, total: u64) {
+    if let Ok(mut row) = INSTALL_PROGRESS.lock() {
+        *row = Some((path.into(), phase, sent.min(total), total));
+    }
+}
+
+pub fn install_progress(path: &str) -> (&'static str, u64, u64) {
+    if let Ok(row) = INSTALL_PROGRESS.lock() {
+        if let Some((current, phase, sent, total)) = row.as_ref() {
+            if current == path { return (*phase, *sent, *total); }
+        }
+    }
+    ("waiting", 0, 0)
+}
+
+#[cfg(test)]
+mod progress_tests {
+    #[test]
+    fn transfer_observation_is_bound_to_its_file_and_does_not_invent_bm_percent() {
+        super::reset_install_progress("/sandbox/one.hap");
+        assert_eq!(super::install_progress("/sandbox/one.hap"), ("waiting", 0, 0));
+        super::report_install_progress("/sandbox/one.hap", "transfer", 40, 100);
+        assert_eq!(super::install_progress("/sandbox/one.hap"), ("transfer", 40, 100));
+        assert_eq!(super::install_progress("/sandbox/other.hap"), ("waiting", 0, 0));
+        super::report_install_progress("/sandbox/one.hap", "installing", 110, 100);
+        assert_eq!(super::install_progress("/sandbox/one.hap"), ("installing", 100, 100));
+    }
+}
+
 /// The running server's tables, kept so callers can drop device links on purpose.
 ///
 /// The device's wireless-debugging daemon effectively serves one host at a time,

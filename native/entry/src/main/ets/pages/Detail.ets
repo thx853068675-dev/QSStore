@@ -1,3 +1,4 @@
+import { InstallReconnect } from '../jobs/InstallReconnect';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
 import { isPending } from '../jobs/RecoveryPlanner';
 import { promptAction, router, SymbolGlyphModifier } from '@kit.ArkUI';
@@ -33,12 +34,16 @@ struct Detail {
   @State private releases: ReleaseInfo[] = [];
   @State private selectedAsset: HapAsset = new HapAsset();
   @State @Watch('onBusyChanged') private downloadBusy: boolean = false;
-  // 按钮自身就是进度显示：进度或忙碌状态变化时重绘一次即可，不需要动画。
+  // 有字节计数时平滑绘制实际阶段进度，其余阶段显示持续活动光效。
   @State @Watch('onPercentChanged') private downloadPercent: number = 0;
+  private installFrameTimer: number = -1;
+  private renderedPercent: number = 0;
+  private renderedPhase: string = '';
   private pulseSettings: RenderingContextSettings = new RenderingContextSettings(true);
   private pulseCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.pulseSettings);
   @State private installTasks: InstallTaskSnapshot[] = [];
   private installSubscription: number = -1;
+  private reconnectSubscription: number = -1;
   private detailAppId: number = 0;
   /**
    * 一次性提示文案。
@@ -81,11 +86,12 @@ struct Detail {
   /** 上次真正发起检查的时间，用于客户端侧的静默冷却。 */
   private lastCheckAt: number = 0;
   @State private expandedReleaseTag: string = '';
-  @State private showReconnect: boolean = false;
+  @State @Watch('onReconnectVisibilityChanged') private showReconnect: boolean = false;
   @State private reconnectPort: string = '';
   @State private reconnectBusy: boolean = false;
   @State private reconnectMessage: string = '';
   @State private activeInstallId: string = '';
+  private reconnectJobId: string = '';
   /** 默认 0 = 最新版本；版本不再平铺，改成下拉选择。 */
   @State private selectedReleaseIndex: number = 0;
 
@@ -110,12 +116,14 @@ struct Detail {
   }
 
   onPageShow(): void {
+    this.observeReconnect();
     this.observeInstallTasks();
     this.syncInstallTask();
     this.loadInstalledJobs();
   }
 
   aboutToAppear(): void {
+    this.observeReconnect();
     const params = router.getParams() as Record<string, number>;
     this.detailAppId = Number(params['id'] ?? 0);
     this.observeInstallTasks();
@@ -128,8 +136,30 @@ struct Detail {
   }
 
   aboutToDisappear(): void {
+    InstallReconnect.unsubscribe(this.reconnectSubscription);
+    this.reconnectSubscription = -1;
+    this.stopInstallAnimation();
     InstallTaskState.unsubscribe(this.installSubscription);
     this.installSubscription = -1;
+  }
+
+  onPageHide(): void {
+    InstallReconnect.deactivate(this.reconnectSubscription);
+  }
+
+  private observeReconnect(): void {
+    if (this.reconnectSubscription === -1) {
+      this.reconnectSubscription = InstallReconnect.subscribe((jobId: string) => {
+        if (jobId.length > 0) {
+          this.reconnectJobId = jobId;
+          this.reconnectMessage = '';
+          this.showReconnect = true;
+        } else if (this.reconnectJobId.length > 0) {
+          this.showReconnect = false;
+        }
+      });
+    }
+    InstallReconnect.activate(this.reconnectSubscription);
   }
 
   private observeInstallTasks(): void {
@@ -162,6 +192,7 @@ struct Detail {
     this.activeInstallId = row.job.id;
     this.downloadBusy = row.running;
     this.downloadPercent = row.percent;
+    this.paintInstallButton();
     // 只把「失败原因」说出来。这里是每秒轮询的入口，若把正常阶段也弹一遍，
     // 用户会被持续刷屏；阶段本身由按钮文案表达，不需要额外提示。
     if (!row.running && row.job.lastError.length > 0) this.notify(row.job.lastError);
@@ -195,28 +226,52 @@ struct Detail {
 
   onBusyChanged(): void {
     if (this.downloadBusy) this.paintInstallButton();
+    else this.stopInstallAnimation();
   }
 
   onPercentChanged(): void {
     if (this.downloadBusy) this.paintInstallButton();
   }
 
-  private paintInstallButton(): void {
-    const ctx = this.pulseCtx;
-    const w = ctx.width;
-    const h = ctx.height;
-    if (w <= 0 || h <= 0) return;
-    const ratio = Math.min(Math.max(this.downloadPercent, 0), 100) / 100;
+  private stopInstallAnimation(): void {
+    if (this.installFrameTimer !== -1) clearInterval(this.installFrameTimer);
+    this.installFrameTimer = -1;
+  }
 
+  private paintInstallButton(): void {
+    this.renderInstallFrame();
+    if (this.downloadBusy && this.installFrameTimer === -1) {
+      this.installFrameTimer = setInterval(() => this.renderInstallFrame(), 33);
+    }
+  }
+
+  private renderInstallFrame(): void {
+    const ctx = this.pulseCtx;
+    const w = ctx.width, h = ctx.height;
+    if (w <= 0 || h <= 0) return;
+    const row = this.currentInstallTask();
+    const phase = row === undefined ? '' : row.job.id + ':' + row.job.stage + ':' + row.phase;
+    if (phase !== this.renderedPhase) {
+      this.renderedPhase = phase;
+      this.renderedPercent = 0;
+    }
     ctx.clearRect(0, 0, w, h);
-    // 槽底
-    ctx.fillStyle = this.colors().accentSoft;
+    ctx.fillStyle = this.colors().accent;
     ctx.fillRect(0, 0, w, h);
-    // 已完成部分
-    const front = w * ratio;
-    if (front > 0) {
-      ctx.fillStyle = this.colors().accent;
-      ctx.fillRect(0, 0, front, h);
+    if (row !== undefined && InstallTaskState.determinate(row)) {
+      // 插值仅用于宽度动画，文字始终显示实际计数；不预估未完成工作。
+      this.renderedPercent += (row.percent - this.renderedPercent) * 0.3;
+      if (Math.abs(row.percent - this.renderedPercent) < 0.1) this.renderedPercent = row.percent;
+      ctx.fillStyle = '#FFFFFF30';
+      ctx.fillRect(0, 0, w * this.renderedPercent / 100, h);
+    } else {
+      const left = ((Date.now() % 1600) / 1600) * (w + w * 0.35) - w * 0.35;
+      const band = ctx.createLinearGradient(left, 0, left + w * 0.35, 0);
+      band.addColorStop(0, '#FFFFFF00');
+      band.addColorStop(0.5, '#FFFFFF40');
+      band.addColorStop(1, '#FFFFFF00');
+      ctx.fillStyle = band;
+      ctx.fillRect(Math.max(0, left), 0, w * 0.35, h);
     }
   }
 
@@ -314,10 +369,12 @@ struct Detail {
     return this.selectedAsset.versionCode > this.installedVersion;
   }
 
-  /** 按钮上显示的目标版本名；没有版本名就退回版本号。 */
+  /** 展示实际版本名；缺失时先用 Release 标签，再退回构建号。 */
   private selectedVersionLabel(): string {
-    return this.selectedAsset.versionName.length > 0 ? this.selectedAsset.versionName :
-      String(this.selectedAsset.versionCode);
+    if (this.selectedAsset.versionName.length > 0) return this.selectedAsset.versionName;
+    const tag = this.currentRelease()?.tag ?? '';
+    if (tag.length > 0) return tag.replace(/^v(?=\d)/i, '');
+    return this.selectedAsset.versionCode > 0 ? String(this.selectedAsset.versionCode) : '待确认';
   }
 
   private installedForSelection(): InstallJob | undefined {
@@ -444,12 +501,16 @@ struct Detail {
   }
 
   private releaseOptions(): SelectOption[] {
-    return this.releases.map((release: ReleaseInfo) => {
+    const options = this.releases.map((release: ReleaseInfo) => {
       const label = (release.prerelease ? '预览版 · ' : '') +
         (release.name.length > 0 ? release.name : release.tag) +
         (release.publishedAt.length >= 10 ? '  ·  ' + release.publishedAt.substring(0, 10) : '');
       return { value: label } as SelectOption;
     });
+    if (this.releases.length < this.releaseTotal) {
+      options.push({ value: this.releaseMoreBusy ? '读取历史版本中…' : '更多历史版本…' });
+    }
+    return options;
   }
 
   /** 评论时间：API 给的是 epoch 秒或毫秒的字符串。始终带年份。 */
@@ -511,6 +572,10 @@ struct Detail {
   }
 
   private selectRelease(index: number): void {
+    if (index >= this.releases.length) {
+      this.loadMoreReleases();
+      return;
+    }
     this.selectedReleaseIndex = index;
     const release = this.releases[index];
     this.selectedAsset = release && release.assets.length > 0 ? release.assets[0] : new HapAsset();
@@ -521,10 +586,12 @@ struct Detail {
 
   private async togglePreviewReleases(): Promise<void> {
     if (this.releaseMoreBusy || this.app.id <= 0) return;
-    const next = !this.showPreviewReleases;
+    const previous = this.showPreviewReleases;
+    const next = !previous;
     const selectedUrl = this.selectedAsset.url;
     const selectedName = this.selectedAsset.name;
     this.releaseMoreBusy = true;
+    this.showPreviewReleases = next;
     try {
       const result = await new StoreClient(getContext(this) as common.UIAbilityContext)
         .listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE, next);
@@ -536,6 +603,7 @@ struct Detail {
       this.refreshInstalledVersion();
       this.releaseMessage = '';
     } catch (error) {
+      this.showPreviewReleases = previous;
       this.releaseMessage = '无法读取版本：' + errorText(error);
     } finally {
       this.releaseMoreBusy = false;
@@ -658,7 +726,7 @@ struct Detail {
       } else if (result.stage === InstallStage.WAITING_DEVICE) {
         this.notify('安装已暂停，重新连接后会从当前步骤继续');
         this.reconnectMessage = '';
-        this.showReconnect = true;
+        InstallReconnect.request(id);
       } else if (result.stage === InstallStage.WAITING_ACCOUNT) {
         this.notify('请先在「我的」登录华为开发者账号');
       } else if (result.stage === InstallStage.WAITING_CONFIRMATION) {
@@ -702,6 +770,16 @@ struct Detail {
     });
   }
 
+  onReconnectVisibilityChanged(): void {
+    if (!this.showReconnect || this.reconnectPort.length > 0) return;
+    new HdcDeviceBridge(getContext(this) as common.UIAbilityContext).savedPort().then((port: number) => {
+      // 异步读取期间用户已经输入时，不覆盖输入。
+      if (this.showReconnect && this.reconnectPort.length === 0 && port >= 1024 && port <= 65535) {
+        this.reconnectPort = String(port);
+      }
+    }).catch(() => {});
+  }
+
   private async reconnect(): Promise<void> {
     this.reconnectBusy = true;
     this.reconnectMessage = '正在连接，请在系统弹窗中信任本机';
@@ -709,12 +787,14 @@ struct Detail {
       const port = Number(this.reconnectPort.trim());
       const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
       if (!await bridge.connect(port)) {
-        this.reconnectMessage = '未连上此端口，请核对无线调试页显示的端口';
+        this.reconnectMessage = bridge.connectionFailureMessage();
         return;
       }
       this.showReconnect = false;
       this.reconnectMessage = '';
-      await this.resumeInstall(this.activeInstallId);
+      const jobId = this.reconnectJobId || this.activeInstallId;
+      InstallReconnect.clear(jobId);
+      await this.resumeInstall(jobId);
     } catch (error) {
       this.reconnectMessage = errorText(error);
     } finally {
@@ -757,16 +837,17 @@ struct Detail {
         Text('连接无线调试').fontSize(22).fontWeight(FontWeight.Bold)
           .fontColor(this.colors().text).layoutWeight(1)
         Text('×').fontSize(26).fontColor(this.colors().textSecondary)
-          .onClick(() => { if (!this.reconnectBusy) this.showReconnect = false; })
+          .onClick(() => { if (!this.reconnectBusy) { InstallReconnect.clear(this.reconnectJobId); this.showReconnect = false; } })
       }.width('100%')
-      Text('安装进度已保留。连接后会从刚才的步骤继续。')
-        .fontSize(13).fontColor(this.colors().textSecondary).width('100%')
-      Button('打开无线调试设置').height(42).width('100%')
-        .backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
+      Text('前往系统设置，开启无线调试').fontSize(12).padding({ top: 3, bottom: 3 })
+        .fontColor(this.colors().accent).width('100%')
+        .decoration({ type: TextDecorationType.Underline, color: this.colors().accent })
         .onClick(() => new HdcDeviceBridge(getContext(this) as common.UIAbilityContext)
           .openWirelessSettings())
+      Text('安装进度已保留。连接后会从刚才的步骤继续。')
+        .fontSize(13).fontColor(this.colors().textSecondary).width('100%')
       TextInput({ placeholder: '输入无线调试端口', text: this.reconnectPort })
-        .type(InputType.Number).height(48)
+        .type(InputType.Number).height(48).textAlign(TextAlign.Center)
         .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
         .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
         .onChange((value: string) => { this.reconnectPort = value; })
@@ -833,6 +914,16 @@ struct Detail {
     }
   }
 
+  private packageSizeLabel(): string {
+    const size = this.selectedAsset.url.length > 0 ? this.selectedAsset.size :
+      (this.app.latestAsset?.size ?? 0);
+    if (!Number.isFinite(size) || size <= 0) return '安装包大小待确认';
+    if (size >= 1024 * 1024 * 1024) return '安装包 ' + (size / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+    if (size >= 1024 * 1024) return '安装包 ' + (size / (1024 * 1024)).toFixed(1) + ' MB';
+    if (size >= 1024) return '安装包 ' + Math.ceil(size / 1024) + ' KB';
+    return '安装包 ' + Math.ceil(size) + ' B';
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
     Column() {
@@ -864,11 +955,11 @@ struct Detail {
                   Column({ space: 7 }) {
                     Text(this.app.displayName).fontSize(25).fontWeight(FontWeight.Bold)
                       .fontColor(this.colors().text).maxLines(1)
-                    Text(this.app.category).fontSize(11).fontWeight(FontWeight.Medium)
+                    Text('版本 ' + this.selectedVersionLabel()).fontSize(11).fontWeight(FontWeight.Medium)
                       .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
-                      .backgroundColor(this.colors().surface).borderRadius(8)
+                      .backgroundColor(this.colors().surface).borderRadius(8).maxLines(1)
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-                }
+                }.width('100%')
                 Text(this.app.summary).fontSize(13).fontColor(this.colors().textBody)
                   .lineHeight(20).maxLines(3).width('100%')
                 Row() {
@@ -876,6 +967,14 @@ struct Detail {
                     .fontColor(this.colors().textSecondary).layoutWeight(1).maxLines(1)
                   Text('★ ' + this.app.stars).fontSize(11)
                     .fontColor(this.colors().accent)
+                }.width('100%')
+                Row({ space: 10 }) {
+                  Text(this.app.category).fontSize(11).fontWeight(FontWeight.Medium)
+                    .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
+                    .backgroundColor(this.colors().surface).borderRadius(8)
+                  Blank().layoutWeight(1)
+                  Text(this.packageSizeLabel()).fontSize(12).fontColor(this.colors().textSecondary)
+                    .maxLines(1)
                 }.width('100%')
               }.alignItems(HorizontalAlign.Start).width('100%')
                 .padding(22)
@@ -910,14 +1009,6 @@ struct Detail {
                     .onClick(() => this.checkForUpdates())
                 }
               }.width('100%')
-              Row() {
-                Text(this.showPreviewReleases ? '已显示预览版，安装前请确认版本' : '查看预览版')
-                  .fontSize(11).fontColor(this.showPreviewReleases ? this.colors().accent : this.colors().textSecondary)
-                  .layoutWeight(1)
-                Text(this.showPreviewReleases ? '关闭' : '手动选择')
-                  .fontSize(11).fontColor(this.colors().accent)
-              }.width('100%').padding({ top: 2, bottom: 2 })
-                .onClick(() => this.togglePreviewReleases())
               if (this.currentRelease()) {
                 Column({ space: 11 }) {
                   // 版本下拉全宽：发布时间并进下拉标签，收起时也能看到
@@ -938,6 +1029,15 @@ struct Detail {
                     .backgroundColor(this.colors().fill)
                     .width('100%')
                     .onSelect((index: number) => this.selectRelease(index))
+                  Row({ space: 8 }) {
+                    Text('包含预览版').fontSize(12).fontColor(this.colors().textSecondary)
+                      .layoutWeight(1)
+                    Toggle({ type: ToggleType.Switch, isOn: this.showPreviewReleases })
+                      .selectedColor(this.colors().accent).enabled(!this.releaseMoreBusy)
+                      .onChange((enabled: boolean) => {
+                        if (enabled !== this.showPreviewReleases) this.togglePreviewReleases();
+                      })
+                  }.width('100%')
                   if (this.currentRelease()!.notes.length > 0) {
                     Text(this.displayNotes(this.currentRelease()!.notes, this.currentRelease()!.name))
                       .fontSize(10).fontColor(this.colors().textBody)
@@ -955,10 +1055,11 @@ struct Detail {
                         })
                     }
                   }
+                  if (this.currentRelease()!.assets.length > 1) {
                   ForEach(this.currentRelease()!.assets, (asset: HapAsset) => {
                     Row({ space: 10 }) {
                       Text(this.selectedAsset.url === asset.url &&
-                        this.selectedAsset.name === asset.name ? '已选' : '选择')
+                        this.selectedAsset.name === asset.name ? '✓' : '选择')
                         .fontSize(10).fontColor(this.selectedAsset.url === asset.url &&
                         this.selectedAsset.name === asset.name ? this.colors().accent : this.colors().textTertiary)
                       Text(asset.name).fontSize(12).fontColor(this.colors().textBody)
@@ -969,6 +1070,7 @@ struct Detail {
                       .borderRadius(10)
                       .onClick(() => { this.selectedAsset = asset; })
                   }, (asset: HapAsset) => asset.name)
+                  }
                   // 版本按服务端分页续取，避免只看到第一页就以为没有旧版本。
                   if (this.refreshMessage.length > 0) {
                     Text(this.refreshMessage).fontSize(11)
@@ -979,14 +1081,6 @@ struct Detail {
                     Text(this.releaseMessage).fontSize(11)
                       .fontColor(this.colors().textSecondary)
                       .width('100%').maxLines(2)
-                  }
-                  if (this.releaseHasMore()) {
-                    Text(this.releaseMoreBusy ? '正在加载版本…' :
-                      '加载更早的版本（还有 ' + String(this.releaseTotal - this.releases.length) + ' 个）')
-                      .fontSize(11).fontColor(this.colors().accent)
-                      .width('100%').textAlign(TextAlign.Center)
-                      .padding({ top: 4, bottom: 2 })
-                      .onClick(() => this.loadMoreReleases())
                   }
                 }.alignItems(HorizontalAlign.Start).width('100%')
                   .padding(16)
@@ -1127,7 +1221,7 @@ struct Detail {
                 .fontColor(this.colors().onAccent)
             }
             .width('100%').height(52)
-            .backgroundColor(this.downloadBusy ? this.colors().accentSoft : this.colors().accent)
+            .backgroundColor(this.colors().accent)
             .borderRadius(18).clip(true)
             .onClick(() => {
               if (this.downloadBusy) return;

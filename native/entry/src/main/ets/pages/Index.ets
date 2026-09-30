@@ -129,6 +129,7 @@ struct FeaturedCardStars {
 
   build() {
     Canvas(this.ctx).width('100%').height(92)
+      .hitTestBehavior(HitTestMode.None)
       .onReady(() => this.paint())
   }
 }
@@ -167,8 +168,10 @@ struct Index {
   @State private activeQuery: string = '';
   /** 目录里每个应用在本机的版本（来自系统 bundleManager），0/缺失表示没装。 */
   @State private installedVersions: Map<number, number> = new Map<number, number>();
-  /** 正在从目录卡片安装的应用编号（0 表示没有）。 */
-  @State private activeCatalogAppId: number = 0;
+  /** 入队写库中的应用；只锁住被重复点击的那张卡。 */
+  @State private enqueuingAppIds: number[] = [];
+  private queueDraining: boolean = false;
+  private queueRecoveryReady: boolean = false;
   @State private installTasks: InstallTaskSnapshot[] = [];
   private installSubscription: number = -1;
   /** 与设备核对卸载状态。 */
@@ -286,7 +289,10 @@ struct Index {
     this.migrateLegacyJobs();
     // 先等缓存画出来，再发起刷新：刷新会重置 appIcons，顺序反了会把刚恢复的图标清掉
     this.loadCatalogFromCache().then(() => this.loadApps());
-    this.recoverDownloads();
+    this.recoverDownloads().finally(() => {
+      this.queueRecoveryReady = true;
+      this.drainInstallQueue();
+    });
     this.restoreAccount();
   }
 
@@ -350,6 +356,7 @@ struct Index {
       }
       this.signedIn = true;
       this.loginMessage = '';
+      this.drainInstallQueue();
       this.recoverSigningIdentity();
       this.loadMyApps();
     } catch (_) {
@@ -370,6 +377,7 @@ struct Index {
       this.account = account;
       this.signedIn = true;
       this.loginMessage = '登录成功';
+      this.drainInstallQueue();
       this.recoverSigningIdentity();
       this.loadMyApps();
     } catch (error) {
@@ -1456,6 +1464,7 @@ struct Index {
       this.jobsError = '';
       await this.loadJobs();
       this.refreshCatalogInstallState();
+      this.drainInstallQueue();
     } catch (error) { this.jobsError = errorText(error); }
     finally { this.cancellingJobs = this.cancellingJobs.filter((id: string) => id !== job.id); }
   }
@@ -1538,7 +1547,7 @@ struct Index {
       let healed = 0;
       for (const job of jobs) {
         if (!isPending(job.stage)) continue;
-        if (job.stage === InstallStage.WAITING_CONFIRMATION) continue;
+        if (job.stage === InstallStage.WAITING_CONFIRMATION || job.stage === InstallStage.QUEUED) continue;
         if (JobScheduler.isRunning(job.id)) continue;
         if (now - job.updatedAt < Index.STUCK_JOB_MS) continue;
         job.stage = InstallStage.RETRYABLE_ERROR;
@@ -1561,7 +1570,8 @@ struct Index {
       this.installTasks = rows;
       this.refreshLocalTimeline();
       this.pendingJobs = rows.map((row: InstallTaskSnapshot) => row.job).filter((job: InstallJob) =>
-        job.stage !== InstallStage.INSTALLED && job.stage !== InstallStage.TERMINAL_ERROR);
+        job.stage !== InstallStage.INSTALLED && job.stage !== InstallStage.TERMINAL_ERROR)
+        .sort((a: InstallJob, b: InstallJob) => this.queueTime(a) - this.queueTime(b));
       const installed = rows.map((row: InstallTaskSnapshot) => row.job).filter((job: InstallJob) =>
         job.stage === InstallStage.INSTALLED);
       const previous = this.installedJobs.map((job: InstallJob) => job.id + ':' + job.updatedAt).join(',');
@@ -1608,6 +1618,11 @@ struct Index {
   }
 
   private taskJobLabel(job: InstallJob): string {
+    if (job.stage === InstallStage.QUEUED) {
+      const ahead = this.pendingJobs.filter((item: InstallJob) =>
+        item.stage === InstallStage.QUEUED && this.queueTime(item) < this.queueTime(job)).length;
+      return '排队中 · 第 ' + (ahead + 1) + ' 个';
+    }
     const row = this.installTasks.find((item: InstallTaskSnapshot) => item.job.id === job.id);
     return row === undefined ? this.stageLabel(job.stage) : InstallTaskState.label(row);
   }
@@ -1639,13 +1654,44 @@ struct Index {
     }
   }
 
-  /** 已安装应用里哪些有新版本。 */
-  /** 继续第一个未完成的安装任务。 */
-  private async resumePending(): Promise<void> {
-    if (this.activeJobId.length > 0 || !this.signedIn) return;
-    const job = this.pendingJobs[0];
-    if (job === undefined) return;
-    await this.continueInstall(job);
+  /** stageHistory 保留最初入队时间，updatedAt 则随进度变化。 */
+  private queueTime(job: InstallJob): number {
+    return job.stageHistory.length > 0 ? job.stageHistory[0].at : job.updatedAt;
+  }
+
+  /** 只自动处理排队项；需要用户连接、确认或手动重试的任务保持原状态。 */
+  private async drainInstallQueue(): Promise<void> {
+    if (!this.queueRecoveryReady || this.queueDraining || this.activeJobId.length > 0) return;
+    this.queueDraining = true;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const store = await JobStore.open(context);
+      while (this.activeJobId.length === 0) {
+        const queued = (await store.listAll()).filter((job: InstallJob) =>
+          job.appId > 0 && job.stage === InstallStage.QUEUED)
+          .sort((a: InstallJob, b: InstallJob) => this.queueTime(a) - this.queueTime(b));
+        const job = queued[0];
+        if (job === undefined) break;
+        // 需要登录的任务不启动；自更新可以直接使用发布包原签名。
+        if (!this.signedIn && !LocalBundles.isSelfBundle(job.catalogBundleName)) break;
+        try {
+          await JobScheduler.runDownload(context, store, job);
+          if (await store.get(job.id) === undefined) continue; // 已被用户取消
+          await this.continueInstall(job);
+          const finished = await store.get(job.id);
+          if (finished !== undefined && finished.stage !== InstallStage.INSTALLED) break;
+        } catch (error) {
+          if (await store.get(job.id) === undefined) continue;
+          this.jobsError = errorText(error);
+          break;
+        }
+      }
+    } catch (error) {
+      this.jobsError = errorText(error);
+    } finally {
+      this.queueDraining = false;
+      await this.loadJobs();
+    }
   }
 
   /** 「已安装」区块展示的全部条目：轻启装过的 + 商店里探测到的。 */
@@ -1771,27 +1817,22 @@ struct Index {
         Button(this.taskLabel(app.id, app.latestAsset?.bundleName ?? ''))
           .width(94).height(38).padding({ left: 6, right: 6 }).fontSize(11)
           .fontColor(featured ? '#192856' : Palette.accent)
-          .backgroundColor(featured ? '#EEFFFFFF' : Palette.accentSoft).borderRadius(12)
-          .enabled(!this.taskRunning(app.id, app.latestAsset?.bundleName ?? ''))
-          .onClick(() => {
-            const row = this.taskForApp(app.id, app.latestAsset?.bundleName ?? '');
-            if (row !== undefined) this.continueInstall(row.job);
-          })
-      } else if (this.activeCatalogAppId === app.id) {
+          .backgroundColor(featured ? '#FFE5A7' : Palette.accentSoft).borderRadius(12)
+          .onClick(() => { this.currentTab = Index.TAB_MANAGE; })
+      } else if (this.enqueuingAppIds.includes(app.id)) {
         LoadingProgress().width(24).height(24)
       } else if (this.installedBundleOf(app.id).length > 0) {
         if (this.updateForApp(app.id) !== undefined) {
           Button('更新')
             .width(74).height(38).fontSize(13)
             .fontColor(featured ? '#192856' : Palette.onAccent)
-            .backgroundColor(featured ? '#FFFFFF' : Palette.accent).borderRadius(12)
-            .enabled(this.activeCatalogAppId === 0)
+            .backgroundColor(featured ? '#FFE5A7' : Palette.accent).borderRadius(12)
             .onClick(() => this.installFromCatalog(app))
         } else {
           Button('打开')
             .width(74).height(38).fontSize(13)
             .fontColor(featured ? '#192856' : Palette.accent)
-            .backgroundColor(featured ? '#EEFFFFFF' : Palette.accentSoft)
+            .backgroundColor(featured ? '#FFE5A7' : Palette.accentSoft)
             .borderRadius(12)
             .onClick(() => this.openCatalogApp(app))
         }
@@ -1800,15 +1841,13 @@ struct Index {
         // 允许先下载并准备任务，设备连接在真正需要授权/安装时再处理。
         Button('安装/更新').width(94).height(38).fontSize(12)
           .fontColor(featured ? '#192856' : Palette.onAccent)
-          .backgroundColor(featured ? '#FFFFFF' : Palette.accent).borderRadius(12)
-          .enabled(this.activeCatalogAppId === 0)
+          .backgroundColor(featured ? '#FFE5A7' : Palette.accent).borderRadius(12)
           .onClick(() => this.installFromCatalog(app))
       } else {
         Button('安装')
           .width(74).height(38).fontSize(13)
           .fontColor(featured ? '#192856' : Palette.onAccent)
-          .backgroundColor(featured ? '#FFFFFF' : Palette.accent).borderRadius(12)
-          .enabled(this.activeCatalogAppId === 0)
+          .backgroundColor(featured ? '#FFE5A7' : Palette.accent).borderRadius(12)
           .onClick(() => this.installFromCatalog(app))
       }
     }
@@ -1889,11 +1928,11 @@ struct Index {
   /**
    * 从目录卡片直接安装或更新。
    *
-   * 走和详情页一样的链路：入队 → 下载 → 检查 HAP → 签名安装。区别只是不用先打开
-   * 详情页，所以是一次点击而不是三次。
+   * 点击立即写入持久队列；后台按入队顺序下载、签名、安装。
    */
   private async installFromCatalog(app: CatalogApp): Promise<void> {
-    if (this.activeCatalogAppId !== 0 || this.taskRunning(app.id, app.latestAsset?.bundleName ?? '')) return;
+    if (this.enqueuingAppIds.includes(app.id) ||
+      this.taskPending(app.id, app.latestAsset?.bundleName ?? '')) return;
     // ForEach 的点击闭包可能还持有上一轮卡片；与「更新」判断使用同一份当前目录。
     const asset = this.catalogApp(app.id)?.latestAsset;
     if (asset === undefined || !/^https:\/\//.test(asset.url)) {
@@ -1910,22 +1949,18 @@ struct Index {
       this.checkInstalledUpdates();
       return;
     }
-    this.activeCatalogAppId = app.id;
+    this.enqueuingAppIds = this.enqueuingAppIds.concat([app.id]);
     this.jobsError = '';
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const store = await JobStore.open(context);
-      const job = await store.enqueue(app.id, asset.name, asset.url, asset.sha256,
+      await store.enqueue(app.id, asset.name, asset.url, asset.sha256,
         asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode);
-      if (job.stage === InstallStage.QUEUED || job.stage === InstallStage.DOWNLOADING ||
-        job.stage === InstallStage.WAITING_NETWORK) {
-        await JobScheduler.runDownload(context, store, job);
-      }
-      await this.continueInstall(job);
+      this.drainInstallQueue();
     } catch (error) {
       this.jobsError = errorText(error);
     } finally {
-      this.activeCatalogAppId = 0;
+      this.enqueuingAppIds = this.enqueuingAppIds.filter((id: number) => id !== app.id);
       await this.loadJobs();
     }
   }
@@ -2048,8 +2083,12 @@ struct Index {
   }
 
   private catalogApp(appId: number): CatalogApp | undefined {
-    return this.updateApps().find((app: CatalogApp) => app.id === appId) ??
-      this.apps.find((app: CatalogApp) => app.id === appId);
+    const management = this.updateApps().find((app: CatalogApp) => app.id === appId);
+    const visible = this.apps.find((app: CatalogApp) => app.id === appId);
+    if (management === undefined) return visible;
+    if (visible === undefined) return management;
+    return (visible.latestAsset?.versionCode ?? 0) >
+      (management.latestAsset?.versionCode ?? 0) ? visible : management;
   }
 
   /** 已有线上来源保持来源；纯本地安装仅在包名唯一匹配时自动关联。 */
@@ -2192,25 +2231,12 @@ struct Index {
 
   /** 下载最新版本并接上安装链路。 */
   private async startUpdate(job: InstallJob, target: UpdateTarget): Promise<void> {
-    if (this.activeJobId.length > 0 || this.jobRunning(job.id)) return;
-    this.activeJobId = job.id;
-    try {
-      const context = getContext(this) as common.UIAbilityContext;
-      const store = await JobStore.open(context);
-      const next = await store.enqueue(target.appId, target.assetName, target.assetUrl,
-        target.assetSha256, target.mirrorUrls, target.versionName,
-        target.bundleName, target.versionCode);
-      await JobScheduler.runDownload(context, store, next);
-      this.activeJobId = '';
-      await this.continueInstall(next);
-      // 版本已变，清掉已装版本缓存再重新比对更新
-      this.forgetInstalledVersions();
-      this.checkInstalledUpdates();
-    } catch (error) {
-      this.jobsError = errorText(error);
-    } finally {
-      this.activeJobId = '';
+    const app = this.catalogApp(target.appId);
+    if (app === undefined) {
+      this.jobsError = '更新来源暂不可用，请刷新应用列表';
+      return;
     }
+    await this.installFromCatalog(app);
   }
 
   private async openInstalled(job: InstallJob): Promise<void> {
@@ -2385,8 +2411,7 @@ struct Index {
       for (const job of pending) {
         if (attempted >= 2) break;
         if (job.stage !== InstallStage.DOWNLOADING &&
-          job.stage !== InstallStage.WAITING_NETWORK &&
-          job.stage !== InstallStage.QUEUED) continue;
+          job.stage !== InstallStage.WAITING_NETWORK) continue;
         if (job.stage === InstallStage.WAITING_NETWORK &&
           Date.now() - job.updatedAt < retryDelayMs(job.attempt)) continue;
         attempted++;
@@ -2432,6 +2457,7 @@ struct Index {
     if (this.activeJobId.length > 0 || this.jobRunning(job.id)) return;
     this.activeJobId = job.id;
     this.resumeJobId = job.id;
+    let installed = false;
 
     try {
       const context = getContext(this) as common.UIAbilityContext;
@@ -2448,6 +2474,7 @@ struct Index {
       } else if (result.stage === InstallStage.WAITING_CONFIRMATION) {
         this.confirmDataLoss(result);
       } else if (result.stage === InstallStage.INSTALLED) {
+        installed = true;
         this.jobsError = '';
         // 完成状态由时间轴卡片顶部的「安装完成」表达，这里不再另设一行
         this.localMessage = '';
@@ -2466,6 +2493,7 @@ struct Index {
     } finally {
       if (this.activeJobId === job.id) this.activeJobId = '';
       await this.loadJobs();
+      if (installed && !this.queueDraining) this.drainInstallQueue();
     }
   }
 
@@ -2838,7 +2866,7 @@ struct Index {
         if (this.pendingJobs.length > 0) {
           ListItem() {
             Row({ space: 8 }) {
-              Text('正在安装').fontSize(19).fontWeight(FontWeight.Bold).fontColor(Palette.text)
+              Text('安装队列').fontSize(19).fontWeight(FontWeight.Bold).fontColor(Palette.text)
               Text(String(this.pendingJobs.length)).fontSize(12).fontColor(Palette.accent)
                 .padding({ left: 7, right: 7, top: 3, bottom: 3 })
                 .backgroundColor(Palette.accentSoft).borderRadius(7)
@@ -2868,7 +2896,7 @@ struct Index {
                   }
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                 Column({ space: 7 }) {
-                  if (!this.jobRunning(job.id)) {
+                  if (!this.jobRunning(job.id) && job.stage !== InstallStage.QUEUED) {
                     Button('继续安装').height(31).fontSize(11).fontColor(Palette.onAccent)
                       .backgroundColor(Palette.accent).borderRadius(10)
                       .enabled(this.activeJobId.length === 0 && this.signedIn &&
@@ -3009,10 +3037,10 @@ struct Index {
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                     .onClick(() => this.openJobDetails(job))
                   if (this.updateFor(job.bundleName) !== undefined) {
-                    Button(this.activeJobId === job.id ? '更新中…' : '更新')
+                    Button(this.taskPending(this.updateFor(job.bundleName)?.appId ?? 0,
+                      job.bundleName) ? '已加入队列' : '更新')
                       .height(34).fontSize(12).fontColor(Palette.onAccent)
                       .backgroundColor(Palette.accent).borderRadius(11)
-                      .enabled(this.activeJobId.length === 0)
                       .onClick(() => {
                         const target = this.updateFor(job.bundleName);
                         if (target !== undefined) this.startUpdate(job, target);

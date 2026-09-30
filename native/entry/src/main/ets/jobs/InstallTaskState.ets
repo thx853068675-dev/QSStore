@@ -159,7 +159,7 @@ export class InstallTaskState {
   static label(row: InstallTaskSnapshot, now: number = Date.now()): string {
     if (row.finishing) return '正在收尾';
     switch (row.job.stage) {
-      case InstallStage.QUEUED: return '准备中';
+      case InstallStage.QUEUED: return '排队中';
       case InstallStage.DOWNLOADING: return row.running ? '下载中 ' + row.percent + '%' : '等待继续下载';
       case InstallStage.VERIFIED: return '读取安装包 ' + row.percent + '%';
       case InstallStage.PACKAGE_INSPECTED: return '准备授权 ' + row.percent + '%';

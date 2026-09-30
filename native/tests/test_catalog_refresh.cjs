@@ -25,7 +25,7 @@ const code = ts.transpileModule(`class Index {
   static STARRED_MIN_STARS = 100;
   ${['catalogHasMore', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'flushIconCache', 'iconFor',
     'refreshCatalogInstallState', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice',
-    'displayApps', 'starField', 'hash32', 'paintStars']
+    'displayApps', 'featuredTier', 'featuredColors']
     .map(method).join('\n')}
 }; globalThis.Page = Index;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
 function deferred() {
@@ -357,38 +357,10 @@ test('displayApps keeps the catalog order when nothing qualifies', () => {
   assert.deepEqual(Array.from(ui.displayApps(), a => a.id), [3, 1, 2]);
 });
 
-test('starField places stars inside the card and varies their size', () => {
-  const f = fixture(), ui = f.ui;
-  const stars = f.PageClass.starField(7, 46);
-  assert.equal(stars.length, 46);
-  const sizes = new Set();
-  for (const s of stars) {
-    assert.ok(s[0] >= 0 && s[0] <= 1, 'x 是 0..1 比例');
-    assert.ok(s[1] >= 0 && s[1] <= 1, 'y 是 0..1 比例');
-    // 大小不一：半径落在 0.5..2.6
-    assert.ok(s[2] >= 0.5 && s[2] <= 2.6, '半径在范围内');
-    // 半透明：不能压过卡片上的文字
-    assert.ok(s[3] >= 0.12 && s[3] <= 0.46, '透明度在范围内');
-    sizes.add(s[2]);
-  }
-  assert.ok(sizes.size > 20, '大小要有明显差异，不能都一样');
-});
-
-test('starField is stable for the same seed so the background does not flicker', () => {
-  const f = fixture(), ui = f.ui;
-  const first = f.PageClass.starField(11, 46);
-  const again = f.PageClass.starField(11, 46);
-  assert.deepEqual(Array.from(again, s => Array.from(s)), Array.from(first, s => Array.from(s)));
-  // 不同应用要有不同的背景，否则每张大卡都一样
-  const other = f.PageClass.starField(12, 46);
-  assert.notDeepEqual(Array.from(other, s => Array.from(s)), Array.from(first, s => Array.from(s)));
-});
-
-test('starField spreads stars across the card instead of clustering', () => {
-  const f = fixture(), ui = f.ui;
-  // 无序但不能挤在一小块：四个象限都该有星星
-  const stars = f.PageClass.starField(3, 46);
-  const quadrants = new Set();
-  for (const s of stars) quadrants.add((s[0] < 0.5 ? 'L' : 'R') + (s[1] < 0.5 ? 'T' : 'B'));
-  assert.equal(quadrants.size, 4, '四个象限都要覆盖');
+test('featured card thresholds cover hundreds, thousands, and ten thousands', () => {
+  const { ui } = fixture();
+  assert.deepEqual([100, 101, 999, 1000, 9999, 10000].map(n => ui.featuredTier(n)),
+    [0, 1, 1, 2, 2, 3]);
+  assert.notEqual(ui.featuredColors(101)[0][0], ui.featuredColors(1000)[0][0]);
+  assert.notEqual(ui.featuredColors(1000)[0][0], ui.featuredColors(10000)[0][0]);
 });

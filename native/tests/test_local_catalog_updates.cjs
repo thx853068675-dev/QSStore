@@ -31,7 +31,8 @@ function fixture() {
   const f = { requests: [], routes: [], downloads: [], enqueues: [], actual: -1,
     fetch: async () => ({ items: [], pageSize: 100, total: 0 }) };
   const store = { enqueue: async (...args) => {
-    f.enqueues.push(args); return { id: 'online', appId: args[0], stage: 'QUEUED' };
+    f.enqueues.push(args); f.lastJob = { id: 'online', appId: args[0], stage: 'QUEUED' };
+    return f.lastJob;
   } };
   const sandbox = {
     StoreClient: class { listApps(...args) { f.requests.push(args); return f.fetch(...args); } },
@@ -45,9 +46,10 @@ function fixture() {
   f.ui = new sandbox.Page();
   Object.assign(f.ui, { apps: [], updateCatalog: [], updateCatalogReady: false,
     updateCatalogBusy: false, updateCatalogError: '', installedJobs: [local()],
-    activeCatalogAppId: 0, signedIn: true, taskRunning: () => false, loadJobs: async () => {},
+    enqueuingAppIds: [], signedIn: true, taskPending: () => false, loadJobs: async () => {},
     storeInstalled: [], installedVersions: new Map(), updates: [], activeJobId: '',
-    refreshCatalogInstallState() { this.checkInstalledUpdates(); }, jobRunning: () => false, forgetInstalledVersions() {}, continueInstall: async job => { f.continued = job; } });
+    refreshCatalogInstallState() { this.checkInstalledUpdates(); }, jobRunning: () => false,
+    forgetInstalledVersions() {}, drainInstallQueue() { f.downloads.push(f.lastJob); f.continued = f.lastJob; } });
   return f;
 }
 test('a local install gains an update after publication, without rewriting provenance', async () => {
@@ -153,7 +155,7 @@ test('Discover enqueues the current update target, not the stale card closure', 
   assert.equal(f.enqueues[0][1], 'app.hap');
   assert.equal(f.enqueues[0][2], 'https://example.com/app.hap');
   assert.equal(f.downloads.length, 1); assert.equal(f.continued.appId, 7);
-  assert.equal(ui.activeCatalogAppId, 0);
+  assert.equal(ui.enqueuingAppIds.length, 0);
 });
 test('a stale Discover update click cannot reinstall a version already installed', async () => {
   const f = fixture(), { ui } = f;

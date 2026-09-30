@@ -107,7 +107,7 @@ export class LocalBundles {
       const info = bundleManager.getBundleInfoSync(bundleName,
         bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
       const code = Number(info?.versionCode ?? 0);
-      return Number.isFinite(code) && code > 0 ? code : 0;
+      return Number.isInteger(code) && code > 0 ? code : LocalBundles.UNKNOWN;
     } catch (error) {
       // 包不存在时系统也会抛错（17700001），那才是「没装」的正常信号；
       // 其余错误（201 权限不足等）说明我们没资格下结论。

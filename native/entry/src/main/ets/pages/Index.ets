@@ -137,8 +137,8 @@ struct FeaturedCardStars {
 @Entry
 @Component
 struct Index {
-  // 跟随系统深色模式；变化时先更新调色板再重渲染。
-  @StorageProp('darkMode') @Watch('syncPalette') darkMode: boolean = false;
+  // 每个颜色使用点通过 colors() 读取此状态，主题变化会更新对应组件。
+  @StorageProp('darkMode') darkMode: boolean = false;
   @State private currentTab: number = 0;
   @State private pendingJobs: InstallJob[] = [];
   @State private installedJobs: InstallJob[] = [];
@@ -168,6 +168,9 @@ struct Index {
   @State private activeQuery: string = '';
   /** 目录里每个应用在本机的版本（来自系统 bundleManager），0/缺失表示没装。 */
   @State private installedVersions: Map<number, number> = new Map<number, number>();
+  @State private needsInstallScan: boolean = false;
+  private initialScanDismissed: boolean = false;
+  private catalogProbePending: string[] = [];
   /** 入队写库中的应用；只锁住被重复点击的那张卡。 */
   @State private enqueuingAppIds: number[] = [];
   private queueDraining: boolean = false;
@@ -275,13 +278,10 @@ struct Index {
   /** 左滑后等待确认删除的证书 ID。 */
   @State private certConfirmDelete: string = '';
 
-  syncPalette(): void {
-    Palette.dark = this.darkMode;
-  }
+  private colors(): Palette { return Palette.forMode(this.darkMode); }
 
   aboutToAppear(): void {
     this.observeInstallTasks();
-    this.syncPalette();
     InstalledAppRegistry.load(getContext(this) as common.UIAbilityContext)
       .then(() => this.refreshCatalogInstallState());
     this.loadJobs();
@@ -305,6 +305,7 @@ struct Index {
    */
   onPageShow(): void {
     this.observeInstallTasks();
+    this.refreshCatalogInstallState();
     this.reconcileInterruptedInstalls().then(() => this.reconcileStuckJobs());
     // Detail always fetches its icon afresh. Refresh the catalog when returning
     // so an icon revision changed on the server is reflected on discovery too.
@@ -364,6 +365,7 @@ struct Index {
       this.loginMessage = '登录状态已过期，请重新登录';
     } finally {
       this.accountChecked = true;
+      this.updateInstallScanPrompt();
     }
   }
 
@@ -377,6 +379,7 @@ struct Index {
       this.account = account;
       this.signedIn = true;
       this.loginMessage = '登录成功';
+      this.updateInstallScanPrompt();
       this.drainInstallQueue();
       this.recoverSigningIdentity();
       this.loadMyApps();
@@ -692,11 +695,11 @@ struct Index {
   private certDeleteAction(row: CertRow) {
     Column() {
       Text(this.certDeleting === row.id ? '删除中…' : '删除')
-        .fontSize(13).fontColor(Palette.onAccent).fontWeight(FontWeight.Medium)
+        .fontSize(13).fontColor(this.colors().onAccent).fontWeight(FontWeight.Medium)
         .maxLines(1)
     }
     .width(64).height('100%').justifyContent(FlexAlign.Center)
-    .backgroundColor(this.certDeleting === row.id ? Palette.textTertiary : Palette.danger)
+    .backgroundColor(this.certDeleting === row.id ? this.colors().textTertiary : this.colors().danger)
     .borderRadius(14)
     .onClick(() => {
       // 左滑删除是破坏性且不可撤销的动作，先要一次明确确认。
@@ -710,17 +713,17 @@ struct Index {
     Column({ space: 14 }) {
       Row() {
         Text('AGC 调试证书').fontSize(20).fontWeight(FontWeight.Bold)
-          .fontColor(Palette.text).layoutWeight(1)
-        Text('×').fontSize(24).fontColor(Palette.textSecondary)
+          .fontColor(this.colors().text).layoutWeight(1)
+        Text('×').fontSize(24).fontColor(this.colors().textSecondary)
           .onClick(() => { this.showCertSheet = false; })
       }.width('100%')
       Text('安装时用与本机私钥配对的那张证书重签。')
-        .fontSize(11).fontColor(Palette.textTertiary)
+        .fontSize(11).fontColor(this.colors().textTertiary)
         .lineHeight(17).width('100%')
       if (this.certSheetBusy) {
         Row({ space: 10 }) {
           LoadingProgress().width(18).height(18)
-          Text('正在读取…').fontSize(12).fontColor(Palette.textSecondary)
+          Text('正在读取…').fontSize(12).fontColor(this.colors().textSecondary)
         }.width('100%').justifyContent(FlexAlign.Center).padding({ top: 8, bottom: 8 })
       } else {
         List({ space: 9 }) {
@@ -729,30 +732,30 @@ struct Index {
               Row({ space: 11 }) {
                 Column({ space: 4 }) {
                   Text(row.name).fontSize(14).fontWeight(FontWeight.Medium)
-                    .fontColor(Palette.text).maxLines(1)
+                    .fontColor(this.colors().text).maxLines(1)
                     .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  Text('ID ' + row.id).fontSize(11).fontColor(Palette.textTertiary)
+                  Text('ID ' + row.id).fontSize(11).fontColor(this.colors().textTertiary)
                     .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
                   if (row.expiry.length > 0) {
                     Text('到期 ' + row.expiry).fontSize(11)
-                      .fontColor(Palette.textTertiary).maxLines(1)
+                      .fontColor(this.colors().textTertiary).maxLines(1)
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
                   }
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                 if (row.inUse) {
                   Text('已使用')
-                    .fontSize(11).fontColor(Palette.success)
+                    .fontSize(11).fontColor(this.colors().success)
                     .padding({ left: 8, right: 8, top: 5, bottom: 5 })
-                    .backgroundColor(Palette.successSoft).borderRadius(8)
+                    .backgroundColor(this.colors().successSoft).borderRadius(8)
                 } else {
                   Button(this.certUsing === row.id ? '配对中…' : '使用')
                     .height(30).fontSize(11)
-                    .fontColor(Palette.accent).backgroundColor(Palette.accentSoft)
+                    .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
                     .borderRadius(8).enabled(this.certUsing.length === 0)
                     .onClick(() => this.useCertificate(row))
                 }
               }.width('100%').padding(13)
-                .backgroundColor(Palette.surface).borderRadius(14)
+                .backgroundColor(this.colors().surface).borderRadius(14)
             }
             // 卡片左滑露出删除。
             // 必须用 SwipeActionItem 对象形式：直接塞 CustomBuilder 会让
@@ -773,11 +776,11 @@ struct Index {
       if (this.certConfirmDelete.length > 0) {
         Column({ space: 10 }) {
           Text('删除后该证书不能再签名。若是最后一张，本机私钥会保留，下次可重新获取证书。')
-            .fontSize(11).fontColor(Palette.textSecondary).width('100%')
+            .fontSize(11).fontColor(this.colors().textSecondary).width('100%')
           Row({ space: 10 }) {
             Button('确认删除')
               .height(36).fontSize(12).layoutWeight(1)
-              .backgroundColor(Palette.danger).fontColor(Palette.onAccent)
+              .backgroundColor(this.colors().danger).fontColor(this.colors().onAccent)
               .borderRadius(11).enabled(this.certDeleting.length === 0)
               .onClick(() => {
                 const target = this.certRows.find((item: CertRow) =>
@@ -787,31 +790,31 @@ struct Index {
               })
             Button('取消')
               .height(36).fontSize(12).layoutWeight(1)
-              .backgroundColor(Palette.fill).fontColor(Palette.textSecondary)
+              .backgroundColor(this.colors().fill).fontColor(this.colors().textSecondary)
               .borderRadius(11)
               .onClick(() => { this.certConfirmDelete = ''; })
           }.width('100%')
         }.width('100%').padding(13)
-          .backgroundColor(Palette.surface).borderRadius(12)
-          .border({ width: 1, color: Palette.danger })
+          .backgroundColor(this.colors().surface).borderRadius(12)
+          .border({ width: 1, color: this.colors().danger })
       }
       if (this.certSheetMessage.length > 0) {
-        Text(this.certSheetMessage).fontSize(12).fontColor(Palette.textSecondary)
+        Text(this.certSheetMessage).fontSize(12).fontColor(this.colors().textSecondary)
           .maxLines(3).width('100%')
       }
       Row({ space: 10 }) {
         Button(this.certSheetBusy ? '读取中…' : '刷新列表')
           .height(40).fontSize(13).layoutWeight(1)
-          .backgroundColor(Palette.accentSoft).fontColor(Palette.accent)
+          .backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
           .borderRadius(12).enabled(!this.certSheetBusy)
           .onClick(() => this.loadCertRows())
         Button('关闭')
           .height(40).fontSize(13).layoutWeight(1)
-          .backgroundColor(Palette.fill).fontColor(Palette.textSecondary)
+          .backgroundColor(this.colors().fill).fontColor(this.colors().textSecondary)
           .borderRadius(12)
           .onClick(() => { this.showCertSheet = false; })
       }.width('100%')
-    }.padding(21).width('90%').backgroundColor(Palette.bg).borderRadius(23)
+    }.padding(21).width('90%').backgroundColor(this.colors().bg).borderRadius(23)
   }
 
   /** 在浏览器里打开 AppGallery Connect 的证书管理页（备用入口）。 */
@@ -1836,8 +1839,8 @@ struct Index {
       if (this.taskPending(app.id, app.latestAsset?.bundleName ?? '')) {
         Button(this.taskLabel(app.id, app.latestAsset?.bundleName ?? ''))
           .width(94).height(38).padding({ left: 6, right: 6 }).fontSize(11)
-          .fontColor(featured ? '#192856' : Palette.accent)
-          .backgroundColor(featured ? '#FFE5A7' : Palette.accentSoft).borderRadius(12)
+          .fontColor(featured ? '#192856' : this.colors().accent)
+          .backgroundColor(featured ? '#FFE5A7' : this.colors().accentSoft).borderRadius(12)
           .onClick(() => { this.currentTab = Index.TAB_MANAGE; })
       } else if (this.enqueuingAppIds.includes(app.id)) {
         LoadingProgress().width(24).height(24)
@@ -1845,14 +1848,14 @@ struct Index {
         if (this.updateForApp(app.id) !== undefined) {
           Button('更新')
             .width(74).height(38).fontSize(13)
-            .fontColor(featured ? '#192856' : Palette.onAccent)
-            .backgroundColor(featured ? '#FFE5A7' : Palette.accent).borderRadius(12)
+            .fontColor(featured ? '#192856' : this.colors().onAccent)
+            .backgroundColor(featured ? '#FFE5A7' : this.colors().accent).borderRadius(12)
             .onClick(() => this.installFromCatalog(app))
         } else {
           Button('打开')
             .width(74).height(38).fontSize(13)
-            .fontColor(featured ? '#192856' : Palette.accent)
-            .backgroundColor(featured ? '#FFE5A7' : Palette.accentSoft)
+            .fontColor(featured ? '#192856' : this.colors().accent)
+            .backgroundColor(featured ? '#FFE5A7' : this.colors().accentSoft)
             .borderRadius(12)
             .onClick(() => this.openCatalogApp(app))
         }
@@ -1860,14 +1863,14 @@ struct Index {
         // 权限不足且无线调试未连接时，状态无法核实；不能让用户永远卡在检查按钮。
         // 允许先下载并准备任务，设备连接在真正需要授权/安装时再处理。
         Button('安装/更新').width(94).height(38).fontSize(12)
-          .fontColor(featured ? '#192856' : Palette.onAccent)
-          .backgroundColor(featured ? '#FFE5A7' : Palette.accent).borderRadius(12)
+          .fontColor(featured ? '#192856' : this.colors().onAccent)
+          .backgroundColor(featured ? '#FFE5A7' : this.colors().accent).borderRadius(12)
           .onClick(() => this.installFromCatalog(app))
       } else {
         Button('安装')
           .width(74).height(38).fontSize(13)
-          .fontColor(featured ? '#192856' : Palette.onAccent)
-          .backgroundColor(featured ? '#FFE5A7' : Palette.accent).borderRadius(12)
+          .fontColor(featured ? '#192856' : this.colors().onAccent)
+          .backgroundColor(featured ? '#FFE5A7' : this.colors().accent).borderRadius(12)
           .onClick(() => this.installFromCatalog(app))
       }
     }
@@ -2017,6 +2020,26 @@ struct Index {
     this.syncDetectedInstalled();
     this.checkInstalledUpdates();
     if (unresolved.length > 0) this.confirmCatalogVersionsViaDevice(unresolved);
+    else this.updateInstallScanPrompt();
+  }
+
+  /** 初次没有设备快照时，先识别外部侧载应用；用户仍可稍后连接并浏览目录。 */
+  private updateInstallScanPrompt(): void {
+    this.needsInstallScan = this.updateApps().some((app: CatalogApp) =>
+      (app.latestAsset?.bundleName.length ?? 0) > 0 && this.installedVersionOf(app.id) < 0);
+    if (!this.needsInstallScan || !this.updateCatalogReady || !this.accountChecked ||
+      !this.signedIn || this.catalogProbeBusy || this.initialScanDismissed ||
+      InstalledAppRegistry.hasCatalogSnapshot() || this.showReconnect || this.showSubmit ||
+      this.showAppConfig || this.activeJobId.length > 0 || this.pendingJobs.length > 0) return;
+    this.openInstallScan();
+  }
+
+  private openInstallScan(): void {
+    if (this.reconnectBusy) return;
+    this.initialScanDismissed = true;
+    this.resumeJobId = '';
+    this.reconnectMessage = '';
+    this.showReconnect = true;
   }
 
   /**
@@ -2029,7 +2052,11 @@ struct Index {
   private catalogProbeBusy: boolean = false;
 
   private async confirmCatalogVersionsViaDevice(bundleNames: string[]): Promise<void> {
-    if (this.catalogProbeBusy) return;
+    if (this.catalogProbeBusy) {
+      this.catalogProbePending = this.catalogProbePending.concat(bundleNames)
+        .filter((name: string, index: number, all: string[]) => all.indexOf(name) === index);
+      return;
+    }
     this.catalogProbeBusy = true;
     try {
       const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
@@ -2047,10 +2074,18 @@ struct Index {
       this.syncDetectedInstalled();
       this.checkInstalledUpdates();
       await this.reconcileDetectedJobs(versions);
+      if (this.updateCatalogReady && this.updateApps().every((app: CatalogApp) =>
+        (app.latestAsset?.bundleName.length ?? 0) === 0 || this.installedVersionOf(app.id) >= 0)) {
+        await InstalledAppRegistry.markCatalogSnapshot(getContext(this) as common.UIAbilityContext);
+      }
     } catch (_) {
       // 不可核实不等于未安装，保持最后一次已知状态。
     } finally {
       this.catalogProbeBusy = false;
+      const pending = this.catalogProbePending;
+      this.catalogProbePending = [];
+      if (pending.length > 0) await this.confirmCatalogVersionsViaDevice(pending);
+      this.updateInstallScanPrompt();
     }
   }
 
@@ -2081,7 +2116,8 @@ struct Index {
     const context = getContext(this) as common.UIAbilityContext;
     const store = await JobStore.open(context);
     for (const task of this.installTasks) {
-      if (task.running || task.job.reinstallRequired || !isPending(task.job.stage) || task.job.versionCode <= 0 ||
+      if (task.running || task.job.appId <= 0 || task.job.reinstallRequired ||
+        !isPending(task.job.stage) || task.job.versionCode <= 0 ||
         versions.get(task.job.bundleName) !== task.job.versionCode) continue;
       const current = await store.get(task.job.id);
       if (current === undefined || current.reinstallRequired ||
@@ -2562,9 +2598,15 @@ struct Index {
       }
       this.showReconnect = false;
       this.reconnectMessage = '';
+      this.deviceConnected = true;
+      this.forgetInstalledVersions();
+      // 先读取完整目录对应的实际安装状态，再判断是否还要继续先前的安装。
+      const bundles = this.updateApps().map((app: CatalogApp) => app.latestAsset?.bundleName ?? '')
+        .filter((name: string) => name.length > 0);
+      await this.confirmCatalogVersionsViaDevice(bundles);
       const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
       const job = await store.get(this.resumeJobId);
-      if (job) await this.continueInstall(job);
+      if (job && job.stage !== InstallStage.INSTALLED) await this.continueInstall(job);
     } catch (error) {
       this.reconnectMessage = errorText(error);
     } finally {
@@ -2575,9 +2617,9 @@ struct Index {
   @Builder
   private heading(title: string, subtitle: string = '', horizontalInset: number = PAGE_INSET) {
     Column({ space: 3 }) {
-      Text(title).fontSize(29).fontWeight(FontWeight.Bold).fontColor(Palette.text)
+      Text(title).fontSize(29).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
       if (subtitle.length > 0) {
-        Text(subtitle).fontSize(12).fontColor(Palette.textSecondary)
+        Text(subtitle).fontSize(12).fontColor(this.colors().textSecondary)
       }
     }.alignItems(HorizontalAlign.Start).width('100%')
       .padding({ left: horizontalInset, right: horizontalInset, top: 20, bottom: 16 })
@@ -2599,27 +2641,42 @@ struct Index {
               Row() {
                 Column({ space: 5 }) {
                   Text('HARMONYOS').fontSize(10).fontWeight(FontWeight.Bold)
-                    .fontColor(Palette.accent).letterSpacing(2)
+                    .fontColor(this.colors().accent).letterSpacing(2)
                   // 副标题与大标题同行、下对齐
                   Row({ space: 9 }) {
-                    Text('发现').fontSize(30).fontWeight(FontWeight.Bold).fontColor(Palette.text)
-                    Text('值得安装的应用').fontSize(12).fontColor(Palette.textSecondary)
+                    Text('发现').fontSize(30).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+                    Text('值得安装的应用').fontSize(12).fontColor(this.colors().textSecondary)
                       .padding({ bottom: 5 })
                   }.alignItems(VerticalAlign.Bottom)
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
               }.width('100%').padding({ top: 20, bottom: 14 })
             }.width('100%').padding({ left: PAGE_INSET, right: PAGE_INSET })
+            if (this.needsInstallScan) {
+              ListItem() {
+                Row({ space: 12 }) {
+                  Column({ space: 4 }) {
+                    Text('识别本机已安装应用').fontSize(14).fontWeight(FontWeight.Medium)
+                      .fontColor(this.colors().text)
+                    Text('连接一次无线调试，已有侧载应用会显示打开或更新')
+                      .fontSize(11).fontColor(this.colors().textSecondary)
+                  }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+                  Button('识别').height(36).fontSize(12)
+                    .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
+                    .borderRadius(11).onClick(() => this.openInstallScan())
+                }.width('100%').padding(14).backgroundColor(this.colors().surface).borderRadius(16)
+              }.width('100%').padding({ left: PAGE_INSET, right: PAGE_INSET, bottom: 12 })
+            }
             // 搜索框常驻：输入即搜（带防抖），没有单独的搜索按钮
             ListItem() {
               Row({ space: 9 }) {
                 TextInput({ placeholder: '搜索应用名或仓库', text: this.searchText })
                   .layoutWeight(1).height(44).fontSize(14)
-                  .fontColor(Palette.text).placeholderColor(Palette.textTertiary)
-                  .backgroundColor(Palette.fill).caretColor(Palette.accent)
+                  .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
+                  .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
                   .onChange((value: string) => this.onSearchInput(value))
                   .onSubmit(() => this.applySearch())
                 if (this.searchText.length > 0) {
-                  Text('✕').fontSize(15).fontColor(Palette.textTertiary)
+                  Text('✕').fontSize(15).fontColor(this.colors().textTertiary)
                     .width(34).height(44).textAlign(TextAlign.Center)
                     .onClick(() => this.clearSearch())
                 }
@@ -2628,7 +2685,7 @@ struct Index {
             if (this.activeQuery.length > 0) {
               ListItem() {
                 Text('搜索「' + this.activeQuery + '」· ' + this.catalogTotal + ' 个结果')
-                  .fontSize(11).fontColor(Palette.textTertiary)
+                  .fontSize(11).fontColor(this.colors().textTertiary)
                   .width('100%').maxLines(1)
                   .padding({ bottom: 8 })
               }.width('100%').padding({ left: PAGE_INSET, right: PAGE_INSET })
@@ -2642,22 +2699,22 @@ struct Index {
               ListItem() {
                 Column({ space: 12 }) {
                   Text('暂时无法读取应用').fontSize(17).fontWeight(FontWeight.Medium)
-                    .fontColor(Palette.text)
-                  Text('检查网络后再试一次').fontSize(12).fontColor(Palette.textSecondary)
-                  Text('下拉可重新加载').fontSize(12).fontColor(Palette.accent)
-                }.padding(25).backgroundColor(Palette.surface).borderRadius(20)
+                    .fontColor(this.colors().text)
+                  Text('检查网络后再试一次').fontSize(12).fontColor(this.colors().textSecondary)
+                  Text('下拉可重新加载').fontSize(12).fontColor(this.colors().accent)
+                }.padding(25).backgroundColor(this.colors().surface).borderRadius(20)
                   .width('88%').margin({ top: 18 })
               }.width('100%')
             } else if (this.apps.length === 0) {
               ListItem() {
                 Column({ space: 10 }) {
                   Text(this.activeQuery.length > 0 ? '没有匹配的应用' : '还没有上架的应用')
-                    .fontSize(17).fontWeight(FontWeight.Medium).fontColor(Palette.text)
+                    .fontSize(17).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
                   Text(this.activeQuery.length > 0 ?
                     '换个关键词试试，或清除搜索看全部应用' :
                     '在「管理」页的「我上架的应用」里可以从 GitHub Release 添加')
-                    .fontSize(12).fontColor(Palette.textSecondary).textAlign(TextAlign.Center)
-                }.width('100%').padding(26).backgroundColor(Palette.surface).borderRadius(20)
+                    .fontSize(12).fontColor(this.colors().textSecondary).textAlign(TextAlign.Center)
+                }.width('100%').padding(26).backgroundColor(this.colors().surface).borderRadius(20)
               }
             }
             ForEach(this.displayApps(), (app: CatalogApp) => {
@@ -2675,9 +2732,9 @@ struct Index {
                         Image(this.iconFor(app.id)).width(62).height(62).borderRadius(17)
                       } else {
                         Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : '应')
-                          .fontSize(23).fontWeight(FontWeight.Bold).fontColor(Palette.accent)
+                          .fontSize(23).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                           .width(62).height(62).textAlign(TextAlign.Center)
-                          .backgroundColor(Palette.surface).borderRadius(17)
+                          .backgroundColor(this.colors().surface).borderRadius(17)
                       }
                       Column({ space: 5 }) {
                         Text(app.displayName).fontSize(17).fontWeight(FontWeight.Bold)
@@ -2719,32 +2776,32 @@ struct Index {
                           Image(this.iconFor(app.id)).width(62).height(62).borderRadius(17)
                         } else {
                           Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : '应')
-                            .fontSize(23).fontWeight(FontWeight.Bold).fontColor(Palette.accent)
+                            .fontSize(23).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                             .width(62).height(62).textAlign(TextAlign.Center)
-                            .backgroundColor(Palette.accentSoft).borderRadius(17)
+                            .backgroundColor(this.colors().accentSoft).borderRadius(17)
                         }
                         Column({ space: 5 }) {
                           Text(app.displayName).fontSize(17).fontWeight(FontWeight.Bold)
-                            .fontColor(Palette.text).maxLines(1)
-                          Text(app.summary).fontSize(12).fontColor(Palette.textSecondary).maxLines(1)
+                            .fontColor(this.colors().text).maxLines(1)
+                          Text(app.summary).fontSize(12).fontColor(this.colors().textSecondary).maxLines(1)
                           Row({ space: 7 }) {
-                            Text(app.category).fontSize(10).fontColor(Palette.accent)
+                            Text(app.category).fontSize(10).fontColor(this.colors().accent)
                               .padding({ left: 6, right: 6, top: 3, bottom: 3 })
-                              .backgroundColor(Palette.accentSoft).borderRadius(6)
+                              .backgroundColor(this.colors().accentSoft).borderRadius(6)
                             if (this.latestVersionTag(app).length > 0) {
-                              Text(this.latestVersionTag(app)).fontSize(10).fontColor(Palette.textSecondary)
+                              Text(this.latestVersionTag(app)).fontSize(10).fontColor(this.colors().textSecondary)
                                 .maxLines(1).constraintSize({ maxWidth: 88 })
                                 .padding({ left: 6, right: 6, top: 3, bottom: 3 })
-                                .backgroundColor(Palette.fill).borderRadius(6)
+                                .backgroundColor(this.colors().fill).borderRadius(6)
                             }
                             Text('★ ' + app.stars).fontSize(11)
-                              .fontColor(Palette.textTertiary).maxLines(1)
+                              .fontColor(this.colors().textTertiary).maxLines(1)
                           }
                         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                           .onClick(() => this.openDetail(app.id))
                         this.catalogCardAction(app)
                       }.width('100%').padding(15)
-                    }.width('100%').backgroundColor(Palette.surface).borderRadius(19)
+                    }.width('100%').backgroundColor(this.colors().surface).borderRadius(19)
                       .margin({ bottom: 10 })
                   }
                 }.width('100%').padding({ left: PAGE_INSET, right: PAGE_INSET })
@@ -2759,7 +2816,7 @@ struct Index {
                   LoadingProgress().width(19).height(19)
                   Text(this.catalogMoreBusy ? '正在加载更多…' :
                     '还有 ' + String(this.catalogTotal - this.apps.length) + ' 个应用')
-                    .fontSize(12).fontColor(Palette.textSecondary)
+                    .fontSize(12).fontColor(this.colors().textSecondary)
                 }.width('100%').justifyContent(FlexAlign.Center)
                   .padding({ top: 16, bottom: 16 })
               }
@@ -2776,7 +2833,7 @@ struct Index {
         // 只给 layoutWeight(1)：标题与搜索已移进列表，这里撑满 Column 剩余高度即可。
         .width('100%').layoutWeight(1)
         .onRefreshing(() => this.pullRefreshCatalog())
-    }.width('100%').height('100%').backgroundColor(Palette.bg)
+    }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
 
   @Builder
@@ -2789,20 +2846,20 @@ struct Index {
             if (this.jobIcon(this.localInfoJob)) {
               Image(this.jobIcon(this.localInfoJob)).width(64).height(64).borderRadius(18)
             } else {
-              Text('HAP').fontSize(14).fontWeight(FontWeight.Bold).fontColor(Palette.accent)
+              Text('HAP').fontSize(14).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                 .width(58).height(58).textAlign(TextAlign.Center)
-                .backgroundColor(Palette.accentSoft).borderRadius(18)
+                .backgroundColor(this.colors().accentSoft).borderRadius(18)
             }
             Text(this.localJobId.length > 0 ? this.jobTitle(this.localInfoJob) : '从文件安装')
-              .fontSize(20).fontWeight(FontWeight.Bold).fontColor(Palette.text).maxLines(2)
+              .fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text).maxLines(2)
             if (this.localJobId.length > 0) {
               Text('版本 ' + this.versionLabel(this.localInfoJob) +
                 (this.localFileSize.length > 0 ? ' · ' + this.localFileSize : ''))
-                .fontSize(13).fontColor(Palette.textSecondary).maxLines(1)
-              Text(this.localInfoJob.bundleName).fontSize(11).fontColor(Palette.textTertiary)
+                .fontSize(13).fontColor(this.colors().textSecondary).maxLines(1)
+              Text(this.localInfoJob.bundleName).fontSize(11).fontColor(this.colors().textTertiary)
                 .maxLines(2).textAlign(TextAlign.Center)
               Text('版本代码 ' + this.localInfoJob.versionCode + ' · 模块 ' + this.localInfoJob.moduleName)
-                .fontSize(11).fontColor(Palette.textTertiary).maxLines(2).textAlign(TextAlign.Center)
+                .fontSize(11).fontColor(this.colors().textTertiary).maxLines(2).textAlign(TextAlign.Center)
             }
           }.width('100%').alignItems(HorizontalAlign.Center)
             .margin({ bottom: 22 })
@@ -2811,11 +2868,11 @@ struct Index {
             (this.localJobId.length > 0 ? '选择其他 HAP 文件' : '选择 HAP 文件'))
             .height(48).enabled(!this.localBusy).width('100%')
             .fontSize(15).fontWeight(FontWeight.Medium)
-            .backgroundColor(Palette.accent).borderRadius(15)
+            .backgroundColor(this.colors().accent).borderRadius(15)
             .onClick(() => this.pickLocalHap())
 
         }.alignItems(HorizontalAlign.Start).padding(22)
-          .width('100%').backgroundColor(Palette.surface).borderRadius(22)
+          .width('100%').backgroundColor(this.colors().surface).borderRadius(22)
         // 安装流程时间轴：读取 → 核对 → 签名 → 安装
         if (this.localTimelineView.visible) {
           this.localTimeline()
@@ -2825,7 +2882,7 @@ struct Index {
     }.width('100%').height('100%').scrollBar(BarState.Off)
       // Scroll 默认把内容垂直居中，内容不满一屏时会浮在中间
       .align(Alignment.Top)
-      .backgroundColor(Palette.bg)
+      .backgroundColor(this.colors().bg)
   }
 
   /** 直接读取响应式视图，避免 @Builder 值参数与 ForEach 闭包保留旧任务。 */
@@ -2834,15 +2891,15 @@ struct Index {
     Column({ space: 12 }) {
       Row() {
         Text('安装流程').fontSize(17).fontWeight(FontWeight.Bold)
-          .fontColor(Palette.text).layoutWeight(1)
-        Text(this.localTimelineView.version).fontSize(11).fontColor(Palette.textTertiary)
+          .fontColor(this.colors().text).layoutWeight(1)
+        Text(this.localTimelineView.version).fontSize(11).fontColor(this.colors().textTertiary)
       }.width('100%')
       Row({ space: 8 }) {
-        Text(this.localTimelineView.title).fontSize(12).fontColor(Palette.textSecondary)
+        Text(this.localTimelineView.title).fontSize(12).fontColor(this.colors().textSecondary)
           .layoutWeight(1).maxLines(1)
         Text(this.localTimelineView.status).fontSize(12).fontWeight(FontWeight.Medium)
-          .fontColor(this.localTimelineView.tone === 'success' ? Palette.success :
-            (this.localTimelineView.tone === 'warning' ? Palette.danger : Palette.accent))
+          .fontColor(this.localTimelineView.tone === 'success' ? this.colors().success :
+            (this.localTimelineView.tone === 'warning' ? this.colors().danger : this.colors().accent))
           .maxLines(2)
       }.width('100%')
       ForEach(this.localTimelineView.steps, (step: LocalTimelineStep) => {
@@ -2850,25 +2907,25 @@ struct Index {
           if (step.indicator === 'running') {
             LoadingProgress().width(17).height(17)
           } else {
-            Text(step.indicator === 'done' ? '✓' : '!').fontSize(11).fontColor(Palette.onAccent)
+            Text(step.indicator === 'done' ? '✓' : '!').fontSize(11).fontColor(this.colors().onAccent)
               .width(17).height(17).textAlign(TextAlign.Center)
-              .backgroundColor(step.indicator === 'done' ? Palette.success : Palette.danger)
+              .backgroundColor(step.indicator === 'done' ? this.colors().success : this.colors().danger)
               .borderRadius(9)
           }
           Column({ space: 2 }) {
-            Text(step.label).fontSize(13).fontColor(Palette.text).maxLines(1)
+            Text(step.label).fontSize(13).fontColor(this.colors().text).maxLines(1)
             if (step.timing.length > 0) {
-              Text(step.timing).fontSize(10).fontColor(Palette.textTertiary).maxLines(1)
+              Text(step.timing).fontSize(10).fontColor(this.colors().textTertiary).maxLines(1)
             }
           }.alignItems(HorizontalAlign.Start).layoutWeight(1)
         }.width('100%')
       }, (step: LocalTimelineStep) => step.key)
       if (this.localTimelineView.message.length > 0) {
-        Text(this.localTimelineView.message).fontSize(11).fontColor(Palette.danger)
+        Text(this.localTimelineView.message).fontSize(11).fontColor(this.colors().danger)
           .width('100%').maxLines(3)
       }
     }.alignItems(HorizontalAlign.Start).width('100%').padding(18)
-      .backgroundColor(Palette.surface).borderRadius(20).margin({ top: 18 })
+      .backgroundColor(this.colors().surface).borderRadius(20).margin({ top: 18 })
   }
 
   @Builder
@@ -2879,17 +2936,17 @@ struct Index {
         if (this.updateCatalogBusy || this.updateCatalogError.length > 0) {
           ListItem() {
             Text(this.updateCatalogBusy ? '正在检查应用更新…' : this.updateCatalogError + ' · 点此重试')
-              .fontSize(12).fontColor(Palette.textSecondary).width('100%').padding(10)
+              .fontSize(12).fontColor(this.colors().textSecondary).width('100%').padding(10)
               .onClick(() => this.loadUpdateCatalog())
           }
         }
         if (this.pendingJobs.length > 0) {
           ListItem() {
             Row({ space: 8 }) {
-              Text('安装队列').fontSize(19).fontWeight(FontWeight.Bold).fontColor(Palette.text)
-              Text(String(this.pendingJobs.length)).fontSize(12).fontColor(Palette.accent)
+              Text('安装队列').fontSize(19).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+              Text(String(this.pendingJobs.length)).fontSize(12).fontColor(this.colors().accent)
                 .padding({ left: 7, right: 7, top: 3, bottom: 3 })
-                .backgroundColor(Palette.accentSoft).borderRadius(7)
+                .backgroundColor(this.colors().accentSoft).borderRadius(7)
             }.width('100%').padding({ top: 3, bottom: 6 })
           }
           ForEach(this.pendingJobs, (job: InstallJob) => {
@@ -2898,38 +2955,38 @@ struct Index {
                 if (this.jobIcon(job)) {
                   Image(this.jobIcon(job)).width(44).height(44).borderRadius(12)
                 } else {
-                  Text(this.jobTitle(job).substring(0, 1)).fontSize(18).fontColor(Palette.accent)
+                  Text(this.jobTitle(job).substring(0, 1)).fontSize(18).fontColor(this.colors().accent)
                     .width(44).height(44).textAlign(TextAlign.Center)
-                    .backgroundColor(Palette.accentSoft).borderRadius(12)
+                    .backgroundColor(this.colors().accentSoft).borderRadius(12)
                 }
                 Column({ space: 5 }) {
                   Text(this.jobTitle(job)).fontSize(14).fontWeight(FontWeight.Medium)
-                    .fontColor(Palette.text).maxLines(1)
+                    .fontColor(this.colors().text).maxLines(1)
                   Text('版本 ' + this.versionLabel(job) + ' · ' + this.taskJobLabel(job))
-                    .fontSize(11).fontColor(Palette.accent).maxLines(2)
+                    .fontSize(11).fontColor(this.colors().accent).maxLines(2)
                   if (!this.jobRunning(job.id) && job.lastError.length > 0) {
-                    Text(job.lastError).fontSize(11).fontColor(Palette.textTertiary).maxLines(2)
+                    Text(job.lastError).fontSize(11).fontColor(this.colors().textTertiary).maxLines(2)
                   }
                   if (job.stage === InstallStage.INSTALLING && this.jobRunning(job.id)) {
                     Text('取消后停止后续步骤，系统已接收的安装可能仍会完成')
-                      .fontSize(10).fontColor(Palette.textTertiary).maxLines(2)
+                      .fontSize(10).fontColor(this.colors().textTertiary).maxLines(2)
                   }
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                 Column({ space: 7 }) {
                   if (!this.jobRunning(job.id) && job.stage !== InstallStage.QUEUED) {
-                    Button('继续安装').height(31).fontSize(11).fontColor(Palette.onAccent)
-                      .backgroundColor(Palette.accent).borderRadius(10)
+                    Button('继续安装').height(31).fontSize(11).fontColor(this.colors().onAccent)
+                      .backgroundColor(this.colors().accent).borderRadius(10)
                       .enabled(this.activeJobId.length === 0 && this.signedIn &&
                         !this.cancellingJobs.includes(job.id))
                       .onClick(() => this.continueInstall(job))
                   }
                   Button(this.cancellingJobs.includes(job.id) ? '清理中…' : '取消')
-                    .height(31).fontSize(11).fontColor(Palette.danger)
-                    .backgroundColor(Palette.dangerSoft).borderRadius(10)
+                    .height(31).fontSize(11).fontColor(this.colors().danger)
+                    .backgroundColor(this.colors().dangerSoft).borderRadius(10)
                     .enabled(!this.cancellingJobs.includes(job.id))
                     .onClick(() => this.cancelInstall(job))
                 }
-              }.width('100%').padding(15).backgroundColor(Palette.surface).borderRadius(16)
+              }.width('100%').padding(15).backgroundColor(this.colors().surface).borderRadius(16)
             }
           }, (job: InstallJob) => job.id)
         }
@@ -2937,12 +2994,12 @@ struct Index {
           ListItem() {
             Row() {
               Text('我上架的应用').fontSize(19).fontWeight(FontWeight.Bold)
-                .fontColor(Palette.text).layoutWeight(1)
+                .fontColor(this.colors().text).layoutWeight(1)
               // 与「已安装」那里同一个刷新图标：转圈时不给再点
               if (this.myAppsBusy) {
                 LoadingProgress().width(20).height(20)
               } else {
-                Text('↻').fontSize(19).fontColor(Palette.accent)
+                Text('↻').fontSize(19).fontColor(this.colors().accent)
                   .width(32).height(32).textAlign(TextAlign.Center)
                   .onClick(() => this.loadMyApps())
               }
@@ -2951,29 +3008,29 @@ struct Index {
           // 上架入口：从发现页搬到这里，与「我上架的应用」同处一块
           ListItem() {
             Row({ space: 12 }) {
-              Text('＋').fontSize(22).fontColor(Palette.accent)
+              Text('＋').fontSize(22).fontColor(this.colors().accent)
                 .width(42).height(42).textAlign(TextAlign.Center)
-                .backgroundColor(Palette.accentSoft).borderRadius(13)
+                .backgroundColor(this.colors().accentSoft).borderRadius(13)
               Column({ space: 3 }) {
                 Text('上架新应用').fontSize(15).fontWeight(FontWeight.Medium)
-                  .fontColor(Palette.text).maxLines(1)
+                  .fontColor(this.colors().text).maxLines(1)
                 Text('从 GitHub Release 添加一个 HAP')
-                  .fontSize(11).fontColor(Palette.textTertiary).maxLines(1)
+                  .fontSize(11).fontColor(this.colors().textTertiary).maxLines(1)
               }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-              Text('›').fontSize(20).fontColor(Palette.textTertiary)
+              Text('›').fontSize(20).fontColor(this.colors().textTertiary)
             }.width('100%').padding({ left: 12, right: 12, top: 11, bottom: 11 })
-              .backgroundColor(Palette.surface).borderRadius(15)
+              .backgroundColor(this.colors().surface).borderRadius(15)
               .onClick(() => this.openSubmitSheet())
           }
           if (this.myAppsMessage.length > 0) {
             ListItem() {
-              Text(this.myAppsMessage).fontSize(12).fontColor(Palette.danger)
+              Text(this.myAppsMessage).fontSize(12).fontColor(this.colors().danger)
             }
           }
           if (this.myApps.length === 0 && this.myAppsMessage.length === 0) {
             ListItem() {
               Text('还没有上架应用 · 点上面的「上架新应用」添加')
-                .fontSize(12).fontColor(Palette.textTertiary)
+                .fontSize(12).fontColor(this.colors().textTertiary)
                 .width('100%').padding({ top: 6, bottom: 8 })
             }
           }
@@ -2984,22 +3041,22 @@ struct Index {
                   Image(this.iconFor(app.id)).width(42).height(42).borderRadius(11)
                 } else {
                   Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : '应')
-                    .fontSize(18).fontColor(Palette.accent).textAlign(TextAlign.Center)
-                    .width(42).height(42).backgroundColor(Palette.accentSoft).borderRadius(11)
+                    .fontSize(18).fontColor(this.colors().accent).textAlign(TextAlign.Center)
+                    .width(42).height(42).backgroundColor(this.colors().accentSoft).borderRadius(11)
                 }
                 Column({ space: 4 }) {
                   Text(app.displayName).fontSize(14).fontWeight(FontWeight.Medium)
-                    .fontColor(Palette.text).maxLines(1)
+                    .fontColor(this.colors().text).maxLines(1)
                   Text(app.category + ' · ' + app.publisherName).fontSize(11)
-                    .fontColor(Palette.textTertiary).maxLines(1)
+                    .fontColor(this.colors().textTertiary).maxLines(1)
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                   .onClick(() => router.pushUrl({ url: 'pages/Detail', params: { id: app.id } }))
                 Button('配置')
-                  .height(31).fontSize(11).fontColor(Palette.accent)
-                  .backgroundColor(Palette.accentSoft).borderRadius(10)
+                  .height(31).fontSize(11).fontColor(this.colors().accent)
+                  .backgroundColor(this.colors().accentSoft).borderRadius(10)
                   .enabled(this.removingId === 0 && !this.configBusy)
                   .onClick(() => this.openAppConfig(app))
-              }.width('100%').padding(15).backgroundColor(Palette.surface).borderRadius(16)
+              }.width('100%').padding(15).backgroundColor(this.colors().surface).borderRadius(16)
             }
           }, (app: CatalogApp) => String(app.id) + ':' + app.category + ':' +
             app.displayName + ':' + app.iconRev)
@@ -3008,21 +3065,21 @@ struct Index {
         if (this.jobsError.length > 0) {
           ListItem() {
             Text(this.jobsError).fontSize(12)
-              .fontColor(Palette.danger).width('100%').padding(13)
-              .backgroundColor(Palette.dangerSoft).borderRadius(15)
+              .fontColor(this.colors().danger).width('100%').padding(13)
+              .backgroundColor(this.colors().dangerSoft).borderRadius(15)
           }
         }
         if (this.managementInstalledJobs().length > 0) {
           ListItem() {
             Row() {
               Text('已安装').fontSize(19).fontWeight(FontWeight.Bold)
-                .fontColor(Palette.text).layoutWeight(1)
+                .fontColor(this.colors().text).layoutWeight(1)
               // 刷新：与设备核对一遍，顺手清掉设备上已经卸载的记录。
               // 按钮本身就是状态——转圈时不给再点。
               if (this.syncBusy) {
                 LoadingProgress().width(20).height(20)
               } else {
-                Text('↻').fontSize(19).fontColor(Palette.accent)
+                Text('↻').fontSize(19).fontColor(this.colors().accent)
                   .width(32).height(32).textAlign(TextAlign.Center)
                   .onClick(() => this.refreshInstalled())
               }
@@ -3030,7 +3087,7 @@ struct Index {
           }
           if (this.syncMessage.length > 0) {
             ListItem() {
-              Text(this.syncMessage).fontSize(11).fontColor(Palette.textTertiary)
+              Text(this.syncMessage).fontSize(11).fontColor(this.colors().textTertiary)
                 .width('100%').maxLines(3).padding({ bottom: 4 })
             }
           }
@@ -3042,32 +3099,32 @@ struct Index {
                     Image(this.jobIcon(job)).width(46).height(46).borderRadius(13)
                   } else {
                     Text(this.jobTitle(job).length > 0 ? this.jobTitle(job).substring(0, 1) : '应')
-                      .fontSize(19).fontColor(Palette.accent).textAlign(TextAlign.Center)
-                      .width(46).height(46).backgroundColor(Palette.accentSoft).borderRadius(13)
+                      .fontSize(19).fontColor(this.colors().accent).textAlign(TextAlign.Center)
+                      .width(46).height(46).backgroundColor(this.colors().accentSoft).borderRadius(13)
                   }
                   Column({ space: 4 }) {
                     Text(this.jobTitle(job)).fontSize(15).fontWeight(FontWeight.Medium)
-                      .fontColor(Palette.text).maxLines(1)
+                      .fontColor(this.colors().text).maxLines(1)
                     Text(this.jobStatusLine(job))
                       .fontSize(11)
-                      .fontColor(this.activeJobId === job.id ? Palette.accent :
-                        (this.updateFor(job.bundleName) !== undefined ? Palette.accent :
-                          Palette.textTertiary))
+                      .fontColor(this.activeJobId === job.id ? this.colors().accent :
+                        (this.updateFor(job.bundleName) !== undefined ? this.colors().accent :
+                          this.colors().textTertiary))
                       .maxLines(2)
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                     .onClick(() => this.openJobDetails(job))
                   if (this.updateFor(job.bundleName) !== undefined) {
                     Button(this.taskPending(this.updateFor(job.bundleName)?.appId ?? 0,
                       job.bundleName) ? '已加入队列' : '更新')
-                      .height(34).fontSize(12).fontColor(Palette.onAccent)
-                      .backgroundColor(Palette.accent).borderRadius(11)
+                      .height(34).fontSize(12).fontColor(this.colors().onAccent)
+                      .backgroundColor(this.colors().accent).borderRadius(11)
                       .onClick(() => {
                         const target = this.updateFor(job.bundleName);
                         if (target !== undefined) this.startUpdate(job, target);
                       })
                   } else {
                     Button('打开').height(34).fontSize(12)
-                      .fontColor(Palette.accent).backgroundColor(Palette.accentSoft)
+                      .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
                       .borderRadius(11).onClick(() => this.openInstalled(job))
                   }
                 }.width('100%')
@@ -3075,7 +3132,7 @@ struct Index {
                   Row() {
                     Text((this.expandedInstallBundles.includes(job.bundleName) ? '收起' : '查看') +
                       '过往安装 · ' + this.olderInstalledJobs(job.bundleName, job.id).length)
-                      .fontSize(11).fontColor(Palette.textSecondary)
+                      .fontSize(11).fontColor(this.colors().textSecondary)
                       .onClick(() => this.toggleInstallHistory(job.bundleName))
                   }.width('100%')
                 }
@@ -3083,12 +3140,12 @@ struct Index {
                   ForEach(this.olderInstalledJobs(job.bundleName, job.id), (older: InstallJob) => {
                     Row({ space: 8 }) {
                       Text('版本 ' + this.versionLabel(older)).fontSize(11)
-                        .fontColor(Palette.textTertiary).layoutWeight(1)
+                        .fontColor(this.colors().textTertiary).layoutWeight(1)
                     }.width('100%').padding({ top: 8 })
                   }, (older: InstallJob) => older.id)
                 }
               }.alignItems(HorizontalAlign.Start).width('100%')
-                .padding(15).backgroundColor(Palette.surface).borderRadius(17)
+                .padding(15).backgroundColor(this.colors().surface).borderRadius(17)
                 // 移除记录收进长按，避免右上一排动作按钮把标题挤变形。
                 .gesture(LongPressGesture().onAction(() => this.forgetJob(job)))
             }
@@ -3099,77 +3156,84 @@ struct Index {
       }.padding({ left: 24, right: 24 })
         .width('100%').height('100%')
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
-    }.width('100%').height('100%').backgroundColor(Palette.bg)
+    }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
 
   @Builder
   private reconnectSheet() {
     Column({ space: 15 }) {
       Row() {
-        Text('连接无线调试').fontSize(22).fontWeight(FontWeight.Bold)
-          .fontColor(Palette.text).layoutWeight(1)
-        Text('×').fontSize(26).fontColor(Palette.textSecondary)
+        Text(this.resumeJobId.length > 0 ? '连接无线调试' : '识别本机应用')
+          .fontSize(22).fontWeight(FontWeight.Bold)
+          .fontColor(this.colors().text).layoutWeight(1)
+        Text('×').fontSize(26).fontColor(this.colors().textSecondary)
           .onClick(() => { if (!this.reconnectBusy) this.showReconnect = false; })
       }.width('100%')
-      Text('任务已保存。连接后会从刚才的步骤继续。')
-        .fontSize(13).fontColor(Palette.textSecondary).width('100%')
+      Text(this.resumeJobId.length > 0 ? '任务已保存。连接后会从刚才的步骤继续。' :
+        '首次连接后会识别已经侧载的应用，并将状态缓存到本机，避免重复安装。可以关闭此窗口，稍后在发现页识别。')
+        .fontSize(13).fontColor(this.colors().textSecondary).width('100%')
       Button('打开无线调试设置').height(42).width('100%')
-        .backgroundColor(Palette.accentSoft).fontColor(Palette.accent)
+        .backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
         .onClick(() => new HdcDeviceBridge(getContext(this) as common.UIAbilityContext)
           .openWirelessSettings())
       TextInput({ placeholder: '输入无线调试端口', text: this.reconnectPort })
         .type(InputType.Number).height(48)
-        .fontColor(Palette.text).placeholderColor(Palette.textTertiary)
-        .backgroundColor(Palette.fill).caretColor(Palette.accent)
+        .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
+        .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
         .onChange((value: string) => { this.reconnectPort = value; })
-      Button(this.reconnectBusy ? '正在连接…' : '连接并继续安装')
+      Button(this.reconnectBusy ? '正在连接…' :
+        (this.resumeJobId.length > 0 ? '连接并继续安装' : '连接并识别'))
         .height(48).width('100%').enabled(!this.reconnectBusy)
-        .backgroundColor(Palette.accent).onClick(() => this.reconnect())
+        .backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
+        .onClick(() => this.reconnect())
       if (this.reconnectMessage.length > 0) {
-        Text(this.reconnectMessage).fontSize(12).fontColor(Palette.textSecondary)
+        Text(this.reconnectMessage).fontSize(12).fontColor(this.colors().textSecondary)
           .width('100%').maxLines(3)
       }
-    }.padding(21).width('90%').backgroundColor(Palette.surface).borderRadius(23)
+    }.padding(21).width('90%').backgroundColor(this.colors().surface).borderRadius(23)
   }
 
   @Builder
   private appConfigSheet() {
     Column({ space: 16 }) {
       Row() {
-        Text('应用配置').fontSize(22).fontWeight(FontWeight.Bold).fontColor(Palette.text)
+        Text('应用配置').fontSize(22).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
           .layoutWeight(1)
-        Text('×').fontSize(27).fontColor(Palette.textSecondary)
+        Text('×').fontSize(27).fontColor(this.colors().textSecondary)
           .onClick(() => { if (!this.configBusy && this.removingId === 0) this.showAppConfig = false; })
       }.width('100%')
       Text(this.configApp.displayName).fontSize(17).fontWeight(FontWeight.Medium)
-        .fontColor(Palette.text).maxLines(2).width('100%')
-      Text('软件分类').fontSize(13).fontColor(Palette.textSecondary)
+        .fontColor(this.colors().text).maxLines(2).width('100%')
+      Text('软件分类').fontSize(13).fontColor(this.colors().textSecondary)
       if (this.configCategories.length > 0) {
         Select(this.configCategories.map((category: string) => {
           return { value: category } as SelectOption;
         }))
           .selected(this.configCategories.indexOf(this.configCategory))
-          .value(this.configCategory).font({ size: 14 }).fontColor(Palette.text)
-          .selectedOptionBgColor(Palette.accentSoft).optionBgColor(Palette.surface)
-          .menuBackgroundColor(Palette.surface).backgroundColor(Palette.fill).width('100%')
+          .value(this.configCategory).font({ size: 14 }).fontColor(this.colors().text)
+          .optionFontColor(this.colors().text).selectedOptionFontColor(this.colors().accent)
+          .arrowModifier(new SymbolGlyphModifier($r('sys.symbol.chevron_down'))
+            .fontColor([this.colors().textSecondary]).fontSize(14))
+          .selectedOptionBgColor(this.colors().accentSoft).optionBgColor(this.colors().surface)
+          .menuBackgroundColor(this.colors().surface).menuBackgroundBlurStyle(BlurStyle.NONE).backgroundColor(this.colors().fill).width('100%')
           .enabled(!this.configBusy && this.removingId === 0)
           .onSelect((index: number) => { this.configCategory = this.configCategories[index] ?? ''; })
       }
       if (this.configMessage.length > 0) {
-        Text(this.configMessage).fontSize(12).fontColor(Palette.danger).maxLines(3)
+        Text(this.configMessage).fontSize(12).fontColor(this.colors().danger).maxLines(3)
       }
       Button(this.configBusy ? '处理中…' : '保存配置').width('100%').height(46)
-        .fontColor(Palette.onAccent).backgroundColor(Palette.accent).borderRadius(14)
+        .fontColor(this.colors().onAccent).backgroundColor(this.colors().accent).borderRadius(14)
         .enabled(!this.configBusy && this.removingId === 0 &&
           this.configCategories.includes(this.configCategory))
         .onClick(() => this.saveAppConfig())
       Button(this.removingId === this.configApp.id ? '下架中…' : '下架应用')
-        .width('100%').height(42).fontColor(Palette.danger)
-        .backgroundColor(Palette.dangerSoft).borderRadius(14)
+        .width('100%').height(42).fontColor(this.colors().danger)
+        .backgroundColor(this.colors().dangerSoft).borderRadius(14)
         .enabled(!this.configBusy && this.removingId === 0)
         .onClick(() => this.removeMyApp(this.configApp))
     }.alignItems(HorizontalAlign.Start).width('92%').padding(22)
-      .backgroundColor(Palette.surface).borderRadius(24)
+      .backgroundColor(this.colors().surface).borderRadius(24)
   }
 
   @Builder
@@ -3177,35 +3241,35 @@ struct Index {
     Column({ space: 15 }) {
       Row() {
         Text('上架应用').fontSize(22).fontWeight(FontWeight.Bold)
-          .fontColor(Palette.text).layoutWeight(1)
-        Text('×').fontSize(27).fontColor(Palette.textSecondary)
+          .fontColor(this.colors().text).layoutWeight(1)
+        Text('×').fontSize(27).fontColor(this.colors().textSecondary)
           .onClick(() => { if (!this.submitBusy) this.showSubmit = false; })
       }.width('100%')
       TextInput({ placeholder: '作者/仓库，或 gitee.com/作者/仓库', text: this.submitUrl })
         .height(48).onChange((value: string) => { this.submitUrl = value; })
-        .fontColor(Palette.text).placeholderColor(Palette.textTertiary)
-        .backgroundColor(Palette.fill).caretColor(Palette.accent)
+        .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
+        .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
       Button(this.submitBusy && this.submitDraft.token.length === 0 ? '检查中…' : '检查 Release')
         .width('100%').enabled(!this.submitBusy && this.submitUrl.trim().length > 0)
         .onClick(() => this.prepareSubmit())
       if (this.submitDraft.token.length > 0) {
         Text(this.submitDraft.displayName).fontSize(17).fontWeight(FontWeight.Medium)
-          .fontColor(Palette.text).width('100%')
-        Text('选择 HAP').fontSize(13).fontColor(Palette.textSecondary).width('100%')
+          .fontColor(this.colors().text).width('100%')
+        Text('选择 HAP').fontSize(13).fontColor(this.colors().textSecondary).width('100%')
         ForEach(this.submitDraft.choices, (choice: SubmitChoice) => {
           Row({ space: 8 }) {
             Text(this.submitAsset === choice.name ? '◉' : '○')
-              .fontSize(20).fontColor(Palette.accent)
+              .fontSize(20).fontColor(this.colors().accent)
             Column({ space: 3 }) {
               Text(choice.displayName.length > 0 ? choice.displayName : choice.name)
-                .fontSize(14).fontColor(Palette.text).maxLines(1)
+                .fontSize(14).fontColor(this.colors().text).maxLines(1)
               Text(choice.name + ' · ' + choice.versionName)
-                .fontSize(11).fontColor(Palette.textSecondary).maxLines(1)
+                .fontSize(11).fontColor(this.colors().textSecondary).maxLines(1)
             }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-          }.width('100%').padding(10).backgroundColor(Palette.fill)
+          }.width('100%').padding(10).backgroundColor(this.colors().fill)
             .borderRadius(12).onClick(() => { this.submitAsset = choice.name; })
         }, (choice: SubmitChoice) => choice.name)
-        Text('选择分类').fontSize(13).fontColor(Palette.textSecondary).width('100%')
+        Text('选择分类').fontSize(13).fontColor(this.colors().textSecondary).width('100%')
         // 滑动选择框：分类较多时比一排芯片更好点，也不会挤成两行。
         Select(this.submitDraft.categories.map((category: string) => {
           return { value: category } as SelectOption;
@@ -3216,11 +3280,14 @@ struct Index {
           .selectedOptionFont({ size: 14, weight: FontWeight.Medium })
           .optionFont({ size: 13 })
           // Font 类型没有 color，文字色要单独设
-          .fontColor(Palette.text)
-          .selectedOptionBgColor(Palette.accentSoft)
-          .optionBgColor(Palette.surface)
-          .menuBackgroundColor(Palette.surface)
-          .backgroundColor(Palette.fill)
+          .fontColor(this.colors().text)
+          .optionFontColor(this.colors().text).selectedOptionFontColor(this.colors().accent)
+          .arrowModifier(new SymbolGlyphModifier($r('sys.symbol.chevron_down'))
+            .fontColor([this.colors().textSecondary]).fontSize(14))
+          .selectedOptionBgColor(this.colors().accentSoft)
+          .optionBgColor(this.colors().surface)
+          .menuBackgroundColor(this.colors().surface).menuBackgroundBlurStyle(BlurStyle.NONE)
+          .backgroundColor(this.colors().fill)
           .width('100%')
           .enabled(!this.submitBusy)
           .onSelect((index: number) => {
@@ -3230,7 +3297,7 @@ struct Index {
         if (this.submitStateLabel().length > 0) {
           Text(this.submitStateLabel()).fontSize(11)
             .fontColor(this.submitExisting === Index.SUBMIT_STATE_OTHER ?
-              Palette.danger : Palette.textSecondary)
+              this.colors().danger : this.colors().textSecondary)
             .width('100%').maxLines(3)
         }
         Button(this.submitBusy ? (this.submitExisting === Index.SUBMIT_STATE_MINE ?
@@ -3243,11 +3310,11 @@ struct Index {
           .onClick(() => this.confirmSubmit())
       }
       if (this.submitMessage.length > 0) {
-        Text(this.submitMessage).fontSize(12).fontColor(Palette.textBody)
+        Text(this.submitMessage).fontSize(12).fontColor(this.colors().textBody)
           .width('100%').maxLines(3)
       }
     }.alignItems(HorizontalAlign.Start).width('92%').padding(20)
-      .backgroundColor(Palette.surface).borderRadius(24)
+      .backgroundColor(this.colors().surface).borderRadius(24)
   }
 
   @Builder
@@ -3265,107 +3332,107 @@ struct Index {
                 Image(this.account.avatarUrl).width(58).height(58).borderRadius(29)
               } else {
                 Text(this.signedIn ? this.account.label.substring(0, 1) : '华')
-                  .fontSize(22).fontWeight(FontWeight.Bold).fontColor(Palette.accent)
+                  .fontSize(22).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                   .width(58).height(58).textAlign(TextAlign.Center)
-                  .backgroundColor(Palette.accentSoft).borderRadius(29)
+                  .backgroundColor(this.colors().accentSoft).borderRadius(29)
               }
               Column({ space: 5 }) {
                 Text(this.signedIn ? this.account.label : '华为开发者账号')
-                  .fontSize(18).fontWeight(FontWeight.Bold).fontColor(Palette.text)
+                  .fontSize(18).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
                 Text(this.sessionNotice.length > 0 ? this.sessionNotice :
                 (this.signedIn ? '开发者身份已连接' : '登录后即可上架和评价'))
-                  .fontSize(12).fontColor(Palette.textSecondary)
+                  .fontSize(12).fontColor(this.colors().textSecondary)
               }.alignItems(HorizontalAlign.Start).layoutWeight(1)
               // 已登录时退出收成一个图标，比一整条按钮简洁；点一下仍会二次确认
               if (this.signedIn) {
                 // 用基础箭头转 180° 得到「←]」这种退出符号：系统符号名在 SDK 里
                 // 查不到，字符想保证各机型都能渲染，基础箭头最稳。
                 Text('→').fontSize(19).fontWeight(FontWeight.Bold)
-                  .fontColor(Palette.textSecondary)
+                  .fontColor(this.colors().textSecondary)
                   .rotate({ angle: 180 })
                   .width(38).height(38).textAlign(TextAlign.Center)
-                  .backgroundColor(Palette.fill).borderRadius(12)
+                  .backgroundColor(this.colors().fill).borderRadius(12)
                   .onClick(() => this.confirmSignOut())
               }
             }.width('100%')
             if (this.loginMessage.length > 0) {
-              Text(this.loginMessage).fontSize(12).fontColor(Palette.textSecondary)
+              Text(this.loginMessage).fontSize(12).fontColor(this.colors().textSecondary)
                 .maxLines(3).width('100%')
             }
             if (!this.signedIn) {
               Button(this.loginBusy ? '等待浏览器授权…' : '登录华为开发者账号')
-                .height(43).backgroundColor(Palette.accent)
-                .fontColor(Palette.onAccent)
+                .height(43).backgroundColor(this.colors().accent)
+                .fontColor(this.colors().onAccent)
                 .borderRadius(14).enabled(!this.loginBusy).width('100%')
                 .onClick(() => this.login())
             }
           }.alignItems(HorizontalAlign.Start).padding(20)
-            .width('100%').backgroundColor(Palette.surface).borderRadius(22)
+            .width('100%').backgroundColor(this.colors().surface).borderRadius(22)
 
           // ── 证书管理：展示当前证书本体 + 操作 ──
           Text('证书管理').fontSize(17).fontWeight(FontWeight.Bold)
-            .fontColor(Palette.text).width('100%').padding({ left: 4 })
+            .fontColor(this.colors().text).width('100%').padding({ left: 4 })
           Column({ space: 14 }) {
             Row({ space: 12 }) {
               Text('证')
-                .fontSize(18).fontColor(Palette.accent).textAlign(TextAlign.Center)
-                .width(44).height(44).backgroundColor(Palette.accentSoft).borderRadius(12)
+                .fontSize(18).fontColor(this.colors().accent).textAlign(TextAlign.Center)
+                .width(44).height(44).backgroundColor(this.colors().accentSoft).borderRadius(12)
               Column({ space: 4 }) {
                 Text(this.certLabel.length > 0 ? this.certLabel : '调试证书')
-                  .fontSize(15).fontWeight(FontWeight.Medium).fontColor(Palette.text).maxLines(1)
+                  .fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.colors().text).maxLines(1)
                 Text(this.certId.length > 0 ? '证书 ID ' + this.certId : '尚未取回证书')
-                  .fontSize(11).fontColor(Palette.textSecondary).maxLines(1)
+                  .fontSize(11).fontColor(this.colors().textSecondary).maxLines(1)
                 if (this.certExpiry.length > 0) {
                   Text('到期 ' + this.certExpiry)
-                    .fontSize(11).fontColor(Palette.textSecondary).maxLines(1)
+                    .fontSize(11).fontColor(this.colors().textSecondary).maxLines(1)
                 }
               }.alignItems(HorizontalAlign.Start).layoutWeight(1)
               Text(this.certReady ? '已配对' : '待申请')
                 .fontSize(11)
-                .fontColor(this.certReady ? Palette.success : Palette.textSecondary)
+                .fontColor(this.certReady ? this.colors().success : this.colors().textSecondary)
                 .padding({ left: 8, right: 8, top: 5, bottom: 5 })
-                .backgroundColor(this.certReady ? Palette.successSoft : Palette.fill)
+                .backgroundColor(this.certReady ? this.colors().successSoft : this.colors().fill)
                 .borderRadius(8)
             }.width('100%')
             Text(this.identityMessage.length > 0 ? this.identityMessage :
               (this.signedIn ? '正在核对账号现有调试证书…' : '登录后自动复用或申请本机签名证书'))
-              .fontSize(11).fontColor(Palette.textTertiary).maxLines(3).width('100%')
+              .fontSize(11).fontColor(this.colors().textTertiary).maxLines(3).width('100%')
             // 备份没成功就说出来：本机私钥只有这一份，用户有权在重置前知道它没有副本。
             if (this.backupWarning.length > 0) {
               Text(this.backupWarning)
-                .fontSize(11).fontColor(Palette.danger).maxLines(4).width('100%')
+                .fontSize(11).fontColor(this.colors().danger).maxLines(4).width('100%')
             }
             // 还没有可用证书时给出唯一的申请入口：复用优先，确无可用证书才占槽位。
             if (this.signedIn && !this.certReady) {
               Button(this.identityBusy ? '正在准备…' :
                 (this.certLastSlotConfirmed ? '占用最后槽位并申请' : '获取调试证书'))
                 .height(42).width('100%').fontSize(13)
-                .backgroundColor(this.certLastSlotConfirmed ? Palette.danger : Palette.accent)
-                .fontColor(Palette.onAccent).borderRadius(12)
+                .backgroundColor(this.certLastSlotConfirmed ? this.colors().danger : this.colors().accent)
+                .fontColor(this.colors().onAccent).borderRadius(12)
                 .enabled(!this.identityBusy)
                 .onClick(() => this.prepareSigningIdentity())
             }
             // 证书快到期时提前重建：过期后签名会直接被设备拒绝。
             if (this.certReady && this.certExpiringSoon) {
               Text('证书将于 ' + this.certExpiry + ' 到期，建议现在重建')
-                .fontSize(11).fontColor(Palette.danger).maxLines(2).width('100%')
+                .fontSize(11).fontColor(this.colors().danger).maxLines(2).width('100%')
               Button(this.identityBusy ? '正在重建…' :
                 (this.certLastSlotConfirmed ? '占用最后槽位并重建' : '重建签名身份'))
                 .height(38).width('100%').fontSize(12)
-                .backgroundColor(this.certLastSlotConfirmed ? Palette.danger : Palette.accentSoft)
-                .fontColor(this.certLastSlotConfirmed ? Palette.onAccent : Palette.accent)
+                .backgroundColor(this.certLastSlotConfirmed ? this.colors().danger : this.colors().accentSoft)
+                .fontColor(this.certLastSlotConfirmed ? this.colors().onAccent : this.colors().accent)
                 .borderRadius(12).enabled(!this.identityBusy)
                 .onClick(() => this.prepareSigningIdentity())
             }
             Row({ space: 10 }) {
               Button(this.identityBusy ? '重置中…' : '证书重置')
                 .height(38).fontSize(12).layoutWeight(1)
-                .backgroundColor(Palette.accentSoft).fontColor(Palette.accent)
+                .backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
                 .borderRadius(12).enabled(!this.identityBusy && this.signedIn)
                 .onClick(() => this.resetCertificate())
               Button('管理 AGC 证书')
                 .height(38).fontSize(12).layoutWeight(1)
-                .backgroundColor(Palette.fill).fontColor(Palette.textSecondary)
+                .backgroundColor(this.colors().fill).fontColor(this.colors().textSecondary)
                 .borderRadius(12)
                 .onClick(() => {
                   this.showCertSheet = true;
@@ -3373,50 +3440,50 @@ struct Index {
                 })
             }.width('100%')
             if (this.certMessage.length > 0) {
-              Text(this.certMessage).fontSize(11).fontColor(Palette.danger)
+              Text(this.certMessage).fontSize(11).fontColor(this.colors().danger)
                 .maxLines(2).width('100%')
             }
           }.alignItems(HorizontalAlign.Start).padding(20)
-            .width('100%').backgroundColor(Palette.surface).borderRadius(22)
+            .width('100%').backgroundColor(this.colors().surface).borderRadius(22)
 
           // ── 设备连接：已连接只占一行；断线时才给连接按钮 ──
           Text('设备连接').fontSize(17).fontWeight(FontWeight.Bold)
-            .fontColor(Palette.text).width('100%').padding({ left: 4 })
+            .fontColor(this.colors().text).width('100%').padding({ left: 4 })
           Column({ space: 13 }) {
             Row({ space: 10 }) {
               Text(this.deviceBusy ? '◌' : (this.deviceConnected ? '✓' : '!'))
                 .fontSize(16).fontWeight(FontWeight.Bold)
-                .fontColor(this.deviceConnected ? Palette.success :
-                  (this.deviceBusy ? Palette.textTertiary : Palette.danger))
+                .fontColor(this.deviceConnected ? this.colors().success :
+                  (this.deviceBusy ? this.colors().textTertiary : this.colors().danger))
               Text(this.deviceBusy ? '正在检测…' :
                 (this.deviceConnected ? '无线调试已连接' : '无线调试未连接'))
-                .fontSize(14).fontWeight(FontWeight.Medium).fontColor(Palette.text)
+                .fontSize(14).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
                 .layoutWeight(1)
               if (this.deviceConnected) {
                 // 已连接就一行，不再显示 UDID；旁边给一个主动释放的出口
                 Button('释放')
-                  .height(34).fontSize(12).fontColor(Palette.textSecondary)
-                  .backgroundColor(Palette.fill).borderRadius(11)
+                  .height(34).fontSize(12).fontColor(this.colors().textSecondary)
+                  .backgroundColor(this.colors().fill).borderRadius(11)
                   .onClick(() => this.releaseDeviceLink())
               } else if (!this.deviceBusy) {
                 Button('连接')
-                  .height(34).fontSize(12).fontColor(Palette.onAccent)
-                  .backgroundColor(Palette.accent).borderRadius(11)
+                  .height(34).fontSize(12).fontColor(this.colors().onAccent)
+                  .backgroundColor(this.colors().accent).borderRadius(11)
                   .onClick(() => { this.reconnectPort = ''; this.showReconnect = true; })
               }
             }.width('100%')
             if (this.deviceMessage.length > 0) {
-              Text(this.deviceMessage).fontSize(11).fontColor(Palette.accent)
+              Text(this.deviceMessage).fontSize(11).fontColor(this.colors().accent)
                 .width('100%')
             }
           }.alignItems(HorizontalAlign.Start).padding(18)
-            .width('100%').backgroundColor(Palette.surface).borderRadius(22)
+            .width('100%').backgroundColor(this.colors().surface).borderRadius(22)
 
-          Text('轻启·安装器').fontSize(12).fontColor(Palette.textTertiary)
+          Text('轻启·安装器').fontSize(12).fontColor(this.colors().textTertiary)
             .margin({ top: 14, bottom: 8 })
         }.width('88%').padding({ top: 4 })
       }.layoutWeight(1).width('100%').height('100%').align(Alignment.Top)
-    }.width('100%').height('100%').backgroundColor(Palette.bg)
+    }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
 
   /**
@@ -3427,13 +3494,13 @@ struct Index {
   private startupSplash() {
     Column({ space: 22 }) {
       Column({ space: 6 }) {
-        Text('轻启').fontSize(38).fontWeight(FontWeight.Bold).fontColor(Palette.text)
-        Text('安装器').fontSize(13).fontColor(Palette.textTertiary).letterSpacing(4)
+        Text('轻启').fontSize(38).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+        Text('安装器').fontSize(13).fontColor(this.colors().textTertiary).letterSpacing(4)
       }.alignItems(HorizontalAlign.Center)
-      LoadingProgress().width(28).height(28).color(Palette.accent)
-      Text('正在检查登录状态…').fontSize(12).fontColor(Palette.textTertiary)
+      LoadingProgress().width(28).height(28).color(this.colors().accent)
+      Text('正在检查登录状态…').fontSize(12).fontColor(this.colors().textTertiary)
     }.width('100%').height('100%').justifyContent(FlexAlign.Center)
-      .backgroundColor(Palette.bg)
+      .backgroundColor(this.colors().bg)
   }
 
   /**
@@ -3448,36 +3515,36 @@ struct Index {
     Column({ space: 20 }) {
       Column({ space: 8 }) {
         Text('轻启·安装器').fontSize(30).fontWeight(FontWeight.Bold)
-          .fontColor(Palette.text)
+          .fontColor(this.colors().text)
         Text('用你自己的证书，把 HarmonyOS 应用装到本机')
-          .fontSize(13).fontColor(Palette.textSecondary).textAlign(TextAlign.Center)
+          .fontSize(13).fontColor(this.colors().textSecondary).textAlign(TextAlign.Center)
       }.alignItems(HorizontalAlign.Center)
 
       Column({ space: 10 }) {
         Text('为什么必须先登录').fontSize(15).fontWeight(FontWeight.Medium)
-          .fontColor(Palette.text).width('100%')
+          .fontColor(this.colors().text).width('100%')
         Text('HarmonyOS 的安装包必须包含本机设备标识。安装时轻启会用你账号下的 ' +
           'AGC 调试证书与设备授权，在本机重新签名后再装到这台设备。' +
           '证书、设备授权与上架记录都绑定在华为开发者账号上。')
-          .fontSize(12).fontColor(Palette.textSecondary).lineHeight(19).width('100%')
+          .fontSize(12).fontColor(this.colors().textSecondary).lineHeight(19).width('100%')
       }.alignItems(HorizontalAlign.Start).padding(18).width('100%')
-        .backgroundColor(Palette.surface).borderRadius(18)
+        .backgroundColor(this.colors().surface).borderRadius(18)
 
       Column({ space: 10 }) {
           Button(this.loginBusy ? '等待浏览器授权…' : '登录华为开发者账号')
             .height(48).width('100%').fontSize(15)
-            .backgroundColor(Palette.accent).fontColor(Palette.onAccent)
+            .backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
             .borderRadius(14).enabled(!this.loginBusy)
             .onClick(() => this.login())
           if (this.loginMessage.length > 0) {
-            Text(this.loginMessage).fontSize(12).fontColor(Palette.danger)
+            Text(this.loginMessage).fontSize(12).fontColor(this.colors().danger)
               .textAlign(TextAlign.Center).maxLines(3).width('100%')
           }
         Text('登录会打开浏览器，完成后自动回到轻启')
-          .fontSize(11).fontColor(Palette.textTertiary)
+          .fontSize(11).fontColor(this.colors().textTertiary)
       }.width('100%')
     }.width('100%').height('100%').padding({ left: 28, right: 28 })
-      .justifyContent(FlexAlign.Center).backgroundColor(Palette.bg)
+      .justifyContent(FlexAlign.Center).backgroundColor(this.colors().bg)
   }
 
   build() {
@@ -3488,31 +3555,35 @@ struct Index {
       TabContent() { this.discoverPage() }
         .tabBar(BottomTabBarStyle.of({
           normal: new SymbolGlyphModifier($r('sys.symbol.compass_circle'))
-            .fontColor([Palette.tabIdle]).fontSize(23),
+            .fontColor([this.colors().tabIdle]).fontSize(23),
           selected: new SymbolGlyphModifier($r('sys.symbol.compass_circle_fill'))
-            .fontColor([Palette.accent]).fontSize(23)
-        }, '发现').iconStyle({ selectedColor: Palette.accent }))
+            .fontColor([this.colors().accent]).fontSize(23)
+        }, '发现').iconStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle })
+          .labelStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle }))
       TabContent() { this.localPage() }
         .tabBar(BottomTabBarStyle.of({
           normal: new SymbolGlyphModifier($r('sys.symbol.folder'))
-            .fontColor([Palette.tabIdle]).fontSize(23),
+            .fontColor([this.colors().tabIdle]).fontSize(23),
           selected: new SymbolGlyphModifier($r('sys.symbol.folder_fill'))
-            .fontColor([Palette.accent]).fontSize(23)
-        }, '本地').iconStyle({ selectedColor: Palette.accent }))
+            .fontColor([this.colors().accent]).fontSize(23)
+        }, '本地').iconStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle })
+          .labelStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle }))
       TabContent() { this.managePage() }
         .tabBar(BottomTabBarStyle.of({
           normal: new SymbolGlyphModifier($r('sys.symbol.square_stack_3d'))
-            .fontColor([Palette.tabIdle]).fontSize(23),
+            .fontColor([this.colors().tabIdle]).fontSize(23),
           selected: new SymbolGlyphModifier($r('sys.symbol.square_stack_3d_fill'))
-            .fontColor([Palette.accent]).fontSize(23)
-        }, '管理').iconStyle({ selectedColor: Palette.accent }))
+            .fontColor([this.colors().accent]).fontSize(23)
+        }, '管理').iconStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle })
+          .labelStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle }))
       TabContent() { this.minePage() }
         .tabBar(BottomTabBarStyle.of({
           normal: new SymbolGlyphModifier($r('sys.symbol.person'))
-            .fontColor([Palette.tabIdle]).fontSize(23),
+            .fontColor([this.colors().tabIdle]).fontSize(23),
           selected: new SymbolGlyphModifier($r('sys.symbol.person_fill'))
-            .fontColor([Palette.accent]).fontSize(23)
-        }, '我的').iconStyle({ selectedColor: Palette.accent }))
+            .fontColor([this.colors().accent]).fontSize(23)
+        }, '我的').iconStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle })
+          .labelStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle }))
     }
     .barMode(BarMode.Fixed)
     .vertical(false)
@@ -3520,7 +3591,7 @@ struct Index {
     // lightColor 原本是饱和蓝，被 IMMERSIVE 材质压成一坨暗色 —— 底部那块
     // "暗区"。改成随主题的卡片色，材质才是正常的玻璃感。
     .barFloatingStyle({
-      lightColor: Palette.surface,
+      lightColor: this.colors().surface,
       barSideMargin: 12,
       // 系统导航栏已隐藏，底部不再有安全区，6 会让导航条贴着屏幕边缘。
       barBottomMargin: 20,
@@ -3538,7 +3609,7 @@ struct Index {
       if (index === 2) { this.loadJobs(); this.loadMyApps(); this.loadUpdateCatalog(); }
       if (index === 3) {
         // 设备状态探完再扫「商店已安装」——扫描依赖 connected 与 installedVersion
-        this.checkDevice().then(() => this.scanStoreInstalled());
+        this.checkDevice().then(() => this.refreshCatalogInstallState());
       }
     })
     .width('100%').height('100%')
@@ -3547,7 +3618,7 @@ struct Index {
         Scroll() { this.appConfigSheet() }
           .width('100%').constraintSize({ maxHeight: '84%' })
       }.width('100%').height('100%').justifyContent(FlexAlign.Center)
-        .backgroundColor(Palette.scrim)
+        .backgroundColor(this.colors().scrim)
     }
     if (this.showSubmit) {
       Column() {
@@ -3555,17 +3626,17 @@ struct Index {
           .width('100%').constraintSize({ maxHeight: '84%' })
       }
         .width('100%').height('100%').justifyContent(FlexAlign.Center)
-        .backgroundColor(Palette.scrim)
+        .backgroundColor(this.colors().scrim)
     }
     if (this.showReconnect) {
       Column() { this.reconnectSheet() }
         .width('100%').height('100%').justifyContent(FlexAlign.Center)
-        .backgroundColor(Palette.scrim)
+        .backgroundColor(this.colors().scrim)
     }
     if (this.showCertSheet) {
       Column() { this.certSheet() }
         .width('100%').height('100%').justifyContent(FlexAlign.Center)
-        .backgroundColor(Palette.scrim)
+        .backgroundColor(this.colors().scrim)
     }
     // 最上层三态互斥：检查登录态时显示加载页，确认未登录才显示登录页。
     // 之前把两者混在一个页面里，检查期间会先把登录页的标题和说明卡

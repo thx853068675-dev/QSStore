@@ -111,7 +111,8 @@ test('6.1 bundle dump exposes the installed identity without treating malformed 
 });
 test('detected exact version finishes an old paused task without starting an installation', async () => {
   const { InstallStage, InstallJob } = load('jobs/InstallJob');
-  const row = new InstallJob(); row.id = 'old'; row.bundleName = bundle; row.versionCode = 110003;
+  const row = new InstallJob(); row.id = 'old'; row.appId = 1;
+  row.bundleName = bundle; row.versionCode = 110003;
   row.stage = InstallStage.RETRYABLE_ERROR; row.lastError = '上次安装中断了';
   const source = fs.readFileSync(path.join(root, 'pages/Index.ets'), 'utf8');
   const start = source.indexOf('  private async reconcileDetectedJobs(');
@@ -127,6 +128,11 @@ test('detected exact version finishes an old paused task without starting an ins
   await ui.reconcileDetectedJobs(new Map([[bundle, 110002]])); assert.equal(saved.length, 0);
   await ui.reconcileDetectedJobs(new Map([[bundle, 110003]]));
   assert.equal(saved[0].stage, InstallStage.INSTALLED); assert.equal(saved[0].lastError, '');
+  // 本地导入可能是同版本重装、修复内包，不能被首次扫描直接判为完成。
+  saved.length = 0; row.appId = 0; row.sourceUrl = 'local';
+  row.stage = InstallStage.WAITING_DEVICE;
+  await ui.reconcileDetectedJobs(new Map([[bundle, 110003]]));
+  assert.equal(saved.length, 0); assert.equal(row.stage, InstallStage.WAITING_DEVICE);
 });
 test('opening an external app resolves its real module and ability instead of using bundle only', async () => {
   const f = fixture(); const wants = [];

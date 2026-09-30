@@ -58,4 +58,9 @@ export default class EntryAbility extends UIAbility {
     this.context.config = config;
     this.applyAppearance();
   }
+
+  onForeground(): void {
+    // 从系统设置返回时也同步，覆盖部分设备在后台没有送达主题回调的情况。
+    this.applyAppearance();
+  }
 }

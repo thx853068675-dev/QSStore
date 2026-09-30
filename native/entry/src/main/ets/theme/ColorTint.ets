@@ -17,7 +17,7 @@ export class ColorTint {
   /**
    * 取主色调，返回 0xAARRGGBB；取不到返回 undefined，调用方回退到默认底色。
    */
-  static async dominantColor(pixels: image.PixelMap | null): Promise<number | undefined> {
+  static async dominantColor(pixels: image.PixelMap | null, dark: boolean): Promise<number | undefined> {
     if (pixels === null) return undefined;
     try {
       const info = await pixels.getImageInfo();
@@ -26,7 +26,7 @@ export class ColorTint {
       if (width <= 0 || height <= 0) return undefined;
       const buffer = new ArrayBuffer(width * height * 4);
       await pixels.readPixelsToBuffer(buffer);
-      return ColorTint.dominantFromRgba(new Uint8Array(buffer));
+      return ColorTint.dominantFromRgba(new Uint8Array(buffer), dark);
     } catch (_) {
       return undefined;
     }
@@ -36,7 +36,7 @@ export class ColorTint {
    * RGBA 缓冲里出现最多的「有彩色」。权重按饱和度累加：越鲜艳的像素越能代表
    * 这个图标的颜色，浅灰的边角不会把结果拉平。
    */
-  private static dominantFromRgba(rgba: Uint8Array): number | undefined {
+  private static dominantFromRgba(rgba: Uint8Array, dark: boolean): number | undefined {
     const bins = new Map<number, number>();
     const stride = ColorTint.STRIDE;
     for (let y = 0; y < rgba.length / 4; y += stride) {
@@ -69,7 +69,7 @@ export class ColorTint {
     });
     if (bestBin < 0) return undefined;
     // 桶中心作为代表色相
-    return ColorTint.fromHue(bestBin * 10 + 5);
+    return ColorTint.fromHue(bestBin * 10 + 5, dark);
   }
 
   /** 色相角 0-360。 */
@@ -93,8 +93,8 @@ export class ColorTint {
    * 要么淡到和默认底色分不出来（饱和度太低），要么深到压住上面的深色文字
    * （亮度太低）。浅色取「高亮 + 中高饱和」，深色取「低亮 + 中饱和」。
    */
-  private static fromHue(hue: number): number {
-    return Palette.dark ?
+  private static fromHue(hue: number, dark: boolean): number {
+    return dark ?
       ColorTint.hsl(hue, 0.45, 0.20) :
       ColorTint.hsl(hue, 0.78, 0.92);
   }
@@ -119,9 +119,9 @@ export class ColorTint {
   }
 
   /** 供界面使用：取不到就回退到主题默认的头部底色。 */
-  static async heroBackground(pixels: image.PixelMap | null): Promise<string> {
-    const color = await ColorTint.dominantColor(pixels);
-    if (color === undefined) return Palette.hero;
+  static async heroBackground(pixels: image.PixelMap | null, dark: boolean): Promise<string> {
+    const color = await ColorTint.dominantColor(pixels, dark);
+    if (color === undefined) return Palette.forMode(dark).hero;
     return '#' + (color & 0xFFFFFF).toString(16).padStart(6, '0');
   }
 }

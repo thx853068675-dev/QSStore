@@ -31,6 +31,8 @@ export class InstalledSigningIdentity {
 export class InstalledAppRegistry {
   private static readonly STORE_NAME: string = 'installed-bundles';
   private static readonly STORE_KEY: string = 'last-confirmed';
+  private static readonly SCAN_KEY: string = 'catalog-scan-at';
+  private static scanAt: number = 0;
   private static readonly SAVED_MAX_AGE_MS: number = 30 * 24 * 60 * 60 * 1000;
   private static readonly SAVED_MAX_ROWS: number = 300;
   private static loading?: Promise<void>;
@@ -48,11 +50,15 @@ export class InstalledAppRegistry {
   private static async loadSaved(context: common.UIAbilityContext): Promise<void> {
     try {
       const store = await preferences.getPreferences(context, InstalledAppRegistry.STORE_NAME);
+      const now = Date.now();
+      const scanAt = Number(await store.get(InstalledAppRegistry.SCAN_KEY, 0));
+      if (Number.isFinite(scanAt) && scanAt > 0 && scanAt <= now) {
+        InstalledAppRegistry.scanAt = scanAt;
+      }
       const raw = await store.get(InstalledAppRegistry.STORE_KEY, '') as string;
       if (raw.length === 0 || raw.length > 256 * 1024) return;
       const rows = JSON.parse(raw) as Array<Record<string, Object>>;
       if (!Array.isArray(rows)) return;
-      const now = Date.now();
       for (const row of rows.slice(0, InstalledAppRegistry.SAVED_MAX_ROWS)) {
         if (row === null || typeof row !== 'object') continue;
         const name = String(row['bundleName'] ?? '');
@@ -81,6 +87,23 @@ export class InstalledAppRegistry {
     } catch (_) {
       // 缓存读不到不能妨碍实时查询。
     }
+  }
+
+  static hasCatalogSnapshot(): boolean {
+    return InstalledAppRegistry.scanAt > 0 &&
+      Date.now() - InstalledAppRegistry.scanAt < InstalledAppRegistry.SAVED_MAX_AGE_MS;
+  }
+
+  /** 只有完整目录的安装状态都已核实时才记录，局部或失败查询不算首轮完成。 */
+  static async markCatalogSnapshot(context: common.UIAbilityContext): Promise<void> {
+    await InstalledAppRegistry.load(context);
+    try {
+      const at = Date.now();
+      const store = await preferences.getPreferences(context, InstalledAppRegistry.STORE_NAME);
+      await store.put(InstalledAppRegistry.SCAN_KEY, at);
+      await store.flush();
+      InstalledAppRegistry.scanAt = at;
+    } catch (_) {}
   }
 
   /** HDC 批量查询只在最后调用一次；写入失败不影响安装状态查询。 */

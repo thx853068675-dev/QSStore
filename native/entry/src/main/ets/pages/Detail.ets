@@ -1,6 +1,6 @@
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
 import { isPending } from '../jobs/RecoveryPlanner';
-import { promptAction, router } from '@kit.ArkUI';
+import { promptAction, router, SymbolGlyphModifier } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { CatalogApp } from '../data/CatalogApp';
@@ -89,8 +89,9 @@ struct Detail {
   /** 默认 0 = 最新版本；版本不再平铺，改成下拉选择。 */
   @State private selectedReleaseIndex: number = 0;
 
+  private colors(): Palette { return Palette.forMode(this.darkMode); }
+
   syncPalette(): void {
-    Palette.dark = this.darkMode;
     // 主题一变，之前按旧主题算出的底色就不再合适，重新推导一次
     this.refreshHeroColor();
   }
@@ -100,8 +101,9 @@ struct Detail {
       this.heroColor = '';
       return;
     }
-    ColorTint.heroBackground(this.appIcon).then((color: string) => {
-      this.heroColor = color;
+    const dark = this.darkMode;
+    ColorTint.heroBackground(this.appIcon, dark).then((color: string) => {
+      if (dark === this.darkMode) this.heroColor = color;
     });
   }
 
@@ -206,12 +208,12 @@ struct Detail {
 
     ctx.clearRect(0, 0, w, h);
     // 槽底
-    ctx.fillStyle = Palette.accentSoft;
+    ctx.fillStyle = this.colors().accentSoft;
     ctx.fillRect(0, 0, w, h);
     // 已完成部分
     const front = w * ratio;
     if (front > 0) {
-      ctx.fillStyle = Palette.accent;
+      ctx.fillStyle = this.colors().accent;
       ctx.fillRect(0, 0, front, h);
     }
   }
@@ -751,29 +753,30 @@ struct Detail {
     Column({ space: 15 }) {
       Row() {
         Text('连接无线调试').fontSize(22).fontWeight(FontWeight.Bold)
-          .fontColor(Palette.text).layoutWeight(1)
-        Text('×').fontSize(26).fontColor(Palette.textSecondary)
+          .fontColor(this.colors().text).layoutWeight(1)
+        Text('×').fontSize(26).fontColor(this.colors().textSecondary)
           .onClick(() => { if (!this.reconnectBusy) this.showReconnect = false; })
       }.width('100%')
       Text('安装进度已保留。连接后会从刚才的步骤继续。')
-        .fontSize(13).fontColor(Palette.textSecondary).width('100%')
+        .fontSize(13).fontColor(this.colors().textSecondary).width('100%')
       Button('打开无线调试设置').height(42).width('100%')
-        .backgroundColor(Palette.accentSoft).fontColor(Palette.accent)
+        .backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
         .onClick(() => new HdcDeviceBridge(getContext(this) as common.UIAbilityContext)
           .openWirelessSettings())
       TextInput({ placeholder: '输入无线调试端口', text: this.reconnectPort })
         .type(InputType.Number).height(48)
-        .fontColor(Palette.text).placeholderColor(Palette.textTertiary)
-        .backgroundColor(Palette.fill).caretColor(Palette.accent)
+        .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
+        .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
         .onChange((value: string) => { this.reconnectPort = value; })
       Button(this.reconnectBusy ? '正在连接…' : '连接并继续安装')
         .width('100%').height(48).enabled(!this.reconnectBusy)
-        .backgroundColor(Palette.accent).onClick(() => this.reconnect())
+        .backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
+        .onClick(() => this.reconnect())
       if (this.reconnectMessage.length > 0) {
-        Text(this.reconnectMessage).fontSize(12).fontColor(Palette.textSecondary)
+        Text(this.reconnectMessage).fontSize(12).fontColor(this.colors().textSecondary)
           .width('100%').maxLines(3)
       }
-    }.padding(21).width('90%').backgroundColor(Palette.surface).borderRadius(23)
+    }.padding(21).width('90%').backgroundColor(this.colors().surface).borderRadius(23)
   }
 
   /**
@@ -832,13 +835,13 @@ struct Detail {
     Stack({ alignContent: Alignment.Center }) {
     Column() {
       Row() {
-        Text('‹').fontSize(30).fontColor(Palette.text).width(38)
+        Text('‹').fontSize(30).fontColor(this.colors().text).width(38)
           .onClick(() => router.back())
         Text('应用详情').fontSize(16).fontWeight(FontWeight.Bold)
-          .fontColor(Palette.text)
+          .fontColor(this.colors().text)
       }.width('100%').padding({ left: 18, right: 20, top: 6, bottom: 12 })
       if (this.error.length > 0) {
-        Text('无法读取应用详情').fontSize(15).fontColor(Palette.textSecondary)
+        Text('无法读取应用详情').fontSize(15).fontColor(this.colors().textSecondary)
           .margin({ top: 28 })
       } else if (!this.loaded) {
         LoadingProgress().width(30).height(30).margin({ top: 36 })
@@ -852,65 +855,65 @@ struct Detail {
                     Image(this.appIcon).width(74).height(74).borderRadius(20)
                   } else {
                     Text(this.app.displayName.length > 0 ? this.app.displayName.substring(0, 1) : '应')
-                      .fontSize(28).fontWeight(FontWeight.Bold).fontColor(Palette.accent)
+                      .fontSize(28).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                       .width(74).height(74).textAlign(TextAlign.Center)
-                      .backgroundColor(Palette.surface).borderRadius(20)
+                      .backgroundColor(this.colors().surface).borderRadius(20)
                   }
                   Column({ space: 7 }) {
                     Text(this.app.displayName).fontSize(25).fontWeight(FontWeight.Bold)
-                      .fontColor(Palette.text).maxLines(1)
+                      .fontColor(this.colors().text).maxLines(1)
                     Text(this.app.category).fontSize(11).fontWeight(FontWeight.Medium)
-                      .fontColor(Palette.accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
-                      .backgroundColor(Palette.surface).borderRadius(8)
+                      .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
+                      .backgroundColor(this.colors().surface).borderRadius(8)
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                 }
-                Text(this.app.summary).fontSize(13).fontColor(Palette.textBody)
+                Text(this.app.summary).fontSize(13).fontColor(this.colors().textBody)
                   .lineHeight(20).maxLines(3).width('100%')
                 Row() {
                   Text('由 ' + this.app.publisherName + ' 上架').fontSize(11)
-                    .fontColor(Palette.textSecondary).layoutWeight(1).maxLines(1)
+                    .fontColor(this.colors().textSecondary).layoutWeight(1).maxLines(1)
                   Text('★ ' + this.app.stars).fontSize(11)
-                    .fontColor(Palette.accent)
+                    .fontColor(this.colors().accent)
                 }.width('100%')
               }.alignItems(HorizontalAlign.Start).width('100%')
                 .padding(22)
-                .backgroundColor(this.heroColor.length > 0 ? this.heroColor : Palette.hero)
+                .backgroundColor(this.heroColor.length > 0 ? this.heroColor : this.colors().hero)
                 .borderRadius(26)
               // 来源仓库卡片：平台徽章按仓库地址识别，不写死 GitHub
               Column({ space: 10 }) {
                 Row({ space: 9 }) {
                   Text(this.repoHostLabel())
-                    .fontSize(10).fontWeight(FontWeight.Bold).fontColor(Palette.accent)
+                    .fontSize(10).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                     .padding({ left: 7, right: 7, top: 4, bottom: 4 })
-                    .backgroundColor(Palette.accentSoft).borderRadius(7)
-                  Text('来源仓库').fontSize(11).fontColor(Palette.textTertiary)
+                    .backgroundColor(this.colors().accentSoft).borderRadius(7)
+                  Text('来源仓库').fontSize(11).fontColor(this.colors().textTertiary)
                     .layoutWeight(1).maxLines(1)
                 }.width('100%')
                 Text(this.repoPath()).fontSize(14).fontWeight(FontWeight.Medium)
-                  .fontColor(Palette.text).maxLines(1)
+                  .fontColor(this.colors().text).maxLines(1)
               }.alignItems(HorizontalAlign.Start).width('100%').padding(16)
-                .backgroundColor(Palette.surface).borderRadius(17)
+                .backgroundColor(this.colors().surface).borderRadius(17)
                 .onClick(() => this.openRepo())
               Row() {
                 Text('版本记录').fontSize(18).fontWeight(FontWeight.Bold)
-                  .fontColor(Palette.text).layoutWeight(1)
+                  .fontColor(this.colors().text).layoutWeight(1)
                 Text(String(this.releaseTotal) + ' 个版本').fontSize(11)
-                  .fontColor(Palette.textTertiary)
+                  .fontColor(this.colors().textTertiary)
                 // 采集器按周期跑，刚发布的版本要等下一轮；这里可以即时重采
                 if (this.refreshBusy) {
                   LoadingProgress().width(16).height(16).margin({ left: 10 })
                 } else {
-                  Text('检查更新').fontSize(11).fontColor(Palette.accent)
+                  Text('检查更新').fontSize(11).fontColor(this.colors().accent)
                     .margin({ left: 10 })
                     .onClick(() => this.checkForUpdates())
                 }
               }.width('100%')
               Row() {
                 Text(this.showPreviewReleases ? '已显示预览版，安装前请确认版本' : '查看预览版')
-                  .fontSize(11).fontColor(this.showPreviewReleases ? Palette.accent : Palette.textSecondary)
+                  .fontSize(11).fontColor(this.showPreviewReleases ? this.colors().accent : this.colors().textSecondary)
                   .layoutWeight(1)
                 Text(this.showPreviewReleases ? '关闭' : '手动选择')
-                  .fontSize(11).fontColor(Palette.accent)
+                  .fontSize(11).fontColor(this.colors().accent)
               }.width('100%').padding({ top: 2, bottom: 2 })
                 .onClick(() => this.togglePreviewReleases())
               if (this.currentRelease()) {
@@ -923,23 +926,26 @@ struct Detail {
                     .selectedOptionFont({ size: 14, weight: FontWeight.Medium })
                     .optionFont({ size: 13 })
                     // Font 类型没有 color，文字色要用 fontColor 单独设
-                    .fontColor(Palette.text)
-                    .selectedOptionBgColor(Palette.accentSoft)
-                    .optionBgColor(Palette.surface)
-                    .menuBackgroundColor(Palette.surface)
-                    .backgroundColor(Palette.fill)
+                    .fontColor(this.colors().text)
+                    .optionFontColor(this.colors().text).selectedOptionFontColor(this.colors().accent)
+                    .arrowModifier(new SymbolGlyphModifier($r('sys.symbol.chevron_down'))
+                      .fontColor([this.colors().textSecondary]).fontSize(14))
+                    .selectedOptionBgColor(this.colors().accentSoft)
+                    .optionBgColor(this.colors().surface)
+                    .menuBackgroundColor(this.colors().surface).menuBackgroundBlurStyle(BlurStyle.NONE)
+                    .backgroundColor(this.colors().fill)
                     .width('100%')
                     .onSelect((index: number) => this.selectRelease(index))
                   if (this.currentRelease()!.notes.length > 0) {
                     Text(this.displayNotes(this.currentRelease()!.notes, this.currentRelease()!.name))
-                      .fontSize(10).fontColor(Palette.textBody)
+                      .fontSize(10).fontColor(this.colors().textBody)
                       .lineHeight(17)
                       .maxLines(this.expandedReleaseTag === this.currentRelease()!.tag ? 80 : 3)
                       .width('100%')
                     if (this.displayNotes(this.currentRelease()!.notes,
                       this.currentRelease()!.name).length > 125) {
                       Text(this.expandedReleaseTag === this.currentRelease()!.tag ? '收起' : '展开更新内容')
-                        .fontSize(11).fontColor(Palette.accent)
+                        .fontSize(11).fontColor(this.colors().accent)
                         .onClick(() => {
                           this.expandedReleaseTag =
                             this.expandedReleaseTag === this.currentRelease()!.tag ? '' :
@@ -952,44 +958,44 @@ struct Detail {
                       Text(this.selectedAsset.url === asset.url &&
                         this.selectedAsset.name === asset.name ? '已选' : '选择')
                         .fontSize(10).fontColor(this.selectedAsset.url === asset.url &&
-                        this.selectedAsset.name === asset.name ? Palette.accent : Palette.textTertiary)
-                      Text(asset.name).fontSize(12).fontColor(Palette.textBody)
+                        this.selectedAsset.name === asset.name ? this.colors().accent : this.colors().textTertiary)
+                      Text(asset.name).fontSize(12).fontColor(this.colors().textBody)
                         .maxLines(2).layoutWeight(1)
                     }.width('100%').padding({ left: 11, right: 11, top: 9, bottom: 9 })
                       .backgroundColor(this.selectedAsset.url === asset.url &&
-                        this.selectedAsset.name === asset.name ? Palette.accentSoft : Palette.fill)
+                        this.selectedAsset.name === asset.name ? this.colors().accentSoft : this.colors().fill)
                       .borderRadius(10)
                       .onClick(() => { this.selectedAsset = asset; })
                   }, (asset: HapAsset) => asset.name)
                   // 版本按服务端分页续取，避免只看到第一页就以为没有旧版本。
                   if (this.refreshMessage.length > 0) {
                     Text(this.refreshMessage).fontSize(11)
-                      .fontColor(Palette.textTertiary)
+                      .fontColor(this.colors().textTertiary)
                       .width('100%').maxLines(2)
                   }
                   if (this.releaseMessage.length > 0) {
                     Text(this.releaseMessage).fontSize(11)
-                      .fontColor(Palette.textSecondary)
+                      .fontColor(this.colors().textSecondary)
                       .width('100%').maxLines(2)
                   }
                   if (this.releaseHasMore()) {
                     Text(this.releaseMoreBusy ? '正在加载版本…' :
                       '加载更早的版本（还有 ' + String(this.releaseTotal - this.releases.length) + ' 个）')
-                      .fontSize(11).fontColor(Palette.accent)
+                      .fontSize(11).fontColor(this.colors().accent)
                       .width('100%').textAlign(TextAlign.Center)
                       .padding({ top: 4, bottom: 2 })
                       .onClick(() => this.loadMoreReleases())
                   }
                 }.alignItems(HorizontalAlign.Start).width('100%')
                   .padding(16)
-                  .backgroundColor(Palette.surface)
+                  .backgroundColor(this.colors().surface)
                   .borderRadius(18)
-                  .border({ width: 1, color: Palette.border })
+                  .border({ width: 1, color: this.colors().border })
               }
               Row() {
                 Text('用户评价').fontSize(18).fontWeight(FontWeight.Bold)
-                  .fontColor(Palette.text).layoutWeight(1)
-                Text(this.reviewTotal + ' 条').fontSize(11).fontColor(Palette.textTertiary)
+                  .fontColor(this.colors().text).layoutWeight(1)
+                Text(this.reviewTotal + ' 条').fontSize(11).fontColor(this.colors().textTertiary)
               }.width('100%')
               // 应用总分：服务端详情接口返回 rating:{average,count}
               Row({ space: 12 }) {
@@ -997,61 +1003,61 @@ struct Detail {
                   Text(this.app.ratingCount > 0 ?
                     this.app.ratingAverage.toFixed(1) : '—')
                     .fontSize(34).fontWeight(FontWeight.Bold)
-                    .fontColor(this.app.ratingCount > 0 ? Palette.accent : Palette.textTertiary)
+                    .fontColor(this.app.ratingCount > 0 ? this.colors().accent : this.colors().textTertiary)
                   Text(this.app.ratingCount > 0 ?
                     this.app.ratingCount + ' 条评分' : '还没有评分')
-                    .fontSize(11).fontColor(Palette.textTertiary)
+                    .fontSize(11).fontColor(this.colors().textTertiary)
                 }.alignItems(HorizontalAlign.Start)
                 Column({ space: 4 }) {
                   Row({ space: 2 }) {
                     ForEach([1, 2, 3, 4, 5], (slot: number) => {
                       Text(slot <= Math.round(this.app.ratingAverage) ? '★' : '☆')
-                        .fontSize(15).fontColor(Palette.star)
+                        .fontSize(15).fontColor(this.colors().star)
                     }, (slot: number) => String(slot))
                   }
-                  Text('满分 5 分').fontSize(10).fontColor(Palette.textTertiary)
+                  Text('满分 5 分').fontSize(10).fontColor(this.colors().textTertiary)
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
               }.width('100%').padding(14)
-                .backgroundColor(Palette.surface).borderRadius(17)
+                .backgroundColor(this.colors().surface).borderRadius(17)
               // 发布区默认收起：收起时只有一行入口，点 ✎ 展开
               Column({ space: 9 }) {
                 if (!this.reviewComposeOpen) {
                   Row({ space: 9 }) {
                     Text('写下你的使用感受…').fontSize(12)
-                      .fontColor(Palette.textTertiary).layoutWeight(1).maxLines(1)
-                    Text('✎ 写评价').fontSize(12).fontColor(Palette.accent)
+                      .fontColor(this.colors().textTertiary).layoutWeight(1).maxLines(1)
+                    Text('✎ 写评价').fontSize(12).fontColor(this.colors().accent)
                   }.width('100%').padding({ left: 13, right: 13, top: 12, bottom: 12 })
-                    .backgroundColor(Palette.fill).borderRadius(11)
+                    .backgroundColor(this.colors().fill).borderRadius(11)
                     .onClick(() => { this.reviewComposeOpen = true; })
                 } else {
                 Row({ space: 3 }) {
                   ForEach([1, 2, 3, 4, 5], (star: number) => {
                     Text(star <= this.reviewStars ? '★' : '☆')
-                      .fontSize(20).fontColor(Palette.star)
+                      .fontSize(20).fontColor(this.colors().star)
                       .onClick(() => { this.reviewStars = star; })
                   }, (star: number) => String(star))
                   Blank()
                   Button(this.reviewBusy ? '提交中…' : '发布评价')
                     .height(30).fontSize(11).borderRadius(10)
-                    .backgroundColor(Palette.accentSoft).fontColor(Palette.accent)
+                    .backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
                     .enabled(!this.reviewBusy)
                     .onClick(() => this.sendReview())
                 }.width('100%')
                 TextArea({ placeholder: this.signedIn ? '写下你的使用感受' : '登录开发者账号后可评价',
                   text: this.reviewText })
-                  .height(58).fontSize(12).backgroundColor(Palette.fill).borderRadius(11)
-                  .fontColor(Palette.text).placeholderColor(Palette.textTertiary)
-                  .caretColor(Palette.accent)
+                  .height(58).fontSize(12).backgroundColor(this.colors().fill).borderRadius(11)
+                  .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
+                  .caretColor(this.colors().accent)
                   .onChange((value: string) => { this.reviewText = value; })
                 if (this.reviewMessage.length > 0) {
-                  Text(this.reviewMessage).fontSize(11).fontColor(Palette.textSecondary)
+                  Text(this.reviewMessage).fontSize(11).fontColor(this.colors().textSecondary)
                     .width('100%').maxLines(3)
                 }
-                Text('收起').fontSize(11).fontColor(Palette.textTertiary)
+                Text('收起').fontSize(11).fontColor(this.colors().textTertiary)
                   .onClick(() => { this.reviewComposeOpen = false; })
                 }
               }.alignItems(HorizontalAlign.Start).width('100%').padding(14)
-                .backgroundColor(Palette.surface).borderRadius(17)
+                .backgroundColor(this.colors().surface).borderRadius(17)
               if (this.reviews.length > 0) {
                 Column() {
                   ForEach(this.reviews, (review: AppReview) => {
@@ -1061,20 +1067,20 @@ struct Detail {
                           Image(review.avatarUrl).width(30).height(30).borderRadius(15)
                         } else {
                           Text(review.displayName.length > 0 ? review.displayName.substring(0, 1) : '华')
-                            .fontSize(13).fontColor(Palette.accent).width(30).height(30)
-                            .textAlign(TextAlign.Center).backgroundColor(Palette.accentSoft).borderRadius(15)
+                            .fontSize(13).fontColor(this.colors().accent).width(30).height(30)
+                            .textAlign(TextAlign.Center).backgroundColor(this.colors().accentSoft).borderRadius(15)
                         }
                         Column({ space: 2 }) {
                           Text(review.displayName).fontSize(13).fontWeight(FontWeight.Medium)
-                            .fontColor(Palette.text).maxLines(1)
+                            .fontColor(this.colors().text).maxLines(1)
                           Text(this.formatReviewTime(review.updatedAt))
-                            .fontSize(10).fontColor(Palette.textTertiary).maxLines(1)
+                            .fontSize(10).fontColor(this.colors().textTertiary).maxLines(1)
                         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-                        Text('★'.repeat(review.stars)).fontSize(11).fontColor(Palette.star)
+                        Text('★'.repeat(review.stars)).fontSize(11).fontColor(this.colors().star)
                       }.width('100%')
-                      Text(review.body).fontSize(12).fontColor(Palette.textBody)
+                      Text(review.body).fontSize(12).fontColor(this.colors().textBody)
                         .lineHeight(17).width('100%')
-                      Divider().color(Palette.border).strokeWidth(0.5)
+                      Divider().color(this.colors().border).strokeWidth(0.5)
                     }.alignItems(HorizontalAlign.Start).width('100%')
                       .padding({ top: 11, bottom: 9 })
                   }, (review: AppReview, index: number) =>
@@ -1085,22 +1091,22 @@ struct Detail {
                     Row({ space: 6 }) {
                       Text('上一页')
                         .fontSize(12)
-                        .fontColor(this.reviewPage > 1 ? Palette.accent : Palette.textTertiary)
+                        .fontColor(this.reviewPage > 1 ? this.colors().accent : this.colors().textTertiary)
                         .padding({ left: 10, right: 10, top: 6, bottom: 6 })
                         .onClick(() => this.fetchReviewPage(this.reviewPage - 1))
                       Text(this.reviewPage + ' / ' + this.reviewPageCount())
-                        .fontSize(12).fontColor(Palette.textSecondary)
+                        .fontSize(12).fontColor(this.colors().textSecondary)
                         .layoutWeight(1).textAlign(TextAlign.Center)
                       Text('下一页')
                         .fontSize(12)
                         .fontColor(this.reviewPage < this.reviewPageCount() ?
-                          Palette.accent : Palette.textTertiary)
+                          this.colors().accent : this.colors().textTertiary)
                         .padding({ left: 10, right: 10, top: 6, bottom: 6 })
                         .onClick(() => this.fetchReviewPage(this.reviewPage + 1))
                     }.width('100%').padding({ top: 8, bottom: 2 })
                   }
                 }.width('100%').padding({ left: 14, right: 14, top: 2, bottom: 6 })
-                  .backgroundColor(Palette.surface).borderRadius(17)
+                  .backgroundColor(this.colors().surface).borderRadius(17)
               }
             }.width('100%').padding({ left: 20, right: 20, top: 10, bottom: 115 })
           }.width('100%').height('100%')
@@ -1116,10 +1122,10 @@ struct Detail {
               }
               Text(this.installButtonLabel())
                 .fontSize(17).fontWeight(FontWeight.Medium)
-                .fontColor(Palette.onAccent)
+                .fontColor(this.colors().onAccent)
             }
             .width('100%').height(52)
-            .backgroundColor(this.downloadBusy ? Palette.accentSoft : Palette.accent)
+            .backgroundColor(this.downloadBusy ? this.colors().accentSoft : this.colors().accent)
             .borderRadius(18).clip(true)
             .onClick(() => {
               if (this.downloadBusy) return;
@@ -1137,11 +1143,11 @@ struct Detail {
             .backgroundColor('#00000000')
         }.layoutWeight(1).width('100%')
       }
-    }.width('100%').height('100%').backgroundColor(Palette.bg)
+    }.width('100%').height('100%').backgroundColor(this.colors().bg)
     if (this.showReconnect) {
       Column() { this.reconnectSheet() }
         .height('100%').width('100%').justifyContent(FlexAlign.Center)
-        .backgroundColor(Palette.scrim)
+        .backgroundColor(this.colors().scrim)
     }
     }
   }

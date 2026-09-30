@@ -278,6 +278,28 @@ class StoreFeaturesTest(unittest.TestCase):
         self.assertEqual(icon[0], "image/png")
         self.assertEqual(icon[1], actual)
 
+    def test_hap_icon_prefers_launcher_ability_over_app_template_icon(self):
+        # Kazumi's app.icon points to a stock AppScope placeholder, while the
+        # launcher ability's layered_image is the icon shown on the device.
+        path = os.path.join(self.tmp.name, "launcher.hap")
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr("module.json", json.dumps({
+                "app": {"icon": "$media:app_icon"},
+                "module": {"mainElement": "EntryAbility", "abilities": [{
+                    "name": "EntryAbility", "icon": "$media:layered_image",
+                    "skills": [{"entities": ["entity.system.home"]}]
+                }]}
+            }))
+            z.writestr("resources/base/media/app_icon.png", self._png((0, 90, 255, 255)))
+            z.writestr("resources/base/media/layered_image.json", json.dumps({
+                "layered-image": {"background": "$media:background",
+                                  "foreground": "$media:foreground"}}))
+            z.writestr("resources/base/media/background.png", self._png((0, 0, 0, 255)))
+            z.writestr("resources/base/media/foreground.png", self._png((255, 100, 0, 255)))
+        icon = collector.extract_hap_icon(path)
+        self.assertIsNotNone(icon)
+        self.assertEqual(Image.open(io.BytesIO(icon[1])).getpixel((20, 20)), (255, 100, 0, 255))
+
     def test_layered_icon_uses_resource_ids_and_composites_layers(self):
         # Real HarmonyOS HAPs point iconId at layered_image.json; that file
         # refers to foreground/background by numeric resource ID. A 1×1
@@ -364,6 +386,18 @@ class StoreFeaturesTest(unittest.TestCase):
         self.assertNotEqual(db.get_app(app_id)["icon_rev"], old)
         db.delete_app_icon(app_id)
         self.assertEqual(db.get_app(app_id)["icon_url"], "")
+
+    def test_failed_new_icon_scan_keeps_previous_verified_icon(self):
+        app_id = db.upsert_app("owner/repo")
+        old = self._png((30, 50, 70, 255))
+        db.put_app_icon(app_id, "image/png", old)
+        release = self._release("v2")
+        release["assets"][0]["_icon_checked"] = True
+        with patch.object(collector, "fetch_app_metadata", return_value={"category": "工具"}), \
+             patch.object(collector, "fetch_releases", return_value=[release]), \
+             patch.object(collector, "enrich_assets_with_hap_metadata"):
+            collector.sync_app("owner/repo")
+        self.assertEqual(db.app_icon(app_id), ("image/png", old))
 
     def test_temporary_hap_download_failure_preserves_verified_asset_metadata(self):
         app_id = db.upsert_app("owner/repo")

@@ -290,48 +290,72 @@ def _icon_image(archive: zipfile.ZipFile, name: str) -> tuple[str, bytes, Image.
 
 
 def extract_hap_icon(path: str) -> tuple[str, bytes] | None:
-    """Read the icon declared by module.json, including layered-image resources.
+    """Read the launcher icon declared by module.json, including layered images.
 
-    A filename containing "icon" is not evidence: startWindowIcon is often a
-    transparent 1×1 placeholder and packages contain unrelated toolbar icons.
+    The app-level icon may be a template placeholder while the launcher ability
+    declares the icon users actually see after installation. Never guess from
+    filenames: startWindowIcon and toolbar icons are unrelated resources.
     """
     try:
         with zipfile.ZipFile(path) as archive:
             module = archive.getinfo("module.json")
             if module.file_size > 1024 * 1024:
                 return None
-            app = (json.loads(archive.read(module)).get("app") or {})
-            reference = app.get("icon") or ""
-            if isinstance(reference, dict):
-                reference = reference.get("name") or ""
-            if not isinstance(reference, str):
-                return None
+            manifest = json.loads(archive.read(module))
+            app = manifest.get("app") or {}
+            module_info = manifest.get("module") or {}
+            abilities = [a for a in module_info.get("abilities") or [] if isinstance(a, dict)]
+            main_name = module_info.get("mainElement") or ""
+            def launcher_rank(ability: dict[str, Any]) -> tuple[int, int]:
+                skills = ability.get("skills") or []
+                is_home = any(
+                    "entity.system.home" in (skill.get("entities") or []) or
+                    "action.system.home" in (skill.get("actions") or [])
+                    for skill in skills if isinstance(skill, dict)
+                )
+                return (0 if is_home else 1, 0 if ability.get("name") == main_name else 1)
+            candidates = sorted(abilities, key=launcher_rank) + [app]
             index = b""
             if "resources.index" in archive.namelist():
                 entry = archive.getinfo("resources.index")
                 if entry.file_size <= 4 * 1024 * 1024:
                     index = archive.read(entry)
-            # The compiled iconId identifies the exact resource even if a
-            # localized/configuration-specific source renamed its file.
-            icon_id = app.get("iconId")
-            resolved = _icon_entry(archive, str(icon_id), index) if type(icon_id) is int else ""
-            name = resolved or _icon_entry(archive, reference, index)
-            if name.endswith(".json"):
-                entry = archive.getinfo(name)
-                if entry.file_size > 16 * 1024:
-                    return None
-                layers = (json.loads(archive.read(entry)).get("layered-image") or {})
-                background = _icon_image(archive, _icon_entry(archive, str(layers.get("background") or ""), index))
-                foreground = _icon_image(archive, _icon_entry(archive, str(layers.get("foreground") or ""), index))
-                if not background or not foreground or background[2].size != foreground[2].size:
-                    return None
-                composed = Image.alpha_composite(background[2].convert("RGBA"), foreground[2].convert("RGBA"))
-                output = io.BytesIO()
-                composed.save(output, format="PNG", optimize=True)
-                data = output.getvalue()
-                return ("image/png", data) if len(data) <= 1024 * 1024 else None
-            image = _icon_image(archive, name)
-            return (image[0], image[1]) if image else None
+            for source in candidates:
+                reference = source.get("icon") or ""
+                if isinstance(reference, dict):
+                    reference = reference.get("name") or ""
+                if not isinstance(reference, str):
+                    continue
+                # The compiled iconId identifies the exact resource even if a
+                # configuration-specific source renamed its file.
+                icon_id = source.get("iconId")
+                resolved = _icon_entry(archive, str(icon_id), index) if type(icon_id) is int else ""
+                name = resolved or _icon_entry(archive, reference, index)
+                if not name:
+                    continue
+                try:
+                    if name.endswith(".json"):
+                        entry = archive.getinfo(name)
+                        if entry.file_size > 16 * 1024:
+                            continue
+                        layers = (json.loads(archive.read(entry)).get("layered-image") or {})
+                        background = _icon_image(archive, _icon_entry(archive, str(layers.get("background") or ""), index))
+                        foreground = _icon_image(archive, _icon_entry(archive, str(layers.get("foreground") or ""), index))
+                        if not background or not foreground or background[2].size != foreground[2].size:
+                            continue
+                        composed = Image.alpha_composite(background[2].convert("RGBA"), foreground[2].convert("RGBA"))
+                        output = io.BytesIO()
+                        composed.save(output, format="PNG", optimize=True)
+                        data = output.getvalue()
+                        if len(data) <= 1024 * 1024:
+                            return "image/png", data
+                    else:
+                        image = _icon_image(archive, name)
+                        if image:
+                            return image[0], image[1]
+                except (KeyError, ValueError, TypeError, json.JSONDecodeError):
+                    continue
+            return None
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, ValueError, TypeError, json.JSONDecodeError):
         return None
 
@@ -659,14 +683,14 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
     if selected_label:
         meta["display_name"] = selected_label
     n = db.replace_releases(app_id, releases)
-    checked = next((asset for release in presentation_releases for asset in release.get("assets", [])
-                    if asset.get("_icon_checked")), None)
-    if checked:
-        icon = checked.get("_icon")
-        if icon:
-            db.put_app_icon(app_id, icon[0], icon[1])
-        else:
-            db.delete_app_icon(app_id)
+    # A newer HAP whose icon cannot be decoded must not erase a previously
+    # verified icon. Another scanned release of this selected app can provide
+    # the fallback until its current resource format is supported.
+    icon_asset = next((asset for release in presentation_releases
+                       for asset in release.get("assets", []) if asset.get("_icon")), None)
+    if icon_asset:
+        icon = icon_asset["_icon"]
+        db.put_app_icon(app_id, icon[0], icon[1])
     db.upsert_app(repo, **meta, synced_at=int(time.time()), sync_error="")
     hap_count = sum(len(r.get("assets") or []) for r in releases)
     return {

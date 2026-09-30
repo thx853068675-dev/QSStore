@@ -1,7 +1,8 @@
-# 轻启·安装器原生客户端（0.4.47）
+# 轻启·安装器原生客户端（0.4.48）
 
-0.4.47 的公开制品为正式包名的无签名 HAP，由侧载工具为用户自己的设备签名。
-构建命令为 `python3 tools/build_unsigned_formal.py --output <unsigned.hap> --version-code 2026093013 --version-name 0.4.47`；脚本清理 Hvigor 缓存、触发 Rust 增量检查，并递归检查产物及内嵌包没有签名。
+0.4.48 的公开制品为正式包名的无签名 HAP，由侧载工具为用户自己的设备签名。
+构建命令为 `python3 tools/build_unsigned_formal.py --output <unsigned.hap> --version-code 2026093014 --version-name 0.4.48`；脚本清理 Hvigor 缓存、触发 Rust 增量检查，并递归检查产物及内嵌包没有签名。
+0.4.48 修复管理页修改分类后的旧卡片缓存，并让发现页的百星、千星、万星卡片各自绘制星点和分级背景。服务端采集优先解析 HAP 启动 Ability 的图标，避免把 AppScope 模板图当成应用图标。
 6.1 手机运行相同 ARM 签名库的两层签名及安装验证见 [47 验证记录](../docs/RELEASE-47-INNER-SIGNING-20260930.md)。
 
 这是与现有 Flutter 客户端并存的 ArkTS/ArkUI 工程。系统 HdsTabs、商店列表/详情/历史版本、账号登录、上架、评论、已发布应用管理、可恢复下载、本地 HAP 导入、原生签名及设备安装已接入。签名核心和 HDC TCP 主机均以 Rust 源码静态链接进 `libhap_core.so`；HAP 中没有 Flutter、旧 Go signer 或 `libhdc_z.so`。安装任务在 RDB 中保留阶段和校验信息，签名或安装需要设备时才检查无线调试，并可在端口变化后重新连接继续。

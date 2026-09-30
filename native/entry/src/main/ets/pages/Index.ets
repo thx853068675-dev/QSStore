@@ -80,6 +80,59 @@ class UpdateTarget {
  */
 const PAGE_INSET: number = 24;
 
+/** Each featured card owns its canvas. Sharing one context between ListItems
+ * makes later cards lose their stars when ArkUI recycles the list. */
+@Component
+struct FeaturedCardStars {
+  @Prop appId: number = 0;
+  @Prop tier: number = 1;
+  private settings: RenderingContextSettings = new RenderingContextSettings(true);
+  private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
+
+  private hash(seed: number, salt: number): number {
+    let h = (Math.floor(seed) * 2654435761 + salt * 40503) >>> 0;
+    h = (h ^ (h >>> 15)) >>> 0;
+    h = Math.imul(h, 2246822519) >>> 0;
+    h = (h ^ (h >>> 13)) >>> 0;
+    h = Math.imul(h, 3266489917) >>> 0;
+    return (h ^ (h >>> 16)) >>> 0;
+  }
+
+  private paint(): void {
+    const w = this.ctx.width;
+    const h = this.ctx.height;
+    if (w <= 0 || h <= 0) return;
+    this.ctx.clearRect(0, 0, w, h);
+    const count = this.tier === 3 ? 72 : this.tier === 2 ? 54 : 38;
+    const gold = this.tier >= 2;
+    for (let i = 0; i < count; i++) {
+      const x = (this.hash(this.appId, i * 4 + 1) % 10000) / 10000 * w;
+      const y = (this.hash(this.appId, i * 4 + 2) % 10000) / 10000 * h;
+      const radius = 0.5 + (this.hash(this.appId, i * 4 + 3) % 100) / 100 *
+        (this.tier === 3 ? 2.7 : 2.0);
+      const alpha = 0.15 + (this.hash(this.appId, i * 4 + 4) % 100) / 100 * 0.48;
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, radius, 0, Math.PI * 2);
+      this.ctx.fillStyle = gold ? 'rgba(255,226,166,' + alpha.toFixed(2) + ')' :
+        'rgba(255,255,255,' + alpha.toFixed(2) + ')';
+      this.ctx.fill();
+    }
+    if (this.tier >= 2) {
+      this.ctx.beginPath();
+      this.ctx.arc(w * 0.87, h * 0.52, h * 0.58, 0, Math.PI * 2);
+      this.ctx.strokeStyle = this.tier === 3 ? 'rgba(255,221,148,0.36)' :
+        'rgba(234,216,255,0.22)';
+      this.ctx.lineWidth = this.tier === 3 ? 1.5 : 1;
+      this.ctx.stroke();
+    }
+  }
+
+  build() {
+    Canvas(this.ctx).width('100%').height(92)
+      .onReady(() => this.paint())
+  }
+}
+
 @Entry
 @Component
 struct Index {
@@ -850,8 +903,6 @@ struct Index {
    * 「拉一下闪一下就弹回去」。给一个下限，让这次刷新看起来确实发生过。
    */
   private static readonly REFRESH_MIN_VISIBLE_MS: number = 600;
-  /** 大卡背景铺多少颗星。 */
-  private static readonly STAR_FIELD_COUNT: number = 46;
   /** 超过这个星数用大卡。 */
   private static readonly STARRED_MIN_STARS: number = 100;
 
@@ -1375,8 +1426,15 @@ struct Index {
     this.configBusy = true;
     this.configMessage = '';
     try {
-      await new StoreClient(getContext(this) as common.UIAbilityContext)
+      const saved = await new StoreClient(getContext(this) as common.UIAbilityContext)
         .configureMyApp(this.configApp.id, this.configCategory, this.account);
+      if (saved.category !== this.configCategory) {
+        throw new Error('服务器未保存所选分类，请重试');
+      }
+      // Keep both already-open lists in sync immediately. The subsequent fetch
+      // also catches changes made from another device.
+      this.myApps = this.myApps.map((app: CatalogApp) => app.id === saved.id ? saved : app);
+      this.apps = this.apps.map((app: CatalogApp) => app.id === saved.id ? saved : app);
       this.showAppConfig = false;
       await this.loadMyApps();
       await this.loadApps();
@@ -1707,12 +1765,13 @@ struct Index {
    * 应用不会再出现「安装」，避免重复装一遍。按钮自己就是进度显示。
    */
   @Builder
-  private catalogCardAction(app: CatalogApp) {
+  private catalogCardAction(app: CatalogApp, featured: boolean = false) {
     Column() {
       if (this.taskPending(app.id, app.latestAsset?.bundleName ?? '')) {
         Button(this.taskLabel(app.id, app.latestAsset?.bundleName ?? ''))
-          .width(94).height(38).padding({ left: 6, right: 6 }).fontSize(11).fontColor(Palette.accent)
-          .backgroundColor(Palette.accentSoft).borderRadius(12)
+          .width(94).height(38).padding({ left: 6, right: 6 }).fontSize(11)
+          .fontColor(featured ? '#192856' : Palette.accent)
+          .backgroundColor(featured ? '#EEFFFFFF' : Palette.accentSoft).borderRadius(12)
           .enabled(!this.taskRunning(app.id, app.latestAsset?.bundleName ?? ''))
           .onClick(() => {
             const row = this.taskForApp(app.id, app.latestAsset?.bundleName ?? '');
@@ -1723,14 +1782,16 @@ struct Index {
       } else if (this.installedBundleOf(app.id).length > 0) {
         if (this.updateForApp(app.id) !== undefined) {
           Button('更新')
-            .width(74).height(38).fontSize(13).fontColor(Palette.onAccent)
-            .backgroundColor(Palette.accent).borderRadius(12)
+            .width(74).height(38).fontSize(13)
+            .fontColor(featured ? '#192856' : Palette.onAccent)
+            .backgroundColor(featured ? '#FFFFFF' : Palette.accent).borderRadius(12)
             .enabled(this.activeCatalogAppId === 0)
             .onClick(() => this.installFromCatalog(app))
         } else {
           Button('打开')
             .width(74).height(38).fontSize(13)
-            .fontColor(Palette.accent).backgroundColor(Palette.accentSoft)
+            .fontColor(featured ? '#192856' : Palette.accent)
+            .backgroundColor(featured ? '#EEFFFFFF' : Palette.accentSoft)
             .borderRadius(12)
             .onClick(() => this.openCatalogApp(app))
         }
@@ -1738,13 +1799,15 @@ struct Index {
         // 权限不足且无线调试未连接时，状态无法核实；不能让用户永远卡在检查按钮。
         // 允许先下载并准备任务，设备连接在真正需要授权/安装时再处理。
         Button('安装/更新').width(94).height(38).fontSize(12)
-          .fontColor(Palette.onAccent).backgroundColor(Palette.accent).borderRadius(12)
+          .fontColor(featured ? '#192856' : Palette.onAccent)
+          .backgroundColor(featured ? '#FFFFFF' : Palette.accent).borderRadius(12)
           .enabled(this.activeCatalogAppId === 0)
           .onClick(() => this.installFromCatalog(app))
       } else {
         Button('安装')
-          .width(74).height(38).fontSize(13).fontColor(Palette.onAccent)
-          .backgroundColor(Palette.accent).borderRadius(12)
+          .width(74).height(38).fontSize(13)
+          .fontColor(featured ? '#192856' : Palette.onAccent)
+          .backgroundColor(featured ? '#FFFFFF' : Palette.accent).borderRadius(12)
           .enabled(this.activeCatalogAppId === 0)
           .onClick(() => this.installFromCatalog(app))
       }
@@ -1999,62 +2062,15 @@ struct Index {
     return this.updateCatalogReady && matches.length === 1 ? matches[0] : undefined;
   }
 
-  /** 大卡背景用的星点画布。放在卡片内容的下面一层。 */
-  private cardStarSettings: RenderingContextSettings = new RenderingContextSettings(true);
-  private cardStarCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.cardStarSettings);
-
-  /** 32 位整数散列，把「应用 + 序号」摊成一个无规律但稳定的数。 */
-  private static hash32(seed: number, salt: number): number {
-    let h = (Math.floor(seed) * 2654435761 + salt * 40503) >>> 0;
-    h = (h ^ (h >>> 15)) >>> 0;
-    h = Math.imul(h, 2246822519) >>> 0;
-    h = (h ^ (h >>> 13)) >>> 0;
-    h = Math.imul(h, 3266489917) >>> 0;
-    return (h ^ (h >>> 16)) >>> 0;
+  private featuredTier(stars: number): number {
+    return stars >= 10000 ? 3 : stars >= 1000 ? 2 : stars > Index.STARRED_MIN_STARS ? 1 : 0;
   }
 
-  /**
-   * 大卡背景的星点：大小不一、位置无序。
-   *
-   * 用散列而不是 `Math.random()`：同一张卡片每次重绘必须落在同一批位置，否则
-   * 列表滚动、状态更新都会让背景闪一下。坐标是 0..1 的比例，画的时候再乘画布
-   * 尺寸，换屏幕宽度也不会跑位。
-   */
-  private static starField(seed: number, count: number): number[][] {
-    const stars: number[][] = [];
-    for (let i = 0; i < count; i++) {
-      const x = (Index.hash32(seed, i * 4 + 1) % 10000) / 10000;
-      const y = (Index.hash32(seed, i * 4 + 2) % 10000) / 10000;
-      // 0.5..2.6：大部分是小点，偶尔一个大一点的，看着才自然
-      const radius = 0.5 + (Index.hash32(seed, i * 4 + 3) % 100) / 100 * 2.1;
-      // 0.12..0.46 的透明度：不能太亮，否则压过卡片上的文字
-      const alpha = 0.12 + (Index.hash32(seed, i * 4 + 4) % 100) / 100 * 0.34;
-      stars.push([x, y, radius, alpha]);
-    }
-    return stars;
-  }
-
-  /** 在给定画布上铺一层星点。 */
-  private static paintStars(ctx: CanvasRenderingContext2D, seed: number): void {
-    const w = ctx.width;
-    const h = ctx.height;
-    if (w <= 0 || h <= 0) return;
-    ctx.clearRect(0, 0, w, h);
-    for (const star of Index.starField(seed, Index.STAR_FIELD_COUNT)) {
-      ctx.beginPath();
-      ctx.arc(star[0] * w, star[1] * h, star[2], 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,255,255,' + star[3].toFixed(2) + ')';
-      ctx.fill();
-    }
-  }
-
-  /** 这张大卡的背景星点。同一应用每次都是同一批位置。 */
-  private paintCardStars(appId: number): void {
-    try {
-      Index.paintStars(this.cardStarCtx, appId);
-    } catch (_) {
-      // 背景是装饰：画不出来也不该影响卡片内容
-    }
+  private featuredColors(stars: number): Array<[string, number]> {
+    const tier = this.featuredTier(stars);
+    if (tier === 3) return [['#09152D', 0], ['#17365E', 0.58], ['#614575', 1]];
+    if (tier === 2) return [['#302160', 0], ['#54409C', 0.58], ['#8852AD', 1]];
+    return [['#214FD0', 0], ['#3369E8', 0.58], ['#5784F5', 1]];
   }
 
   /**
@@ -2604,11 +2620,8 @@ struct Index {
                   // 只换背景与文字颜色 —— 之前排成「图标行 + 标签行」两行，
                   // 结构不同，高度自然对不上，怎么调尺寸都还高。
                   Stack({ alignContent: Alignment.TopStart }) {
-                    // 星点背景。画布给固定高度：Stack 的高度取最大子组件，
-                    // 写成 height('100%') 会反过来把卡片撑到父容器那么高。
-                    Canvas(this.cardStarCtx)
-                      .width('100%').height(92)
-                      .onReady(() => this.paintCardStars(app.id))
+                    // 每张卡有自己的画布，分页/列表复用时不会只剩第一张有星点。
+                    FeaturedCardStars({ appId: app.id, tier: this.featuredTier(app.stars) })
                     Row({ space: 14 }) {
                       if (this.iconFor(app.id)) {
                         Image(this.iconFor(app.id)).width(62).height(62).borderRadius(17)
@@ -2620,31 +2633,35 @@ struct Index {
                       }
                       Column({ space: 5 }) {
                         Text(app.displayName).fontSize(17).fontWeight(FontWeight.Bold)
-                          .fontColor(Palette.onAccent).maxLines(1)
+                          .fontColor('#FFFFFF').maxLines(1)
                         Text(app.summary).fontSize(12)
-                          .fontColor(Palette.onAccentSecondary).maxLines(1)
+                          .fontColor('#E5ECFF').maxLines(1)
                         Row({ space: 7 }) {
                           // 浅蓝底配**蓝字**：底色是 accentSoft（浅），文字再用 onAccent
                           // （为深色底准备的白/近黑）就会浅底浅字，几乎看不见。
                           // 与普通卡的 tag 用同一组配色，对比度才够。
                           Text(app.category).fontSize(10).fontWeight(FontWeight.Medium)
-                            .fontColor(Palette.accent)
+                            .fontColor('#FFFFFF')
                             .padding({ left: 6, right: 6, top: 3, bottom: 3 })
-                            .backgroundColor(Palette.accentSoft).borderRadius(6)
+                            .backgroundColor('#32FFFFFF').borderRadius(6)
                           if (this.latestVersionTag(app).length > 0) {
-                            Text(this.latestVersionTag(app)).fontSize(10).fontColor(Palette.accent)
+                            Text(this.latestVersionTag(app)).fontSize(10).fontColor('#FFFFFF')
                               .maxLines(1).constraintSize({ maxWidth: 88 })
                               .padding({ left: 6, right: 6, top: 3, bottom: 3 })
-                              .backgroundColor(Palette.accentSoft).borderRadius(6)
+                              .backgroundColor('#32FFFFFF').borderRadius(6)
                           }
-                          Text('★ ' + app.stars).fontSize(11)
-                            .fontColor(Palette.onAccentTertiary).maxLines(1)
+                          Text((this.featuredTier(app.stars) === 3 ? '✦ ' : '★ ') + app.stars)
+                            .fontSize(11).fontWeight(FontWeight.Medium)
+                            .fontColor(this.featuredTier(app.stars) >= 2 ? '#FFE4A8' : '#FFFFFF')
+                            .maxLines(1)
                         }
                       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                         .onClick(() => this.openDetail(app.id))
-                      this.catalogCardAction(app)
+                      this.catalogCardAction(app, true)
                     }.width('100%').padding(15)
-                  }.width('100%').backgroundColor(Palette.accent).borderRadius(19)
+                  }.width('100%').backgroundColor('#214FD0')
+                    .linearGradient({ angle: 120, colors: this.featuredColors(app.stars) })
+                    .borderRadius(19)
                     .clip(true)
                     .margin({ bottom: 10 })
                   } else {
@@ -2684,7 +2701,8 @@ struct Index {
                   }
                 }.width('100%').padding({ left: PAGE_INSET, right: PAGE_INSET })
               }
-            }, (app: CatalogApp) => String(app.id) + ':' +
+            }, (app: CatalogApp) => String(app.id) + ':' + app.stars + ':' +
+              app.category + ':' + app.displayName + ':' + app.iconRev + ':' +
               (app.latestAsset?.sha256 ?? '') + ':' + (app.latestAsset?.versionCode ?? 0))
             // 目录按服务端分页续取：滚到底自动加载下一页。
             if (this.apps.length < this.catalogTotal) {
@@ -2935,7 +2953,8 @@ struct Index {
                   .onClick(() => this.openAppConfig(app))
               }.width('100%').padding(15).backgroundColor(Palette.surface).borderRadius(16)
             }
-          }, (app: CatalogApp) => String(app.id))
+          }, (app: CatalogApp) => String(app.id) + ':' + app.category + ':' +
+            app.displayName + ':' + app.iconRev)
         }
         // 中断任务恢复入口：只在确实有未完成任务时出现，无任务不占版面。
         if (this.jobsError.length > 0) {

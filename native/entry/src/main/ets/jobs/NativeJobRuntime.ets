@@ -146,6 +146,7 @@ export class NativeJobRuntime implements JobRuntime {
       const result = new PackageIdentity();
       result.bundleName = parsed.bundleName;
       result.versionCode = parsed.versionCode;
+      result.versionName = parsed.versionName;
       result.moduleName = parsed.moduleName;
       result.mainAbility = parsed.mainAbility;
       return result;

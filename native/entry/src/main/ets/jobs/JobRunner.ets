@@ -7,6 +7,7 @@ import { JobCancellation } from './JobCancellation';
 export class PackageIdentity {
   bundleName: string = '';
   versionCode: number = 0;
+  versionName: string = '';
   moduleName: string = '';
   mainAbility: string = '';
 }
@@ -93,6 +94,7 @@ export class JobRunner {
         }
         job.bundleName = identity.bundleName;
         job.versionCode = identity.versionCode;
+        if ((identity.versionName ?? '').length > 0) job.versionName = identity.versionName;
         job.moduleName = identity.moduleName;
         job.mainAbility = identity.mainAbility;
         await this.advance(job, InstallStage.PACKAGE_INSPECTED);

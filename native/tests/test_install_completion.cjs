@@ -32,6 +32,13 @@ test('self version is readable without bundle permission or wireless debugging',
   assert.equal(f.LocalBundles.installedVersion('com.example.other'), -1);
   assert.equal(f.external, 1);
 });
+test('self display name comes from the installed package and is not assigned to an older build', () => {
+  const f = localBundles(); f.self.versionName = '0.4.48';
+  assert.equal(f.LocalBundles.installedVersionName('com.example.installer', 2), '0.4.48');
+  assert.equal(f.LocalBundles.installedVersionName('com.example.installer', 1), '');
+  assert.equal(f.external, 0);
+  assert.equal(f.LocalBundles.installedVersionName('com.example.other', 2), '');
+});
 function fixture() {
   const f = localBundles(); f.jobs = []; f.saved = []; f.probes = 0;
   f.remoteVersion = -1; f.running = new Set();

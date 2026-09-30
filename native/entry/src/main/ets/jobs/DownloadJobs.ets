@@ -22,6 +22,7 @@ export class DownloadJobs {
       checkCatalogIdentity(job.catalogBundleName, job.catalogVersionCode, identity);
       job.bundleName = identity.bundleName;
       job.versionCode = identity.versionCode;
+      if ((identity.versionName ?? '').length > 0) job.versionName = identity.versionName;
       job.moduleName = identity.moduleName;
       job.mainAbility = identity.mainAbility;
       job.stage = InstallStage.PACKAGE_INSPECTED;

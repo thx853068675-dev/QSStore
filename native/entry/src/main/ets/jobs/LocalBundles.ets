@@ -75,6 +75,23 @@ export class LocalBundles {
     return LocalBundles.isKnown(live) ? live : InstalledAppRegistry.version(bundleName);
   }
 
+  /** 只返回指定已安装构建的版本名，不能把当前版本名套到旧安装历史上。 */
+  static installedVersionName(bundleName: string, versionCode: number): string {
+    if (versionCode <= 0 || bundleName.length === 0) return '';
+    try {
+      const own = bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      if (own.name === bundleName) {
+        return own.versionCode === versionCode ? String(own.versionName ?? '').trim() : '';
+      }
+      const info = bundleManager.getBundleInfoSync(bundleName,
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      return info.versionCode === versionCode ? String(info.versionName ?? '').trim() : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   /** 安装决策只接受系统当前查询；显示层的历史缓存不能充当完成证据。 */
   static liveInstalledVersion(bundleName: string): number {
     // 非法包名是「调用方给错了」，不是「系统查不到」：报 UNKNOWN 会让上层

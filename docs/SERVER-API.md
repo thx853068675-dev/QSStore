@@ -85,7 +85,7 @@ curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 `version_code` 只在 releases 里才有，没有这个字段时客户端得为目录里**每个**
 应用单独请求一次 `/releases` —— 一屏 30 个应用就是 30 次往返。
 
-**安全**：全站安全响应头、按 IP 限流（默认 120/分，上架 3/小时）、管理接口仅本机、请求体上限 32KB、SQLite 全参数化。
+**安全**：全站安全响应头、普通接口按 IP 限流（默认 120/分），上架预处理按已验证账号限流（3/分）。同一账号、同一仓库五分钟内重复检查复用预处理结果；无效地址不占次数；429 响应提供实际剩余等待时间。管理接口仅本机、请求体上限 32KB、SQLite 全参数化。
 
 上架、评价及签名身份接口使用 `Authorization: Bearer <DevEco JWT>` 验证华为账号。客户端同时发送 `X-Huawei-Access-Token`，服务端用华为 `GOpen.User.getInfo` 的 `getNickName=1` 获取公开昵称和 `headPictureURL` 头像，并核对返回的 `userID` 与 JWT 账号一致。评论列表返回 `avatar_url`；头像按账号保存，因此账号再次核验后，已有评论也会显示头像。资料接口暂不可用时回退完整账号 ID；不使用证书主体中的实名。
 

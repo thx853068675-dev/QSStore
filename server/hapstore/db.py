@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS submit_draft (
     account_id TEXT NOT NULL,
     choices_json TEXT NOT NULL,
     suggested_category TEXT NOT NULL,
+    prepared_json TEXT NOT NULL DEFAULT '{}',
     expires_at INTEGER NOT NULL
 );
 
@@ -200,6 +201,8 @@ def init_db() -> None:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         conn = connect()
         conn.executescript(SCHEMA)
+        if 'prepared_json' not in {row['name'] for row in conn.execute('PRAGMA table_info(submit_draft)')}:
+            conn.execute("ALTER TABLE submit_draft ADD COLUMN prepared_json TEXT NOT NULL DEFAULT '{}'")
         if 'digest' not in {row['name'] for row in conn.execute('PRAGMA table_info(app_icon)')}:
             conn.execute("ALTER TABLE app_icon ADD COLUMN digest TEXT NOT NULL DEFAULT ''")
         for row in list(conn.execute("SELECT app_id,data FROM app_icon WHERE digest=''")):
@@ -588,15 +591,26 @@ def update_account_display_name(account_id: str, display_name: str) -> None:
 
 
 def create_submit_draft(token: str, repo: str, account_id: str,
-                        choices: list[dict[str, Any]], category: str) -> None:
+                        choices: list[dict[str, Any]], category: str,
+                        prepared: dict[str, Any] | None = None) -> None:
     c = connect()
     c.execute("DELETE FROM submit_draft WHERE expires_at<?", (int(time.time()),))
     c.execute("""INSERT INTO submit_draft
-              (token,repo,account_id,choices_json,suggested_category,expires_at)
-              VALUES (?,?,?,?,?,?)""",
+              (token,repo,account_id,choices_json,suggested_category,prepared_json,expires_at)
+              VALUES (?,?,?,?,?,?,?)""",
               (token, repo, account_id, json.dumps(choices, ensure_ascii=False),
-               category, int(time.time()) + 1800))
+               category, json.dumps(prepared or {}, ensure_ascii=False), int(time.time()) + 1800))
     c.commit()
+
+
+def recent_submit_draft(repo: str, account_id: str) -> dict[str, Any] | None:
+    row = connect().execute("""SELECT prepared_json,expires_at FROM submit_draft
+        WHERE repo=? COLLATE NOCASE AND account_id=? AND expires_at>?
+          AND prepared_json!='{}' ORDER BY expires_at DESC LIMIT 1""",
+        (repo, account_id, int(time.time()) + 1500)).fetchone()
+    if not row:
+        return None
+    return {"prepared": json.loads(row["prepared_json"]), "expires_at": row["expires_at"]}
 
 
 def get_submit_draft(token: str, account_id: str) -> dict[str, Any] | None:

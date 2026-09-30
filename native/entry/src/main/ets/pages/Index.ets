@@ -1212,10 +1212,14 @@ struct Index {
    * 所以优先显示 versionName；没有版本名时才回退。
    */
   private versionLabel(job: InstallJob): string {
+    if (job.stage === InstallStage.INSTALLED) {
+      const liveName = LocalBundles.installedVersionName(job.bundleName, job.versionCode);
+      if (liveName.length > 0) return liveName;
+    }
     if (job.versionName.length > 0) return job.versionName;
     // 旧记录（加 version_name 字段之前装的）没有版本名。直接显示 versionCode 会
     // 得到 2026092902 这种看着像日期的数字，所以依次退两步。
-    const app = this.apps.find((item: CatalogApp) => item.id === job.appId);
+    const app = this.catalogForJob(job);
     if (app !== undefined) {
       const direct = app.latestAsset;
       if (direct !== undefined && direct.versionCode === job.versionCode &&
@@ -1250,6 +1254,7 @@ struct Index {
     }
     const target = update.versionName.length > 0 ? update.versionName :
       String(update.versionCode);
+    if (target === this.versionLabel(job)) return '版本 ' + target + ' · 有修订更新';
     return '版本 ' + this.versionLabel(job) + ' → ' + target;
   }
 
@@ -1698,7 +1703,22 @@ struct Index {
   private allInstalledJobs(): InstallJob[] {
     const recent = this.recentInstalledJobs();
     return recent.concat(this.storeInstalled.filter((job: InstallJob) =>
-      !recent.some((item: InstallJob) => item.bundleName === job.bundleName)));
+      !recent.some((item: InstallJob) => item.bundleName === job.bundleName)))
+      .map((job: InstallJob) => this.currentInstalledView(job));
+  }
+
+  /** 主列表展示设备当前版本；安装历史原样保留，外部更新不改写旧记录。 */
+  private currentInstalledView(job: InstallJob): InstallJob {
+    const version = LocalBundles.liveInstalledVersion(job.bundleName);
+    if (version <= 0) return job;
+    const versionName = LocalBundles.installedVersionName(job.bundleName, version);
+    if (version === job.versionCode && (versionName.length === 0 ||
+      versionName === job.versionName)) return job;
+    const view = JSON.parse(JSON.stringify(job)) as InstallJob;
+    view.versionCode = version;
+    view.versionName = versionName.length > 0 ? versionName :
+      (version === job.versionCode ? job.versionName : '');
+    return view;
   }
 
   /**

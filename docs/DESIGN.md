@@ -466,7 +466,7 @@ POST /api/v1/apps/:id/download-event { asset, device }  # 匿名计数
 { "ok": false, "error": { "code": "REPO_NOT_FOUND", "message": "…", "hint": "…" } }
 ```
 
-**限流**：按 IP，普通接口 120 req/min，`POST /submit` 3 req/hour/IP，超限返回 `429` 带 `Retry-After`。
+**限流**：普通接口按 IP 限制 120 req/min；`POST /api/v1/submit/prepare` 按已验证账号限制 3 req/min。无效地址不占次数，同一账号、同一仓库五分钟内复用预处理结果。超限返回 `429`，`Retry-After` 为实际剩余等待秒数。
 
 ### 7.4 上架与身份
 

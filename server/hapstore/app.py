@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -37,12 +38,12 @@ GITHUB_TOKEN = os.environ.get("HAPSTORE_GITHUB_TOKEN", "")
 # 管理接口只允许本机访问（通过 SSH 隧道使用），绝不暴露公网
 ADMIN_ALLOW = {"127.0.0.1", "::1"}
 
-# 简单内存限流：ip -> [时间戳]
+# 简单内存限流：接口与账号（通用接口为 IP）-> [时间戳]
 _rl_lock = threading.Lock()
 _rl: dict[str, list[float]] = {}
 
 RATE_DEFAULT = (120, 60)     # 120 次 / 60 秒
-RATE_SUBMIT = (3, 3600)      # 3 次 / 小时
+RATE_SUBMIT = (3, 60)       # 每个已验证账号每分钟 3 次实际预处理
 RATE_SYNC = (6, 3600)
 # 客户端点「检查更新」会即时重采一个仓库。比 admin 宽一点（用户可能在几个
 # 应用间来回切），但仍按 IP 限流，避免被拿来刷 GitHub 配额。
@@ -68,14 +69,19 @@ def _ip_hash(ip: str) -> str:
 
 
 def _rate_ok(key: str, limit: int, window: int) -> bool:
+    return _rate_wait(key, limit, window) == 0
+
+
+def _rate_wait(key: str, limit: int, window: int) -> int:
+    """原子占用一次请求；拒绝时返回真正剩余的等待秒数。"""
     now = time.time()
     with _rl_lock:
         bucket = _rl.setdefault(key, [])
         bucket[:] = [t for t in bucket if now - t < window]
         if len(bucket) >= limit:
-            return False
+            return max(1, math.ceil(bucket[0] + window - now))
         bucket.append(now)
-        return True
+        return 0
 
 
 def _now_iso() -> str:
@@ -83,12 +89,14 @@ def _now_iso() -> str:
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str, hint: str = ""):
+    def __init__(self, status: int, code: str, message: str, hint: str = "",
+                 retry_after: int = 60):
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
         self.hint = hint
+        self.retry_after = retry_after
 
 
 # ────────────────────────────── 路由 ──────────────────────────────
@@ -292,13 +300,24 @@ def _reject_foreign_repo(repo: str, account_id: str) -> None:
 
 def h_submit_prepare(body: dict[str, Any], ip: str,
                      identity: tuple[str, str]) -> dict[str, Any]:
-    if not _rate_ok(f"submit:{ip}", *RATE_SUBMIT):
-        raise ApiError(429, "RATE_LIMITED", "检查请求过于频繁，请稍后再试")
-
     repo = collector.normalize_repo(str(body.get("repo_url") or ""))
     if not repo:
         raise ApiError(400, "INVALID_REPO_URL",
                        "请填写形如 https://github.com/<owner>/<repo> 的地址")
+
+    # 同一账号五分钟内重复检查复用完整预处理结果，不重采 HAP、不占额度。
+    cached = db.recent_submit_draft(repo, identity[0])
+    if cached is not None:
+        result = cached["prepared"]
+        result["expires_in_seconds"] = max(0, cached["expires_at"] - int(time.time()))
+        result["existing"] = _repo_owner_state(repo, identity[0])
+        return result
+
+    account_key = _ip_hash(identity[0])
+    wait = _rate_wait(f"submit:{account_key}", *RATE_SUBMIT)
+    if wait:
+        raise ApiError(429, "RATE_LIMITED", f"检查请求过于频繁，请在 {wait} 秒后重试",
+                       retry_after=wait)
 
     try:
         meta = collector.fetch_app_metadata(repo, token=GITHUB_TOKEN)
@@ -321,8 +340,7 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
             "sha256": a.get("sha256") or "",
         } for a in candidate["assets"]]
         token = secrets.token_urlsafe(24)
-        db.create_submit_draft(token, repo, identity[0], choices, meta["category"])
-        return {"draft_token": token, "repo": repo,
+        result = {"draft_token": token, "repo": repo,
                 "display_name": meta["display_name"],
                 "description": meta["description"],
                 "choices": choices,
@@ -331,6 +349,8 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
                 # 客户端据此提示「这是更新已有的那条」还是「已被别人上架」
                 "existing": _repo_owner_state(repo, identity[0]),
                 "expires_in_seconds": 1800}
+        db.create_submit_draft(token, repo, identity[0], choices, meta["category"], result)
+        return result
     except ApiError:
         raise
     except collector.CollectError as e:
@@ -572,7 +592,8 @@ class Handler(BaseHTTPRequestHandler):
         ).encode("utf-8")
         self._send(status, body, "application/json; charset=utf-8")
 
-    def _error(self, status: int, code: str, message: str, hint: str = "") -> None:
+    def _error(self, status: int, code: str, message: str, hint: str = "",
+               retry_after: int = 60) -> None:
         err = {"code": code, "message": message}
         if hint:
             err["hint"] = hint
@@ -582,7 +603,7 @@ class Handler(BaseHTTPRequestHandler):
         ).encode("utf-8")
         if status == 429:
             self._send(status, body, "application/json; charset=utf-8",
-                       {"Retry-After": "60"})
+                       {"Retry-After": str(retry_after)})
         else:
             self._send(status, body, "application/json; charset=utf-8")
 
@@ -689,7 +710,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(fn(query))
         except ApiError as e:
-            self._error(e.status, e.code, e.message, e.hint)
+            self._error(e.status, e.code, e.message, e.hint, e.retry_after)
         except BrokenPipeError:
             pass
         except Exception as e:  # noqa: BLE001

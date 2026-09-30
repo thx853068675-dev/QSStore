@@ -9,7 +9,8 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
 const names = ['updateApps', 'catalogApp', 'catalogForJob', 'openJobDetails', 'loadUpdateCatalog',
   'installedVersionOf', 'installedBundleOf', 'installedJobFor', 'updateForApp',
-  'installFromCatalog', 'checkInstalledUpdates', 'updateFor', 'allInstalledJobs', 'recentInstalledJobs', 'startUpdate'];
+  'installFromCatalog', 'checkInstalledUpdates', 'updateFor', 'allInstalledJobs', 'currentInstalledView',
+  'recentInstalledJobs', 'startUpdate', 'versionLabel'];
 const methods = names.map(name => {
   const start = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
   assert.notEqual(start, -1, name);
@@ -36,8 +37,11 @@ function fixture() {
   } };
   const sandbox = {
     StoreClient: class { listApps(...args) { f.requests.push(args); return f.fetch(...args); } },
-    InstallStage: { QUEUED: 'QUEUED', DOWNLOADING: 'DOWNLOADING', WAITING_NETWORK: 'WAITING_NETWORK' },
-    UpdateTarget: class {}, LocalBundles: { isKnown: v => v !== -1, installedVersion: () => f.actual },
+    InstallStage: { QUEUED: 'QUEUED', DOWNLOADING: 'DOWNLOADING', WAITING_NETWORK: 'WAITING_NETWORK',
+      INSTALLED: 'INSTALLED' },
+    UpdateTarget: class {}, LocalBundles: { isKnown: v => v !== -1,
+      installedVersion: () => f.actual, liveInstalledVersion: () => f.actual,
+      installedVersionName: () => f.versionName ?? '' },
     router: { pushUrl: value => f.routes.push(value) }, getContext: () => ({}),
     errorText: e => e.message, JobStore: { open: async () => store },
     JobScheduler: { runDownload: async (_, __, job) => f.downloads.push(job) }
@@ -71,6 +75,34 @@ test('only the exact nonempty bundle and a higher version qualify', () => {
 test('newer actual device version suppresses a stale local record update', () => {
   const f = fixture(); f.actual = 3; f.ui.updateCatalog = [app()]; f.ui.updateCatalogReady = true;
   f.ui.checkInstalledUpdates(); assert.equal(f.ui.updates.length, 0);
+});
+
+test('self update shows the system version name and stops updating after the target build is installed', () => {
+  const f = fixture(), { ui } = f;
+  const original = { ...local(), bundleName: 'com.tonghongxiang.hapstore',
+    versionCode: 2026092910, versionName: '0.4.45' };
+  ui.installedJobs = [original];
+  const latest = app(3, original.bundleName, 2026093015);
+  latest.latestAsset.versionName = '0.4.48';
+  ui.updateCatalog = [latest]; ui.updateCatalogReady = true;
+  f.actual = 2026093012; f.versionName = '0.4.48';
+  ui.checkInstalledUpdates();
+  assert.equal(ui.allInstalledJobs()[0].versionName, '0.4.48');
+  assert.equal(ui.versionLabel(ui.allInstalledJobs()[0]), '0.4.48');
+  assert.equal(original.versionName, '0.4.45', 'historical records must remain unchanged');
+  assert.equal(ui.updates.length, 1, 'a genuinely newer build of the same release can update');
+  ui.installedVersions.set(3, 2026093012);
+  f.actual = 2026093015;
+  ui.checkInstalledUpdates();
+  assert.equal(ui.updates.length, 0, 'stale records and display caches cannot keep self update visible');
+});
+
+test('a detected self install without a job version name never displays its numeric build code', () => {
+  const f = fixture();
+  f.actual = 2026093015; f.versionName = '0.4.48';
+  const detected = { ...local(), bundleName: 'com.tonghongxiang.hapstore',
+    versionCode: f.actual, versionName: '', assetName: '' };
+  assert.equal(f.ui.versionLabel(detected), '0.4.48');
 });
 test('an unresolved offline catalog app can still begin installation', async () => {
   const f = fixture();

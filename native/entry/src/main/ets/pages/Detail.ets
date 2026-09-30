@@ -955,26 +955,26 @@ struct Detail {
                   Column({ space: 7 }) {
                     Text(this.app.displayName).fontSize(25).fontWeight(FontWeight.Bold)
                       .fontColor(this.colors().text).maxLines(1)
-                    Text('版本 ' + this.selectedVersionLabel()).fontSize(11).fontWeight(FontWeight.Medium)
-                      .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
-                      .backgroundColor(this.colors().surface).borderRadius(8).maxLines(1)
+                    Row({ space: 6 }) {
+                      Text('版本 ' + this.selectedVersionLabel()).fontSize(11).fontWeight(FontWeight.Medium)
+                        .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
+                        .backgroundColor(this.colors().surface).borderRadius(8).maxLines(1)
+                      Text(this.app.category).fontSize(11).fontWeight(FontWeight.Medium)
+                        .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
+                        .backgroundColor(this.colors().surface).borderRadius(8).maxLines(1)
+                    }.width('100%')
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                 }.width('100%')
                 Text(this.app.summary).fontSize(13).fontColor(this.colors().textBody)
                   .lineHeight(20).maxLines(3).width('100%')
-                Row() {
+                Row({ space: 8 }) {
                   Text('由 ' + this.app.publisherName + ' 上架').fontSize(11)
-                    .fontColor(this.colors().textSecondary).layoutWeight(1).maxLines(1)
+                    .fontColor(this.colors().textSecondary).maxLines(1)
+                    .constraintSize({ maxWidth: '50%' })
+                  Text(this.packageSizeLabel()).fontSize(10).fontColor(this.colors().textSecondary)
+                    .layoutWeight(1).maxLines(1)
                   Text('★ ' + this.app.stars).fontSize(11)
                     .fontColor(this.colors().accent)
-                }.width('100%')
-                Row({ space: 10 }) {
-                  Text(this.app.category).fontSize(11).fontWeight(FontWeight.Medium)
-                    .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
-                    .backgroundColor(this.colors().surface).borderRadius(8)
-                  Blank().layoutWeight(1)
-                  Text(this.packageSizeLabel()).fontSize(12).fontColor(this.colors().textSecondary)
-                    .maxLines(1)
                 }.width('100%')
               }.alignItems(HorizontalAlign.Start).width('100%')
                 .padding(22)
@@ -995,11 +995,16 @@ struct Detail {
               }.alignItems(HorizontalAlign.Start).width('100%').padding(16)
                 .backgroundColor(this.colors().surface).borderRadius(17)
                 .onClick(() => this.openRepo())
-              Row() {
+              Row({ space: 8 }) {
                 Text('版本记录').fontSize(18).fontWeight(FontWeight.Bold)
                   .fontColor(this.colors().text).layoutWeight(1)
                 Text(String(this.releaseTotal) + ' 个版本').fontSize(11)
                   .fontColor(this.colors().textTertiary)
+                Button(this.showPreviewReleases ? '预览版 ⇄' : '正式版 ⇄')
+                  .height(28).fontSize(11).padding({ left: 10, right: 10 })
+                  .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
+                  .borderRadius(9).enabled(!this.releaseMoreBusy && !this.refreshBusy)
+                  .onClick(() => this.togglePreviewReleases())
                 // 采集器按周期跑，刚发布的版本要等下一轮；这里可以即时重采
                 if (this.refreshBusy) {
                   LoadingProgress().width(16).height(16).margin({ left: 10 })
@@ -1029,15 +1034,6 @@ struct Detail {
                     .backgroundColor(this.colors().fill)
                     .width('100%')
                     .onSelect((index: number) => this.selectRelease(index))
-                  Row({ space: 8 }) {
-                    Text('包含预览版').fontSize(12).fontColor(this.colors().textSecondary)
-                      .layoutWeight(1)
-                    Toggle({ type: ToggleType.Switch, isOn: this.showPreviewReleases })
-                      .selectedColor(this.colors().accent).enabled(!this.releaseMoreBusy)
-                      .onChange((enabled: boolean) => {
-                        if (enabled !== this.showPreviewReleases) this.togglePreviewReleases();
-                      })
-                  }.width('100%')
                   if (this.currentRelease()!.notes.length > 0) {
                     Text(this.displayNotes(this.currentRelease()!.notes, this.currentRelease()!.name))
                       .fontSize(10).fontColor(this.colors().textBody)

@@ -195,6 +195,7 @@ struct Index {
   @State private localJobId: string = '';
   @State private localInfoJob: InstallJob = new InstallJob();
   @State private localFileSize: string = '';
+  @State private localPreviewReady: boolean = false;
   @State private cancellingJobs: string[] = [];
   @State private apps: CatalogApp[] = [];
   @State private appIcons: AppIcon[] = [];
@@ -323,6 +324,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    if (this.localPreviewReady) this.resetLocalTimeline();
     InstallReconnect.unsubscribe(this.reconnectSubscription);
     this.reconnectSubscription = -1;
     InstallTaskState.unsubscribe(this.installSubscription);
@@ -1628,6 +1630,10 @@ struct Index {
    * 只清界面状态，不删安装记录 —— 已装完的任务仍留在「管理 → 已安装」里。
    */
   private resetLocalTimeline(): void {
+    if (this.localPreviewReady) {
+      try { LocalImport.discardPreview(getContext(this) as common.UIAbilityContext, this.localInfoJob); } catch (_) {}
+    }
+    this.localPreviewReady = false;
     this.localJobId = '';
     this.localInfoJob = new InstallJob();
     this.localFileSize = '';
@@ -1663,14 +1669,14 @@ struct Index {
       const store = await JobStore.open(context);
       while (this.activeJobId.length === 0) {
         const queued = (await store.listAll()).filter((job: InstallJob) =>
-          job.appId > 0 && job.stage === InstallStage.QUEUED)
+          job.stage === InstallStage.QUEUED && (job.appId > 0 || job.sourceUrl === 'local'))
           .sort((a: InstallJob, b: InstallJob) => this.queueTime(a) - this.queueTime(b));
         const job = queued[0];
         if (job === undefined) break;
         // 需要登录的任务不启动；自更新可以直接使用发布包原签名。
-        if (!this.signedIn && !LocalBundles.isSelfBundle(job.catalogBundleName)) break;
+        if (!this.signedIn && !LocalBundles.isSelfBundle(job.catalogBundleName || job.bundleName)) break;
         try {
-          await JobScheduler.runDownload(context, store, job);
+          if (job.sourceUrl !== 'local') await JobScheduler.runDownload(context, store, job);
           if (await store.get(job.id) === undefined) continue; // 已被用户取消
           await this.continueInstall(job);
           const finished = await store.get(job.id);
@@ -2345,6 +2351,11 @@ struct Index {
   }
 
   private refreshLocalTimeline(): void {
+    if (this.localPreviewReady) {
+      this.localTimelineView = new LocalTimelineView();
+      this.stopStageTicker();
+      return;
+    }
     this.localTimelineView = LocalInstallTimeline.present(this.installTasks, this.localJobId, Date.now());
     if (this.localTimelineView.running) this.startStageTicker();
     else this.stopStageTicker();
@@ -2470,8 +2481,9 @@ struct Index {
     this.localMessage = '';
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      const store = await JobStore.open(context);
-      const job = await LocalImport.pickAndImport(context, store);
+      const job = await LocalImport.pickPreview(context);
+      if (this.localPreviewReady) LocalImport.discardPreview(context, this.localInfoJob);
+      this.localPreviewReady = true;
       this.localJobId = job.id;
       this.localInfoJob = job;
       try {
@@ -2479,13 +2491,33 @@ struct Index {
       } catch (_) { this.localFileSize = ''; }
       await this.loadLocalIcon(job);
       this.refreshLocalTimeline();
-      this.localMessage = '已导入 ' + job.bundleName + ' · ' +
-        (job.versionName.length > 0 ? job.versionName : String(job.versionCode)) +
-        '，正在准备安装';
-      await this.loadJobs();
-      await this.continueInstall(job);
+      this.localMessage = '';
     } catch (error) {
       if (!String(error).includes('未选择 HAP')) this.localMessage = String(error);
+    } finally {
+      this.localBusy = false;
+    }
+  }
+
+  private async installLocalPreview(): Promise<void> {
+    if (this.localBusy || !this.localPreviewReady || this.jobRunning(this.localJobId)) return;
+    this.localBusy = true;
+    this.localMessage = '';
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const store = await JobStore.open(context);
+      const job = await LocalImport.commitPreview(context, store, this.localInfoJob);
+      this.localPreviewReady = false;
+      this.localInfoJob = job;
+      if (job.stage !== InstallStage.INSTALLED) {
+        job.stage = InstallStage.QUEUED;
+        await store.save(job);
+      }
+      await this.loadJobs();
+      this.refreshLocalTimeline();
+      this.drainInstallQueue();
+    } catch (error) {
+      this.localMessage = errorText(error);
     } finally {
       this.localBusy = false;
     }
@@ -2883,12 +2915,23 @@ struct Index {
           }.width('100%').alignItems(HorizontalAlign.Center)
             .margin({ bottom: 22 })
 
-          Button(this.localBusy ? '安装进行中…' :
-            (this.localJobId.length > 0 ? '选择其他 HAP 文件' : '选择 HAP 文件'))
+          Button(this.localBusy ? '正在准备…' : (this.localPreviewReady ? '安装' : '选择 HAP 文件'))
             .height(48).enabled(!this.localBusy).width('100%')
             .fontSize(15).fontWeight(FontWeight.Medium)
-            .backgroundColor(this.colors().accent).borderRadius(15)
-            .onClick(() => this.pickLocalHap())
+            .fontColor(this.colors().onAccent).backgroundColor(this.colors().accent).borderRadius(15)
+            .onClick(() => {
+              if (this.localPreviewReady) this.installLocalPreview();
+              else this.pickLocalHap();
+            })
+          if (this.localPreviewReady) {
+            Text('重新选择 HAP').fontSize(12).fontColor(this.colors().accent)
+              .width('100%').textAlign(TextAlign.Center).margin({ top: 12 })
+              .enabled(!this.localBusy).onClick(() => this.pickLocalHap())
+          }
+          if (this.localMessage.length > 0 && !this.localTimelineView.visible) {
+            Text(this.localMessage).fontSize(12).fontColor(this.colors().danger)
+              .width('100%').margin({ top: 12 }).maxLines(3)
+          }
 
         }.alignItems(HorizontalAlign.Start).padding(22)
           .width('100%').backgroundColor(this.colors().surface).borderRadius(22)
@@ -3625,7 +3668,7 @@ struct Index {
       this.currentTab = index;
       // 离开「本地」页就把侧载进度收起来：那是「这一次安装」的过程，装完再回来
       // 还挂着上一次的流程卡片没有意义。清掉选中项，下次导入才会重新出现。
-      if (leavingLocal) this.resetLocalTimeline();
+      if (leavingLocal && !this.localPreviewReady) this.resetLocalTimeline();
       if (index === 2) { this.loadJobs(); this.loadMyApps(); this.loadUpdateCatalog(); }
       if (index === 3) {
         // 设备状态探完再扫「商店已安装」——扫描依赖 connected 与 installedVersion

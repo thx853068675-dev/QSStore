@@ -77,3 +77,23 @@ test('multiple Discover clicks enqueue immediately and install strictly in FIFO 
   await eventually(() => jobs.every(job => job.stage === 'INSTALLED'));
   assert.deepEqual(starts, [1, 2, 3]);
 });
+test('a confirmed local HAP joins FIFO installation without any network download', async () => {
+  const queued = [{ id: 'local:test', appId: 0, sourceUrl: 'local', stage: 'QUEUED',
+    bundleName: 'com.example.local', stageHistory: [{ at: 1 }] },
+  { id: 'online', appId: 1, sourceUrl: 'https://repo/app.hap', stage: 'QUEUED',
+    catalogBundleName: 'com.example.online', stageHistory: [{ at: 2 }] }];
+  const installed = [], downloaded = [];
+  const box = { InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' },
+    LocalBundles: { isSelfBundle: () => false }, getContext: () => ({}), errorText: String,
+    JobStore: { open: async () => ({ listAll: async () => queued,
+      get: async id => queued.find(row => row.id === id) }) },
+    JobScheduler: { runDownload: async (_context, _store, row) => downloaded.push(row.id) } };
+  vm.runInNewContext(code, box);
+  const ui = new box.Page();
+  Object.assign(ui, { queueRecoveryReady: true, queueDraining: false, activeJobId: '',
+    signedIn: true, loadJobs: async () => {},
+    continueInstall: async row => { installed.push(row.id); row.stage = 'INSTALLED'; } });
+  await ui.drainInstallQueue();
+  assert.deepEqual(installed, ['local:test', 'online']);
+  assert.deepEqual(downloaded, ['online']);
+});

@@ -194,6 +194,33 @@ export class InstallTaskState {
     return 0;
   }
 
+  /** 圆环中央仅显示两个字，完整状态仍用于详情按钮和安装记录。 */
+  static compactLabel(row: InstallTaskSnapshot): string {
+    if (row.finishing) return '收尾';
+    switch (row.job.stage) {
+      case InstallStage.QUEUED: return '排队';
+      case InstallStage.DOWNLOADING: return row.running ? '下载' : '续传';
+      case InstallStage.VERIFIED: return '读取';
+      case InstallStage.PACKAGE_INSPECTED: return '授权';
+      case InstallStage.PROFILE_READY: return '签名';
+      case InstallStage.SIGNED:
+      case InstallStage.SIGNATURE_VERIFIED: return '准备';
+      case InstallStage.INSTALLING:
+        if (!row.running) return '确认';
+        if (row.phase === 'transfer') return '传包';
+        if (row.phase === 'verifying') return '核对';
+        return row.phase === 'waiting' || !row.phase ? '接收' : '安装';
+      case InstallStage.INSTALLED: return '完成';
+      case InstallStage.WAITING_DEVICE: return '连接';
+      case InstallStage.WAITING_ACCOUNT: return '登录';
+      case InstallStage.WAITING_CONFIRMATION: return '确认';
+      case InstallStage.WAITING_NETWORK: return '网络';
+      case InstallStage.RETRYABLE_ERROR: return '暂停';
+      case InstallStage.TERMINAL_ERROR: return '失败';
+      default: return '准备';
+    }
+  }
+
   static label(row: InstallTaskSnapshot, now: number = Date.now()): string {
     if (row.finishing) return '正在收尾';
     switch (row.job.stage) {

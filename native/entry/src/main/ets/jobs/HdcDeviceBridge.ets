@@ -15,6 +15,7 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
   private static queue: Promise<void> = Promise.resolve();
   private context: common.UIAbilityContext;
   private connectFailure: string = '';
+  private verifiedUdid: string = '';
 
   constructor(context: common.UIAbilityContext) {
     this.context = context;
@@ -82,10 +83,12 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
   }
 
   private async liveUdid(): Promise<string> {
+    this.verifiedUdid = '';
     const output = await this.command(2);
     const match = /\b[0-9a-fA-F]{40,128}\b/.exec(output);
     const udid = !output.includes('[Fail]') && match ? match[0] : '';
     HdcDeviceBridge.linked = udid.length > 0;
+    this.verifiedUdid = udid;
     return udid;
   }
 
@@ -97,15 +100,19 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
    * 旧端口自动重连只试一次；完整的配对重试留给用户主动点击连接。
    */
   async connected(): Promise<boolean> {
+    return (await this.connectedUdid()).length > 0;
+  }
+
+  private async connectedUdid(): Promise<string> {
     try {
-      if ((await this.liveUdid()).length > 0) return true;
+      const udid = await this.liveUdid();
+      if (udid.length > 0) return udid;
       const port = await this.savedPort();
-      if (port <= 0) return false;
-      return await this.connect(port, false, false);
+      if (port > 0 && await this.connect(port, false, false)) return this.verifiedUdid;
     } catch (_) {
-      HdcDeviceBridge.linked = false;
-      return false;
     }
+    HdcDeviceBridge.linked = false;
+    return '';
   }
 
   connectionFailureMessage(): string { return ConnectionHint.message(this.connectFailure); }
@@ -148,9 +155,8 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
   }
 
   async udid(): Promise<string> {
-    if (!await this.connected()) throw new Error('无线调试尚未连接');
-    const value = await this.liveUdid();
-    if (value.length === 0) throw new Error('无法读取设备 UDID');
+    const value = await this.connectedUdid();
+    if (value.length === 0) throw new Error('无线调试尚未连接');
     return value;
   }
 

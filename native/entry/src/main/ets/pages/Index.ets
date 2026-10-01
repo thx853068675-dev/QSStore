@@ -104,6 +104,18 @@ struct FeaturedCardStars {
     const h = this.ctx.height;
     if (w <= 0 || h <= 0) return;
     this.ctx.clearRect(0, 0, w, h);
+    if (this.tier >= 2) {
+      // 光晕先铺底，再绘制星点；渐变在画布内收敛，不留下圆形轮廓。
+      const glow = this.ctx.createRadialGradient(w * 0.96, h * 0.12, 0,
+        w * 0.96, h * 0.12, Math.max(w * 0.7, h * 1.8));
+      glow.addColorStop(0, this.tier === 3 ? 'rgba(255,225,170,0.20)' :
+        'rgba(223,209,255,0.16)');
+      glow.addColorStop(0.45, this.tier === 3 ? 'rgba(255,225,170,0.07)' :
+        'rgba(223,209,255,0.05)');
+      glow.addColorStop(1, 'rgba(255,255,255,0)');
+      this.ctx.fillStyle = glow;
+      this.ctx.fillRect(0, 0, w, h);
+    }
     const count = this.tier === 3 ? 72 : this.tier === 2 ? 54 : 38;
     const gold = this.tier >= 2;
     for (let i = 0; i < count; i++) {
@@ -117,14 +129,6 @@ struct FeaturedCardStars {
       this.ctx.fillStyle = gold ? 'rgba(255,226,166,' + alpha.toFixed(2) + ')' :
         'rgba(255,255,255,' + alpha.toFixed(2) + ')';
       this.ctx.fill();
-    }
-    if (this.tier >= 2) {
-      this.ctx.beginPath();
-      this.ctx.arc(w * 0.87, h * 0.52, h * 0.58, 0, Math.PI * 2);
-      this.ctx.strokeStyle = this.tier === 3 ? 'rgba(255,221,148,0.36)' :
-        'rgba(234,216,255,0.22)';
-      this.ctx.lineWidth = this.tier === 3 ? 1.5 : 1;
-      this.ctx.stroke();
     }
   }
 
@@ -161,8 +165,6 @@ struct Index {
   @State private localTimelineView: LocalTimelineView = new LocalTimelineView();
   /** 发现页搜索：输入框内容与当前生效的关键词（输入即搜，带防抖）。 */
   @State private searchText: string = '';
-  private discoverScroller: Scroller = new Scroller();
-  @State private discoverHeaderPinned: boolean = false;
   /** 防抖定时器（-1 表示空闲）。 */
   private searchTimer: number = -1;
   /** 目录请求序号：用来丢弃过期响应。 */
@@ -1610,6 +1612,25 @@ struct Index {
     return row === undefined ? '准备中' : InstallTaskState.label(row);
   }
 
+  private indicatorTask(appId: number, bundleName: string, jobId: string): InstallTaskSnapshot | undefined {
+    return jobId.length > 0 ? this.installTasks.find((row: InstallTaskSnapshot) => row.job.id === jobId) :
+      this.taskForApp(appId, bundleName);
+  }
+
+  private indicatorDeterminate(appId: number, bundleName: string, jobId: string): boolean {
+    const row = this.indicatorTask(appId, bundleName, jobId);
+    return row !== undefined && row.running && InstallTaskState.determinate(row);
+  }
+
+  private indicatorPercent(appId: number, bundleName: string, jobId: string): number {
+    return this.indicatorTask(appId, bundleName, jobId)?.percent ?? 0;
+  }
+
+  private indicatorLabel(appId: number, bundleName: string, jobId: string): string {
+    const row = this.indicatorTask(appId, bundleName, jobId);
+    return row === undefined ? '准备' : InstallTaskState.compactLabel(row);
+  }
+
   private jobRunning(id: string): boolean {
     return this.installTasks.find((row: InstallTaskSnapshot) => row.job.id === id)?.running ?? false;
   }
@@ -1821,49 +1842,67 @@ struct Index {
    * 因此卡片上的「安装 / 打开」按钮能立刻画出来，不用等任何网络或设备查询。
    */
   /**
-   * 目录卡片右侧的动作按钮。
-   *
-   * 未安装给「安装」，装过且目录里有更新给「更新」，其余给「打开」—— 已装的
-   * 应用不会再出现「安装」，避免重复装一遍。按钮自己就是进度显示。
+   * 发现和管理共用细圆环；无法精确计量的阶段使用活动指示。
    */
+  @Builder
+  private taskIndicator(appId: number, bundleName: string, jobId: string,
+    featured: boolean = false, size: number = 48) {
+    // 用稳定任务 ID 读取实时快照，避免列表复用时保留旧进度。
+    Stack({ alignContent: Alignment.Center }) {
+      if (this.indicatorDeterminate(appId, bundleName, jobId)) {
+        Progress({ value: this.indicatorPercent(appId, bundleName, jobId), total: 100, type: ProgressType.Ring })
+          .width(size).height(size).color(featured ? '#FFFFFF' : this.colors().accent)
+          .backgroundColor(featured ? '#38FFFFFF' : this.colors().border)
+          .style({ strokeWidth: 2.5, enableSmoothEffect: true })
+      } else {
+        Progress({ value: 0, total: 100, type: ProgressType.Ring })
+          .width(size).height(size).color(featured ? '#FFFFFF' : this.colors().accent)
+          .backgroundColor(featured ? '#38FFFFFF' : this.colors().border)
+          .style({ strokeWidth: 2.5, status: this.indicatorTask(appId, bundleName, jobId) === undefined ||
+            this.indicatorTask(appId, bundleName, jobId)?.running ? ProgressStatus.LOADING : ProgressStatus.PROGRESSING })
+      }
+      Text(this.indicatorLabel(appId, bundleName, jobId)).fontSize(11).fontWeight(FontWeight.Medium)
+        .fontColor(featured ? '#FFFFFF' : this.colors().accent).maxLines(1)
+    }.width(size).height(size)
+  }
+
   @Builder
   private catalogCardAction(app: CatalogApp, featured: boolean = false) {
     Column() {
       if (this.taskPending(app.id, app.latestAsset?.bundleName ?? '')) {
-        Button(this.taskLabel(app.id, app.latestAsset?.bundleName ?? ''))
-          .width(94).height(38).padding({ left: 6, right: 6 }).fontSize(11)
-          .fontColor(featured ? '#192856' : this.colors().accent)
-          .backgroundColor(featured ? '#FFE5A7' : this.colors().accentSoft).borderRadius(12)
+        Column() {
+          this.taskIndicator(app.id, app.latestAsset?.bundleName ?? '', '', featured)
+        }.width(74).padding({ top: 2, bottom: 2 })
           .onClick(() => { this.currentTab = Index.TAB_MANAGE; })
       } else if (this.enqueuingAppIds.includes(app.id)) {
-        LoadingProgress().width(24).height(24)
+        Column() { this.taskIndicator(app.id, app.latestAsset?.bundleName ?? '', '', featured) }.width(74)
       } else if (this.installedBundleOf(app.id).length > 0) {
         if (this.updateForApp(app.id) !== undefined) {
           Button('更新')
             .width(74).height(38).fontSize(13)
-            .fontColor(featured ? '#192856' : this.colors().onAccent)
-            .backgroundColor(featured ? '#FFE5A7' : this.colors().accent).borderRadius(12)
+            .fontColor(featured ? '#25448A' : this.colors().onAccent)
+            .backgroundColor(featured ? '#F0FFFFFF' : this.colors().accent).borderRadius(19)
             .onClick(() => this.installFromCatalog(app))
         } else {
           Button('打开')
             .width(74).height(38).fontSize(13)
-            .fontColor(featured ? '#192856' : this.colors().accent)
-            .backgroundColor(featured ? '#FFE5A7' : this.colors().accentSoft)
-            .borderRadius(12)
+            .fontColor(featured ? '#25448A' : this.colors().accent)
+            .backgroundColor(featured ? '#F0FFFFFF' : this.colors().accentSoft)
+            .borderRadius(19)
             .onClick(() => this.openCatalogApp(app))
         }
       } else if (this.installedVersionOf(app.id) < 0) {
         // 权限不足且无线调试未连接时，状态无法核实；不能让用户永远卡在检查按钮。
         // 允许先下载并准备任务，设备连接在真正需要授权/安装时再处理。
         Button('安装/更新').width(94).height(38).fontSize(12)
-          .fontColor(featured ? '#192856' : this.colors().onAccent)
-          .backgroundColor(featured ? '#FFE5A7' : this.colors().accent).borderRadius(12)
+          .fontColor(featured ? '#25448A' : this.colors().onAccent)
+          .backgroundColor(featured ? '#F0FFFFFF' : this.colors().accent).borderRadius(19)
           .onClick(() => this.installFromCatalog(app))
       } else {
         Button('安装')
           .width(74).height(38).fontSize(13)
-          .fontColor(featured ? '#192856' : this.colors().onAccent)
-          .backgroundColor(featured ? '#FFE5A7' : this.colors().accent).borderRadius(12)
+          .fontColor(featured ? '#25448A' : this.colors().onAccent)
+          .backgroundColor(featured ? '#F0FFFFFF' : this.colors().accent).borderRadius(19)
           .onClick(() => this.installFromCatalog(app))
       }
     }
@@ -2652,24 +2691,7 @@ struct Index {
   @Builder
   private discoverSearchHeader() {
     Stack({ alignContent: Alignment.Top }) {
-      // 顶部用不透明页面底色遮住滚动内容，下半段连同模糊逐渐消退。
-      Stack() {
-        Column().width('100%').height(82)
-          .backgroundColor(this.colors().bg)
-          .backgroundBlurStyle(BlurStyle.Thick, { colorMode: ThemeColorMode.SYSTEM })
-        Column().width('100%').height(82)
-          .linearGradient({ direction: GradientDirection.Bottom, colors: [['#FFFFFFFF', 0],
-            ['#FFFFFFFF', 0.56], ['#80FFFFFF', 0.78], ['#00FFFFFF', 1]] })
-          .blendMode(BlendMode.DST_IN)
-        // 原生磨砂材质自身有透明度，再叠实色渐变保证顶部完全遮挡。
-        Column().width('100%').height(82)
-          .linearGradient({ direction: GradientDirection.Bottom,
-            colors: [[this.colors().bg, 0], [this.colors().bg, 0.56], ['#00000000', 1]] })
-      }.width('100%').height(82)
-        .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
-        .opacity(this.discoverHeaderPinned ? 1 : 0)
-        .animation({ duration: 180, curve: Curve.EaseOut })
-        .hitTestBehavior(HitTestMode.None)
+      // 只保留悬浮搜索框，不为整条吸顶区域绘制背景或阴影。
       Row({ space: 8 }) {
         SymbolGlyph($r('sys.symbol.magnifyingglass')).fontSize(17)
           .fontColor([this.colors().textSecondary])
@@ -2686,7 +2708,7 @@ struct Index {
             .onClick(() => this.clearSearch())
         }
       }.width('calc(100% - 48vp)').height(46).padding({ left: 13, right: 7 })
-        .backgroundColor(this.darkMode ? '#DF1B2638' : '#EDEDF1F7')
+        .backgroundColor(this.colors().surface)
         .border({ width: 0.5, color: this.colors().border }).borderRadius(15)
         .margin({ top: 8 })
     }.width('100%').height(70)
@@ -2698,7 +2720,7 @@ struct Index {
       // Refresh 放在最外层：嵌在 if/else 里时下拉手势不会被它接管。
       // 加载态与错误态改为列表项，列表本身始终存在。
       Refresh({ refreshing: $$this.catalogRefreshing }) {
-        List({ space: 0, scroller: this.discoverScroller }) {
+        List({ space: 0 }) {
             // 大标题随列表滚出，搜索框由 ListItemGroup 的 header 原生吸顶。
             ListItem() {
               Row() {
@@ -2881,10 +2903,6 @@ struct Index {
             }
         }.width('100%')
           .sticky(StickyStyle.Header)
-          .onDidScroll(() => {
-            const pinned = this.discoverScroller.currentOffset().yOffset >= 86;
-            if (pinned !== this.discoverHeaderPinned) this.discoverHeaderPinned = pinned;
-          })
           .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
           .onReachEnd(() => this.loadMoreApps())
         }
@@ -3031,8 +3049,12 @@ struct Index {
                 Column({ space: 5 }) {
                   Text(this.jobTitle(job)).fontSize(14).fontWeight(FontWeight.Medium)
                     .fontColor(this.colors().text).maxLines(1)
-                  Text('版本 ' + this.versionLabel(job) + ' · ' + this.taskJobLabel(job))
-                    .fontSize(11).fontColor(this.colors().accent).maxLines(2)
+                  Text('版本 ' + this.versionLabel(job))
+                    .fontSize(10).fontColor(this.colors().textTertiary).maxLines(1)
+                  if (job.stage === InstallStage.QUEUED) {
+                    Text(this.taskJobLabel(job)).fontSize(10)
+                      .fontColor(this.colors().textSecondary).maxLines(1)
+                  }
                   if (!this.jobRunning(job.id) && job.lastError.length > 0) {
                     Text(job.lastError).fontSize(11).fontColor(this.colors().textTertiary).maxLines(2)
                   }
@@ -3041,6 +3063,7 @@ struct Index {
                       .fontSize(10).fontColor(this.colors().textTertiary).maxLines(2)
                   }
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+                this.taskIndicator(0, '', job.id)
                 Column({ space: 7 }) {
                   if (!this.jobRunning(job.id) && job.stage !== InstallStage.QUEUED) {
                     Button('继续安装').height(31).fontSize(11).fontColor(this.colors().onAccent)
@@ -3182,9 +3205,12 @@ struct Index {
                       .maxLines(2)
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                     .onClick(() => this.openJobDetails(job))
-                  if (this.updateFor(job.bundleName) !== undefined) {
-                    Button(this.taskPending(this.updateFor(job.bundleName)?.appId ?? 0,
-                      job.bundleName) ? '已加入队列' : '更新')
+                  if (this.taskPending(this.updateFor(job.bundleName)?.appId ?? job.appId, job.bundleName)) {
+                    Column() {
+                      this.taskIndicator(this.updateFor(job.bundleName)?.appId ?? job.appId, job.bundleName, '')
+                    }.width(74)
+                  } else if (this.updateFor(job.bundleName) !== undefined) {
+                    Button('更新')
                       .height(34).fontSize(12).fontColor(this.colors().onAccent)
                       .backgroundColor(this.colors().accent).borderRadius(11)
                       .onClick(() => {

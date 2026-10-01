@@ -65,3 +65,23 @@ test('automatic reconnect tries the saved port once and then waits for a new por
   assert.equal(f.Bridge.deviceLinked(), false);
   assert.deepEqual(f.calls.map(row => row[0]), [2, 'disconnect', 1, 2]);
 });
+
+test('requesting a live UDID uses one verified probe rather than probing twice', async () => {
+  const f = fixture(['udid of current device is :\n' + UDID]);
+  assert.equal(await f.bridge.udid(), UDID);
+  assert.deepEqual(f.calls.map(row => row[0]), [2]);
+});
+
+test('UDID recovery returns the identity verified by the new connection', async () => {
+  const f = fixture(['[Fail] disconnected', '[Info] connected',
+    'udid of current device is :\n' + UDID], 5555);
+  assert.equal(await f.bridge.udid(), UDID);
+  assert.deepEqual(f.calls.map(row => row[0]), [2, 'disconnect', 1, 2]);
+});
+
+test('a former successful UDID must not be returned after the link is lost', async () => {
+  const f = fixture(['udid of current device is :\n' + UDID, new Error('offline')]);
+  assert.equal(await f.bridge.udid(), UDID);
+  await assert.rejects(() => f.bridge.udid(), /尚未连接/);
+  assert.equal(f.Bridge.deviceLinked(), false);
+});

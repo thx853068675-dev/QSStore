@@ -57,7 +57,27 @@ const GRANTABLE_ACLS: string[] = [
   'ohos.permission.CRYPTO_EXTENSION_REGISTER'
 ];
 
+class DeviceRegistration {
+  ids: string[] = [];
+  verifiedAt: number = 0;
+}
+
 export class AgcProfile {
+  private static registrations: Map<string, DeviceRegistration> = new Map();
+  private static readonly REGISTRATION_TTL_MS: number = 10 * 60 * 1000;
+
+  private static async registeredDeviceIds(agc: AgcClient, udid: string): Promise<string[]> {
+    let devices = await agc.devices();
+    if (!devices.some((item: Record<string, Object>) => String(item['udid'] ?? '') === udid)) {
+      await agc.registerDevice(udid);
+      devices = await agc.devices();
+    }
+    const ids = devices.filter((item: Record<string, Object>) =>
+      String(item['udid'] ?? '') === udid).map((item: Record<string, Object>) =>
+      String(item['id'] ?? '')).filter((id: string) => id.length > 0).sort();
+    if (ids.length === 0) throw new Error('AGC 设备登记尚未生效');
+    return ids;
+  }
   private static async fingerprintOfPem(pem: string): Promise<string> {
     const match = /-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\s]+)-----END CERTIFICATE-----/.exec(pem);
     if (!match) throw new Error('签名证书格式无效');
@@ -133,26 +153,40 @@ export class AgcProfile {
     if (AgcProfile.valid(path, bundleName, udid, identity.certificatePath, acls)) return path;
 
     const agc = new AgcClient(account);
-    let devices = await agc.devices();
-    if (!devices.some((item: Record<string, Object>) => String(item['udid'] ?? '') === udid)) {
-      await agc.registerDevice(udid);
-      devices = await agc.devices();
-    }
-    const ids = devices.filter((item: Record<string, Object>) =>
-      String(item['udid'] ?? '') === udid).map((item: Record<string, Object>) =>
-      String(item['id'] ?? '')).filter((id: string) => id.length > 0);
-    if (ids.length === 0) throw new Error('AGC 设备登记尚未生效');
+    // 仅缓存已成功签发并核验过授权的设备登记，账号、团队和 UDID 必须一致。
+    const key = JSON.stringify([context.filesDir, account.userId, account.teamId, udid]);
+    const saved = AgcProfile.registrations.get(key);
+    const cached = saved !== undefined && Date.now() >= saved.verifiedAt &&
+      Date.now() - saved.verifiedAt < AgcProfile.REGISTRATION_TTL_MS;
+    let ids = cached && saved !== undefined ? saved.ids : await AgcProfile.registeredDeviceIds(agc, udid);
     const name = ('qingqi-' + bundleName + '-' + udid.substring(0, 8)).substring(0, 64);
-    const url = await agc.createProfile(name, identity.certId, ids, acls, bundleName);
-    const bytes = await agc.download(url);
     const temporary = path + '.part';
     try {
+      let url = '';
+      try { url = await agc.createProfile(name, identity.certId, ids, acls, bundleName); }
+      catch (error) {
+        if (!cached) throw error instanceof Error ? error : new Error(String(error));
+        AgcProfile.registrations.delete(key);
+        const fresh = await AgcProfile.registeredDeviceIds(agc, udid);
+        // 设备登记确实变化才重试签发；证书或权限错误不能反复申请。
+        if (fresh.join(',') === ids.join(',')) throw error instanceof Error ? error : new Error(String(error));
+        ids = fresh;
+        url = await agc.createProfile(name, identity.certId, ids, acls, bundleName);
+      }
+      const bytes = await agc.download(url);
       SigningIdentityRecovery.writeFile(temporary, bytes);
       if (!AgcProfile.valid(temporary, bundleName, udid, identity.certificatePath, acls)) {
         throw new Error('AGC 返回的设备授权与应用、设备或证书不匹配');
       }
       fileIo.renameSync(temporary, path);
+      const registration = new DeviceRegistration();
+      registration.ids = ids.slice(); registration.verifiedAt = Date.now();
+      if (AgcProfile.registrations.size >= 8) AgcProfile.registrations.clear();
+      AgcProfile.registrations.set(key, registration);
       return path;
+    } catch (error) {
+      AgcProfile.registrations.delete(key);
+      throw error instanceof Error ? error : new Error(String(error));
     } finally {
       if (fileIo.accessSync(temporary)) fileIo.unlinkSync(temporary);
     }

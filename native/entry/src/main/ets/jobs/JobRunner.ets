@@ -171,7 +171,7 @@ export class JobRunner {
    * 安装是异步落盘的，自己更新自己时旧进程还在跑，窗口更长。只查一次就判定
    * 失败会导致「明明装好了却报没确认」，用户要再点一次。
    *
-   * 这里给一个有限的等待：每次间隔 [PROBE_INTERVAL_MS]，最多等
+   * 先按 250/500/1000ms 检查，再退避到 [PROBE_INTERVAL_MS]，最多等
    * [PROBE_TOTAL_MS]；链路查询失败时保留原始失败类型，不把查询错误
    * 误报成「设备尚未确认」或盲目重新安装。
    */
@@ -180,6 +180,7 @@ export class JobRunner {
 
   private async confirmInstalledVersion(job: InstallJob): Promise<boolean> {
     const deadline = Date.now() + JobRunner.PROBE_TOTAL_MS;
+    let interval = 250;
     for (;;) {
       JobCancellation.assertActive(job.id);
       let current = -1;
@@ -193,7 +194,8 @@ export class JobRunner {
       if (current === job.versionCode) return true;
       if (Date.now() >= deadline) return false;
       await new Promise<void>((resolve) =>
-        setTimeout(resolve, JobRunner.PROBE_INTERVAL_MS));
+        setTimeout(resolve, Math.min(interval, Math.max(0, deadline - Date.now()))));
+      interval = Math.min(interval * 2, JobRunner.PROBE_INTERVAL_MS);
     }
   }
 }

@@ -27,6 +27,8 @@ import { ColorTint } from '../theme/ColorTint';
 struct Detail {
   @StorageProp('darkMode') @Watch('syncPalette') darkMode: boolean = false;
   @StorageProp('statusBarInset') statusBarInset: number = 0;
+  private detailScroller: Scroller = new Scroller();
+  @State private detailTopBlurOpacity: number = 0;
   @State private app: CatalogApp = new CatalogApp();
   @State private appIcon: image.PixelMap | null = null;
   /** 头部卡片底色：由图标主色调推导，取不到时用主题默认值。 */
@@ -183,7 +185,12 @@ struct Detail {
 
   private syncInstallTask(): void {
     const row = this.currentInstallTask();
-    if (row === undefined) return;
+    if (row === undefined) {
+      this.activeInstallId = '';
+      this.downloadBusy = false;
+      this.downloadPercent = 0;
+      return;
+    }
     this.activeInstallId = row.job.id;
     this.downloadBusy = row.running;
     this.downloadPercent = row.percent;
@@ -512,6 +519,7 @@ struct Detail {
     }
     this.selectedReleaseIndex = chosenIndex;
     this.selectedAsset = chosen;
+    this.syncInstallTask();
   }
 
   private async restoreAccount(): Promise<void> {
@@ -528,6 +536,7 @@ struct Detail {
     const release = this.releases[index];
     this.selectedAsset = release && release.assets.length > 0 ? release.assets[0] : new HapAsset();
     this.expandedReleaseTag = '';
+    this.syncInstallTask();
     // 换了附件就可能换了包名，按钮状态要跟着重算
     this.refreshInstalledVersion();
   }
@@ -765,6 +774,10 @@ struct Detail {
       const store = await JobStore.open(context);
       const job = await store.enqueue(this.app.id, asset.name, asset.url,
         asset.sha256, asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode);
+      if (job.stage === InstallStage.QUEUED && JobScheduler.requestQueue()) {
+        this.notify('已加入安装队列，可继续选择其他安装包');
+        return;
+      }
       if (job.stage === InstallStage.QUEUED || job.stage === InstallStage.DOWNLOADING ||
         job.stage === InstallStage.WAITING_NETWORK) {
         await JobScheduler.runDownload(context, store, job);
@@ -887,9 +900,23 @@ struct Detail {
     this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, change);
   }
 
-  build() {
-    Stack({ alignContent: Alignment.Center }) {
-    Column() {
+  @Builder
+  private detailHeader() {
+    Stack({ alignContent: Alignment.Top }) {
+      // 与发现页相同的渐变磨砂；背景随滚动显现，标题和返回键始终保持清晰。
+      Stack() {
+        Column().width('100%').height('100%')
+          .linearGradient({ angle: 180, colors: [
+            ['#FFFFFFFF', 0], ['#EFFFFFFF', 0.4], ['#66FFFFFF', 0.76], ['#00FFFFFF', 1]
+          ] })
+          .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
+      }.width('100%').height(this.statusBarInset + 90)
+        .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
+        .backgroundBlurStyle(BlurStyle.COMPONENT_THIN, {
+          colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT
+        })
+        .opacity(this.detailTopBlurOpacity)
+        .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
       Row() {
         StoreIconButton({ symbol: $r('sys.symbol.chevron_left'), label: '返回',
           action: () => router.back() })
@@ -897,14 +924,20 @@ struct Detail {
           .fontColor(this.colors().text)
       }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + 40 })
         .padding({ left: 16, right: 20, top: 6 + this.statusBarInset, bottom: 8 })
+    }.width('100%').height(this.statusBarInset + 58).position({ x: 0, y: 0 })
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.Center }) {
+    Column() {
       if (this.error.length > 0) {
         Text('无法读取应用详情').fontSize(15).fontColor(this.colors().textSecondary)
-          .margin({ top: 28 })
+          .margin({ top: this.statusBarInset + 86 })
       } else if (!this.loaded) {
-        LoadingProgress().width(30).height(30).margin({ top: 36 })
+        LoadingProgress().width(30).height(30).margin({ top: this.statusBarInset + 94 })
       } else {
         Stack({ alignContent: Alignment.Bottom }) {
-          Scroll() {
+          Scroll(this.detailScroller) {
             Column({ space: 20 }) {
               Column({ space: 17 }) {
                 Row({ space: 16 }) {
@@ -1030,7 +1063,7 @@ struct Detail {
                       .backgroundColor(this.selectedAsset.url === asset.url &&
                         this.selectedAsset.name === asset.name ? this.colors().accentSoft : this.colors().fill)
                       .borderRadius(10)
-                      .onClick(() => { this.selectedAsset = asset; })
+                      .onClick(() => { this.selectedAsset = asset; this.syncInstallTask(); this.refreshInstalledVersion(); })
                   }, (asset: HapAsset) => asset.name)
                   }
                   // 版本按服务端分页续取，避免只看到第一页就以为没有旧版本。
@@ -1175,18 +1208,23 @@ struct Detail {
                   .backgroundColor(this.colors().surface).borderRadius(17)
               }
             }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + 40 })
-              .padding({ left: 20, right: 20, top: 10, bottom: 115 })
+              .padding({ left: 20, right: 20, top: this.statusBarInset + 68, bottom: 115 })
           }.width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Off)
+            .onDidScroll(() => {
+              this.detailTopBlurOpacity = Math.min(1, Math.max(0,
+                this.detailScroller.currentOffset().yOffset / 32));
+            })
           Column({ space: 7 }) {
             // 有计数时用原生平滑填充，其余阶段只在底边显示细流光，主体与文案保持稳定。
             Button({ type: ButtonType.Normal }) {
               Stack({ alignContent: Alignment.Center }) {
                 if (this.downloadBusy && this.installProgressDeterminate()) {
-                  Progress({ value: this.downloadPercent, total: 100, type: ProgressType.Capsule })
+                  // 填充层不单独画胶囊圆角，统一由外层按钮的 18vp 圆角裁切。
+                  Progress({ value: this.downloadPercent, total: 100, type: ProgressType.Linear })
                     .width('100%').height(52)
                     .color('#30FFFFFF').backgroundColor('#00000000')
-                    .style({ borderWidth: 0, borderColor: '#00000000',
-                      showDefaultPercentage: false, enableScanEffect: false, enableSmoothEffect: true })
+                    .style({ strokeWidth: 52, strokeRadius: 0,
+                      enableScanEffect: false, enableSmoothEffect: true })
                     .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
                 }
                 if (this.downloadBusy && !this.installProgressDeterminate()) {
@@ -1235,6 +1273,7 @@ struct Detail {
         }.layoutWeight(1).width('100%')
       }
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
+    this.detailHeader()
     if (this.showReconnect) {
       Column() { this.reconnectSheet() }
         .height('100%').width('100%').justifyContent(FlexAlign.Center)

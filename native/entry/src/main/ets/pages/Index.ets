@@ -20,7 +20,7 @@ import { retryDelayMs } from '../jobs/RecoveryPlanner';
 import { LocalImport } from '../jobs/LocalImport';
 import { LocalBundles } from '../jobs/LocalBundles';
 import { InstalledAppRegistry } from '../jobs/InstalledAppRegistry';
-import { iconReference, readIconBytes } from '../jobs/PackageInspector';
+import { PackageArchive } from '../jobs/PackageArchive';
 import { CatalogApp } from '../data/CatalogApp';
 import { CatalogCache, CachedIcon } from '../data/CatalogCache';
 import { ReleaseInfo, HapAsset } from '../data/ReleaseInfo';
@@ -200,6 +200,7 @@ struct Index {
   @State private localInfoJob: InstallJob = new InstallJob();
   @State private localFileSize: string = '';
   @State private localPreviewReady: boolean = false;
+  @State private localChoices: InstallJob[] = [];
   @State private cancellingJobs: string[] = [];
   @State private apps: CatalogApp[] = [];
   @State private appIcons: AppIcon[] = [];
@@ -237,7 +238,8 @@ struct Index {
   @State private showSubmit: boolean = false;
   @State private submitUrl: string = '';
   @State private submitDraft: SubmitDraft = new SubmitDraft();
-  @State private submitAsset: string = '';
+  private submitGeneration: number = 0;
+  @State private submitAssets: string[] = [];
   @State private submitCategory: string = '';
   /** 分类滑动选择器的选中下标，与 submitCategory 同步。 */
   @State private submitCategoryIndex: number = 0;
@@ -305,6 +307,7 @@ struct Index {
   }
 
   aboutToAppear(): void {
+    JobScheduler.setQueueWakeup(() => { this.drainInstallQueue(); });
     this.observeReconnect();
     this.observeInstallTasks();
     InstalledAppRegistry.load(getContext(this) as common.UIAbilityContext)
@@ -342,6 +345,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    JobScheduler.setQueueWakeup(undefined);
     if (this.localPreviewReady) this.resetLocalTimeline();
     InstallReconnect.unsubscribe(this.reconnectSubscription);
     this.reconnectSubscription = -1;
@@ -1137,8 +1141,7 @@ struct Index {
     if (this.localIcons.some((entry: LocalIcon) => entry.jobId === job.id)) return;
     try {
       // 清单只解析一次，之后按引用直接取图标字节
-      const reference = iconReference(job.cachePath);
-      const bytes = readIconBytes(job.cachePath, reference);
+      const bytes = await PackageArchive.icon(job.cachePath);
       if (bytes === undefined) return;
       const source = image.createImageSource(bytes);
       try {
@@ -1213,7 +1216,7 @@ struct Index {
     // 得到 2026092902 这种看着像日期的数字，所以依次退两步。
     const app = this.catalogForJob(job);
     if (app !== undefined) {
-      const direct = app.latestAsset;
+      const direct = this.assetForBundle(app, job.bundleName, job.assetName);
       if (direct !== undefined && direct.versionCode === job.versionCode &&
         direct.versionName.length > 0) {
         return direct.versionName;
@@ -1240,7 +1243,7 @@ struct Index {
     if (update === undefined) {
       const ambiguous = job.appId === 0 && job.bundleName.length > 0 &&
         this.updateApps().filter((app: CatalogApp) =>
-          app.latestAsset?.bundleName === job.bundleName).length > 1;
+          this.latestAssets(app).some((asset: HapAsset) => asset.bundleName === job.bundleName)).length > 1;
       return '版本 ' + this.versionLabel(job) +
         (ambiguous ? ' · 存在多个同包名来源，请从发现页选择' : '');
     }
@@ -1333,32 +1336,46 @@ struct Index {
   }
 
   private async prepareSubmit(): Promise<void> {
+    const generation = ++this.submitGeneration;
     if (!this.signedIn) {
       this.submitMessage = '请先在「我的」登录华为开发者账号';
       return;
     }
     this.submitBusy = true;
-    this.submitMessage = '正在检查 Release 中的 HAP…';
+    this.submitMessage = '正在检查安装包…';
     try {
       const context = getContext(this) as common.UIAbilityContext;
       // 上架前先刷新一次自己的上架列表，否则刚上架/刚删除的判断会用到旧数据。
       try { this.myApps = await new StoreClient(context).myApps(this.account); } catch (_) {}
-      this.submitDraft = await new StoreClient(context).prepareSubmit(this.submitUrl.trim(),
-        this.account);
-      this.submitAsset = this.submitDraft.choices.length > 0 ? this.submitDraft.choices[0].name : '';
+      if (generation !== this.submitGeneration || !this.showSubmit) return;
+      const draft = await new StoreClient(context).prepareSubmit(this.submitUrl.trim(), this.account);
+      if (generation !== this.submitGeneration || !this.showSubmit) return;
+      this.submitDraft = draft;
+      const deadline = Date.now() + 300000;
+      while (this.submitDraft.inspectionStatus !== 'ready') {
+        this.submitMessage = '正在后台解压并检查 APP / HAP 清单…';
+        await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+        if (generation !== this.submitGeneration || !this.showSubmit) return;
+        if (Date.now() > deadline) throw new Error('安装包仍在后台检查，可稍后再次检查仓库');
+        const status = await new StoreClient(context).submitStatus(this.submitDraft, this.account);
+        if (generation !== this.submitGeneration || !this.showSubmit) return;
+        this.submitDraft = status;
+      }
+      this.submitAssets = this.submitDraft.choices.length > 0 ? [this.submitDraft.choices[0].name] : [];
       const categories = this.submitDraft.categories;
       this.submitCategory = this.submitDraft.suggestedCategory;
       const index = categories.indexOf(this.submitCategory);
       this.submitCategoryIndex = index >= 0 ? index : 0;
       this.submitCategory = categories.length > 0 ? categories[this.submitCategoryIndex] : '';
       this.classifySubmitRepo(this.submitDraft);
-      this.submitMessage = this.submitDraft.choices.length + ' 个 HAP 已检查，请确认上架内容';
+      this.submitMessage = this.submitDraft.choices.length + ' 个安装包可选择，请确认上架内容';
     } catch (error) {
+      if (generation !== this.submitGeneration || !this.showSubmit) return;
       this.submitDraft = new SubmitDraft();
       this.submitExisting = Index.SUBMIT_STATE_NEW;
       this.submitMessage = errorText(error);
     } finally {
-      this.submitBusy = false;
+      if (generation === this.submitGeneration) this.submitBusy = false;
     }
   }
 
@@ -1372,7 +1389,7 @@ struct Index {
       '正在更新已上架的应用…' : '正在上架…';
     try {
       const app = await new StoreClient(getContext(this) as common.UIAbilityContext)
-        .confirmSubmit(this.submitDraft, this.submitAsset, this.submitCategory, this.account);
+        .confirmSubmit(this.submitDraft, this.submitAssets, this.submitCategory, this.account);
       const wasUpdate = this.submitExisting === Index.SUBMIT_STATE_MINE;
       this.animateOverlay(() => { this.showSubmit = false; });
       this.submitDraft = new SubmitDraft();
@@ -1598,11 +1615,17 @@ struct Index {
         this.refreshCatalogInstallState();
         this.checkInstalledUpdates();
       }
+      if (this.queueRecoveryReady && this.signedIn && rows.some((row: InstallTaskSnapshot) =>
+        row.job.stage === InstallStage.QUEUED) && !rows.some((row: InstallTaskSnapshot) => row.running)) {
+        this.drainInstallQueue();
+      }
     });
   }
 
   private taskForApp(appId: number, bundleName: string = ''): InstallTaskSnapshot | undefined {
-    const asset = this.catalogApp(appId)?.latestAsset;
+    const app = this.catalogApp(appId);
+    const asset = app === undefined ? undefined : (bundleName.length > 0 ?
+      this.assetForBundle(app, bundleName) : app.latestAsset);
     if (asset !== undefined) {
       return InstallTaskState.forAsset(this.installTasks, appId, asset.bundleName,
         asset.name, asset.sha256, asset.versionCode);
@@ -1671,6 +1694,10 @@ struct Index {
     if (this.localPreviewReady) {
       try { LocalImport.discardPreview(getContext(this) as common.UIAbilityContext, this.localInfoJob); } catch (_) {}
     }
+    this.localChoices.forEach((old: InstallJob) => {
+      try { LocalImport.discardPreview(getContext(this) as common.UIAbilityContext, old); } catch (_) {}
+    });
+    this.localChoices = [];
     this.localPreviewReady = false;
     this.localJobId = '';
     this.localInfoJob = new InstallJob();
@@ -1700,7 +1727,8 @@ struct Index {
 
   /** 只自动处理排队项；需要用户连接、确认或手动重试的任务保持原状态。 */
   private async drainInstallQueue(): Promise<void> {
-    if (!this.queueRecoveryReady || this.queueDraining || this.activeJobId.length > 0) return;
+    if (!this.queueRecoveryReady || this.queueDraining || this.activeJobId.length > 0 ||
+      JobScheduler.runningJobIds().length > 0) return;
     this.queueDraining = true;
     try {
       const context = getContext(this) as common.UIAbilityContext;
@@ -1967,6 +1995,7 @@ struct Index {
 
   /** 上架入口统一在这里：发现页原来那个 ＋ 已改成搜索。 */
   private openSubmitSheet(): void {
+    this.submitGeneration++;
     if (!this.signedIn) {
       this.jobsError = '上架需要先登录华为开发者账号，已切到「我的」';
       this.currentTab = Index.TAB_MINE;
@@ -1979,7 +2008,7 @@ struct Index {
     this.submitExistingName = '';
     this.submitCategory = '';
     this.submitCategoryIndex = 0;
-    this.submitAsset = '';
+    this.submitAssets = [];
     this.animateOverlay(() => { this.showSubmit = true; });
   }
 
@@ -2050,6 +2079,11 @@ struct Index {
     const next = new Map<number, number>();
     const unresolved: string[] = [];
     for (const app of this.updateApps()) {
+      for (const candidate of this.latestAssets(app)) {
+        if (candidate.bundleName.length > 0 && (rescanInstalled ||
+          !LocalBundles.isKnown(LocalBundles.installedVersion(candidate.bundleName))) &&
+          !unresolved.includes(candidate.bundleName)) unresolved.push(candidate.bundleName);
+      }
       const asset = app.latestAsset;
       if (asset === undefined || asset.bundleName.length === 0) continue;
       const version = LocalBundles.installedVersion(asset.bundleName);
@@ -2138,19 +2172,23 @@ struct Index {
     const found: InstallJob[] = [];
     const seen = new Set<string>();
     for (const app of this.updateApps()) {
-      const asset = app.latestAsset;
-      if (asset === undefined || seen.has(asset.bundleName)) continue;
-      const version = this.installedVersions.get(app.id) ?? -1;
-      if (version <= 0) continue;
-      seen.add(asset.bundleName);
-      const job = new InstallJob();
-      job.id = 'store-' + app.id + '-' + asset.bundleName;
-      job.appId = app.id;
-      job.bundleName = asset.bundleName;
-      job.versionCode = version;
-      job.versionName = version === asset.versionCode ? asset.versionName : '';
-      job.stage = InstallStage.INSTALLED;
-      found.push(job);
+      for (const asset of this.latestAssets(app)) {
+        if (asset.bundleName.length === 0 || seen.has(asset.bundleName)) continue;
+        const detected = LocalBundles.installedVersion(asset.bundleName);
+        const version = LocalBundles.isKnown(detected) ? detected :
+          (app.latestAsset?.bundleName === asset.bundleName ? this.installedVersions.get(app.id) ?? -1 : -1);
+        if (version <= 0) continue;
+        seen.add(asset.bundleName);
+        const job = new InstallJob();
+        job.id = 'store-' + app.id + '-' + asset.bundleName;
+        job.appId = app.id;
+        job.bundleName = asset.bundleName;
+        job.assetName = asset.name;
+        job.versionCode = version;
+        job.versionName = version === asset.versionCode ? asset.versionName : '';
+        job.stage = InstallStage.INSTALLED;
+        found.push(job);
+      }
     }
     this.storeInstalled = found;
   }
@@ -2191,11 +2229,24 @@ struct Index {
       (management.latestAsset?.versionCode ?? 0) ? visible : management;
   }
 
+  private latestAssets(app: CatalogApp): HapAsset[] {
+    return app.latestAssets !== undefined && app.latestAssets.length > 0 ? app.latestAssets :
+      (app.latestAsset !== undefined ? [app.latestAsset] : []);
+  }
+
+  private assetForBundle(app: CatalogApp, bundleName: string, preferredName: string = ''): HapAsset | undefined {
+    const choices = this.latestAssets(app).filter((asset: HapAsset) => asset.bundleName === bundleName);
+    const exact = choices.find((asset: HapAsset) => asset.name === preferredName);
+    // Several variants may share a bundle name. A renamed file must not silently switch variants.
+    if (exact !== undefined) return exact;
+    return preferredName.length > 0 && choices.length > 1 ? undefined : choices[0];
+  }
+
   /** 已有线上来源保持来源；纯本地安装仅在包名唯一匹配时自动关联。 */
   private catalogForJob(job: InstallJob): CatalogApp | undefined {
     if (job.bundleName.length === 0) return undefined;
     const matches = this.updateApps().filter((app: CatalogApp) =>
-      app.latestAsset?.bundleName === job.bundleName);
+      this.latestAssets(app).some((asset: HapAsset) => asset.bundleName === job.bundleName));
     if (job.appId > 0) return matches.find((app: CatalogApp) => app.id === job.appId);
     // 首屏只有部分目录，不能据此认定同包名来源唯一。
     return this.updateCatalogReady && matches.length === 1 ? matches[0] : undefined;
@@ -2290,10 +2341,15 @@ struct Index {
   }
 
   /** 本机版本落后于目录最新版本时给「更新」。 */
-  private updateForApp(appId: number): UpdateTarget | undefined {
-    const asset = this.catalogApp(appId)?.latestAsset;
+  private updateForApp(appId: number, bundleName: string = '', preferredName: string = ''): UpdateTarget | undefined {
+    const app = this.catalogApp(appId);
+    if (app === undefined) return undefined;
+    const asset = bundleName.length > 0 ? this.assetForBundle(app, bundleName, preferredName) : app.latestAsset;
     if (asset === undefined) return undefined;
-    const installed = this.installedVersionOf(appId);
+    const deviceVersion = LocalBundles.installedVersion(asset.bundleName);
+    const recorded = this.allInstalledJobs().find((job: InstallJob) => job.bundleName === asset.bundleName);
+    const installed = LocalBundles.isKnown(deviceVersion) ? deviceVersion :
+      (recorded?.versionCode ?? (bundleName.length === 0 ? this.installedVersionOf(appId) : -1));
     if (installed <= 0 || asset.versionCode <= installed) return undefined;
     const target = new UpdateTarget();
     target.bundleName = asset.bundleName;
@@ -2319,8 +2375,8 @@ struct Index {
     for (const job of this.allInstalledJobs()) {
       const app = this.catalogForJob(job);
       if (app === undefined) continue;
-      const target = this.updateForApp(app.id);
-      if (target !== undefined) found.push(target);
+      const target = this.updateForApp(app.id, job.bundleName, job.assetName);
+      if (target !== undefined && !found.some((item: UpdateTarget) => item.bundleName === target.bundleName)) found.push(target);
     }
     this.updates = found;
   }
@@ -2537,8 +2593,10 @@ struct Index {
     this.localMessage = '';
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      const job = await LocalImport.pickPreview(context);
-      if (this.localPreviewReady) LocalImport.discardPreview(context, this.localInfoJob);
+      const choices = await LocalImport.pickPreviews(context);
+      this.localChoices.forEach((old: InstallJob) => LocalImport.discardPreview(context, old));
+      this.localChoices = choices;
+      const job = choices[0];
       this.localPreviewReady = true;
       this.localJobId = job.id;
       this.localInfoJob = job;
@@ -2549,10 +2607,23 @@ struct Index {
       this.refreshLocalTimeline();
       this.localMessage = '';
     } catch (error) {
-      if (!String(error).includes('未选择 HAP')) this.localMessage = String(error);
+      if (!String(error).includes('未选择安装文件')) this.localMessage = String(error);
     } finally {
       this.localBusy = false;
     }
+  }
+
+  private async selectLocalPackage(index: number): Promise<void> {
+    const job = this.localChoices[index];
+    if (!job || this.localBusy) return;
+    this.localBusy = true;
+    try {
+      this.localJobId = job.id;
+      this.localInfoJob = job;
+      this.localFileSize = (fileIo.statSync(job.cachePath).size / (1024 * 1024)).toFixed(1) + ' MB';
+      await this.loadLocalIcon(job);
+      this.refreshLocalTimeline();
+    } finally { this.localBusy = false; }
   }
 
   private async installLocalPreview(): Promise<void> {
@@ -2563,6 +2634,8 @@ struct Index {
       const context = getContext(this) as common.UIAbilityContext;
       const store = await JobStore.open(context);
       const job = await LocalImport.commitPreview(context, store, this.localInfoJob);
+      this.localChoices.forEach((old: InstallJob) => LocalImport.discardPreview(context, old));
+      this.localChoices = [];
       this.localPreviewReady = false;
       this.localInfoJob = job;
       // 历史上装过同一文件不代表设备现在仍是该版本，交给运行器核对。
@@ -2876,7 +2949,8 @@ struct Index {
                           .textOverflow({ overflow: TextOverflow.Ellipsis })
                         Text(app.summary).fontSize(12)
                           .fontColor('#E5ECFF').maxLines(1)
-                        Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(5) } }) {
+                        Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center,
+                          space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(5) } }) {
                           Text(app.category).fontSize(11).fontWeight(FontWeight.Medium)
                             .fontColor('#FFFFFF')
                             .padding({ left: 6, right: 6, top: 3, bottom: 3 })
@@ -2921,7 +2995,8 @@ struct Index {
                             .fontColor(this.colors().text).maxLines(1)
                             .textOverflow({ overflow: TextOverflow.Ellipsis })
                           Text(app.summary).fontSize(12).fontColor(this.colors().textSecondary).maxLines(1)
-                          Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(5) } }) {
+                          Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center,
+                            space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(5) } }) {
                             Text(app.category).fontSize(11).fontColor(this.colors().accent)
                               .padding({ left: 6, right: 6, top: 3, bottom: 3 })
                               .backgroundColor(this.colors().accentSoft).borderRadius(6)
@@ -3000,7 +3075,7 @@ struct Index {
             Text(this.localJobId.length > 0 ? this.jobTitle(this.localInfoJob) : '从文件安装')
               .fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text).maxLines(2)
             if (this.localJobId.length === 0) {
-              Text('先预览应用信息，再确认安装').fontSize(13)
+              Text('支持 HAP、APP 和 ZIP · 先预览，再安装').fontSize(13)
                 .fontColor(this.colors().textSecondary).textAlign(TextAlign.Center)
             }
             if (this.localJobId.length > 0) {
@@ -3015,7 +3090,22 @@ struct Index {
           }.width('100%').alignItems(HorizontalAlign.Center)
             .margin({ bottom: 22 })
 
-          Button(this.localBusy ? '正在准备…' : (this.localPreviewReady ? '安装' : '选择 HAP 文件'))
+          if (this.localPreviewReady && this.localChoices.length > 1) {
+            Text('压缩包内的应用').fontSize(12).fontColor(this.colors().textSecondary)
+              .margin({ bottom: 8 })
+            Select(this.localChoices.map((job: InstallJob) => {
+              return { value: job.assetName + ' · ' + this.versionLabel(job) } as SelectOption;
+            }))
+              .selected(this.localChoices.findIndex((job: InstallJob) => job.id === this.localJobId))
+              .value(this.localInfoJob.assetName).width('100%').height(44)
+              .font({ size: 13 }).fontColor(this.colors().text)
+              .optionFontColor(this.colors().text).selectedOptionFontColor(this.colors().accent)
+              .optionBgColor(this.colors().surface).selectedOptionBgColor(this.colors().accentSoft)
+              .menuBackgroundColor(this.colors().surface).backgroundColor(this.colors().fill)
+              .enabled(!this.localBusy).margin({ bottom: 12 })
+              .onSelect((index: number) => this.selectLocalPackage(index))
+          }
+          Button(this.localBusy ? '正在准备…' : (this.localPreviewReady ? '安装' : '选择安装文件'))
             .height(48).enabled(!this.localBusy).width('100%')
             .fontSize(15).fontWeight(FontWeight.Medium)
             .fontColor(this.colors().onAccent).backgroundColor(this.colors().accent).borderRadius(15)
@@ -3024,7 +3114,7 @@ struct Index {
               else this.pickLocalHap();
             })
           if (this.localPreviewReady) {
-            Button('重新选择 HAP').fontSize(12).fontColor(this.colors().accent)
+            Button('重新选择文件').fontSize(12).fontColor(this.colors().accent)
               .width('100%').height(44).backgroundColor(this.colors().fill)
               .borderRadius(14).margin({ top: 12 })
               .enabled(!this.localBusy).onClick(() => this.pickLocalHap())
@@ -3115,7 +3205,7 @@ struct Index {
           }
           ForEach(this.pendingJobs, (job: InstallJob) => {
             ListItem() {
-              Column({ space: 12 }) {
+              Column({ space: 2 }) {
                 Row({ space: 12 }) {
                   if (this.jobIcon(job)) {
                     Image(this.jobIcon(job)).width(44).height(44).borderRadius(12)
@@ -3144,19 +3234,27 @@ struct Index {
                   this.taskIndicator(0, '', job.id)
                 }.width('100%')
                 Row({ space: 8 }) {
+                  Button(this.cancellingJobs.includes(job.id) ? '清理中…' : '取消',
+                    { type: ButtonType.Normal })
+                    .height(44).constraintSize({ minWidth: 44 })
+                    .padding({ left: 0, right: 8 }).fontSize(12)
+                    .fontColor(this.colors().textSecondary).backgroundColor(Color.Transparent)
+                    .borderRadius(12).enabled(!this.cancellingJobs.includes(job.id))
+                    .onClick(() => this.cancelInstall(job))
+                  Blank().layoutWeight(1)
                   if (!this.jobRunning(job.id) && job.stage !== InstallStage.QUEUED) {
-                    Button('继续安装').height(44).fontSize(12).fontColor(this.colors().onAccent)
-                      .backgroundColor(this.colors().accent).borderRadius(10)
+                    Button({ type: ButtonType.Normal }) {
+                      Text('继续安装').fontSize(12).fontWeight(FontWeight.Medium)
+                        .fontColor(this.colors().accent).height(32)
+                        .padding({ left: 14, right: 14 })
+                        .backgroundColor(this.colors().accentSoft).borderRadius(16)
+                    }.height(44).padding(0).backgroundColor(Color.Transparent).borderRadius(16)
+                      .accessibilityText('继续安装')
                       .enabled(this.activeJobId.length === 0 && this.signedIn &&
                         !this.cancellingJobs.includes(job.id))
                       .onClick(() => this.continueInstall(job))
                   }
-                  Button(this.cancellingJobs.includes(job.id) ? '清理中…' : '取消')
-                    .height(44).fontSize(12).fontColor(this.colors().danger)
-                    .backgroundColor(this.colors().dangerSoft).borderRadius(10)
-                    .enabled(!this.cancellingJobs.includes(job.id))
-                    .onClick(() => this.cancelInstall(job))
-                }.width('100%').justifyContent(FlexAlign.End)
+                }.width('100%').padding({ left: 56 })
               }.width('100%').padding(15).backgroundColor(this.colors().surface).borderRadius(16)
             }
           }, (job: InstallJob) => job.id)
@@ -3185,7 +3283,7 @@ struct Index {
               Column({ space: 3 }) {
                 Text('上架新应用').fontSize(15).fontWeight(FontWeight.Medium)
                   .fontColor(this.colors().text).maxLines(1)
-                Text('从 GitHub Release 添加一个 HAP')
+                Text('从 GitHub Release 添加安装包')
                   .fontSize(11).fontColor(this.colors().textTertiary).maxLines(1)
               }.alignItems(HorizontalAlign.Start).layoutWeight(1)
               Text('›').fontSize(20).fontColor(this.colors().textTertiary)
@@ -3430,25 +3528,30 @@ struct Index {
       Row() {
         Text('上架应用').fontSize(22).fontWeight(FontWeight.Bold)
           .fontColor(this.colors().text).layoutWeight(1)
-        StoreIconButton({ active: !this.submitBusy, action: () => { this.animateOverlay(() => { this.showSubmit = false; }); } })
+        StoreIconButton({ active: !this.submitBusy || this.submitDraft.inspectionStatus !== 'ready', action: () => {
+          this.submitGeneration++;
+          this.animateOverlay(() => { this.showSubmit = false; });
+        } })
       }.width('100%')
       TextInput({ placeholder: 'GitHub / Gitee 仓库地址', text: this.submitUrl })
         .height(48).onChange((value: string) => { this.submitUrl = value; })
         .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
         .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
-      Button(this.submitBusy && this.submitDraft.token.length === 0 ? '检查中…' : '检查应用')
+      Button(this.submitBusy ? '检查中…' : '检查应用')
         .width('100%').height(48).fontSize(14).fontWeight(FontWeight.Medium)
         .backgroundColor(this.colors().accent).fontColor(this.colors().onAccent).borderRadius(16)
         .enabled(!this.submitBusy && this.submitUrl.trim().length > 0)
         .onClick(() => this.prepareSubmit())
-      if (this.submitDraft.token.length > 0) {
+      if (this.submitDraft.token.length > 0 && this.submitDraft.inspectionStatus === 'ready') {
         Text(this.submitDraft.displayName).fontSize(17).fontWeight(FontWeight.Medium)
           .fontColor(this.colors().text).width('100%')
-        Text('选择 HAP').fontSize(13).fontColor(this.colors().textSecondary).width('100%')
+        Text(this.submitDraft.supportsMultiSelect ? '选择安装包（可多选）' : '选择安装包').fontSize(13).fontColor(this.colors().textSecondary).width('100%')
+        Scroll() {
+          Column({ space: 8 }) {
         ForEach(this.submitDraft.choices, (choice: SubmitChoice) => {
           Button({ type: ButtonType.Normal }) {
             Row({ space: 8 }) {
-              Text(this.submitAsset === choice.name ? '◉' : '○')
+              Text(this.submitAssets.includes(choice.name) ? '☑' : '□')
                 .fontSize(20).fontColor(this.colors().accent)
               Column({ space: 3 }) {
                 Text(choice.displayName.length > 0 ? choice.displayName : choice.name)
@@ -3459,10 +3562,18 @@ struct Index {
             }.width('100%').padding(10).backgroundColor(this.colors().fill)
           }.width('100%').padding(0).backgroundColor(this.colors().fill).borderRadius(12)
             .enabled(!this.submitBusy).stateEffect(true)
-            .accessibilityText((this.submitAsset === choice.name ? '已选择，' : '选择，') +
+            .accessibilityText((this.submitAssets.includes(choice.name) ? '已选择，' : '选择，') +
               (choice.displayName.length > 0 ? choice.displayName : choice.name) + '，' + choice.versionName)
-            .onClick(() => { this.submitAsset = choice.name; })
+            .onClick(() => {
+              this.submitAssets = !this.submitDraft.supportsMultiSelect ? [choice.name] :
+                (this.submitAssets.includes(choice.name) ?
+                  this.submitAssets.filter((name: string) => name !== choice.name) :
+                  this.submitAssets.concat([choice.name]));
+            })
         }, (choice: SubmitChoice) => choice.name)
+          }.width('100%')
+        }.width('100%').height(Math.min(216, this.submitDraft.choices.length * 68))
+          .scrollBar(BarState.Auto)
         Text('选择分类').fontSize(13).fontColor(this.colors().textSecondary).width('100%')
         // 滑动选择框：分类较多时比一排芯片更好点，也不会挤成两行。
         Select(this.submitDraft.categories.map((category: string) => {
@@ -3499,7 +3610,7 @@ struct Index {
           (this.submitExisting === Index.SUBMIT_STATE_MINE ? '确认更新已上架应用' : '确认上架'))
           .width('100%').height(48).fontSize(14).fontWeight(FontWeight.Medium)
           .backgroundColor(this.colors().accent).fontColor(this.colors().onAccent).borderRadius(16)
-          .enabled(!this.submitBusy && this.submitAsset.length > 0 &&
+          .enabled(!this.submitBusy && this.submitAssets.length > 0 &&
             this.submitCategory.length > 0 &&
             this.submitExisting !== Index.SUBMIT_STATE_OTHER)
           .onClick(() => this.confirmSubmit())

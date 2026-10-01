@@ -41,7 +41,9 @@ function fixture() {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText, {
     exports, AppStorage: { setOrCreate: (key, value) => storage.set(key, value) },
-    require: name => name === '@kit.AbilityKit' ? {
+    require: name => name === '../jobs/BackgroundInstallTask' ? {
+      BackgroundInstallTask: { configure: () => {}, onForeground: () => {} }
+    } : name === '@kit.AbilityKit' ? {
       UIAbility: class {}, ConfigurationConstant: { ColorMode: { COLOR_MODE_DARK: 1 } }
     } : {
       window: { AvoidAreaType: { TYPE_SYSTEM: 0, TYPE_CUTOUT: 1 } },

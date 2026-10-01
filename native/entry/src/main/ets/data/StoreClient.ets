@@ -9,7 +9,8 @@ import { DeveloperAccount } from './DeveloperAccount';
 import { SubmitDraft, AppReview } from './StoreActions';
 
 class PrepareBody { repo_url: string = ''; }
-class ConfirmBody { draft_token: string = ''; asset_name: string = ''; category: string = ''; }
+class ConfirmBody {
+  asset_name: string = ''; draft_token: string = ''; asset_names: string[] = []; category: string = ''; }
 class ReviewBody { stars: number = 0; body: string = ''; }
 class CategoryBody { category: string = ''; }
 class IdentityBody {
@@ -284,11 +285,22 @@ export class StoreClient {
     return SubmitDraft.fromJson(data);
   }
 
-  async confirmSubmit(draft: SubmitDraft, assetName: string, category: string,
-    account: DeveloperAccount): Promise<CatalogApp> {
+  async submitStatus(draft: SubmitDraft, account: DeveloperAccount): Promise<SubmitDraft> {
     const body = new ConfirmBody();
     body.draft_token = draft.token;
-    body.asset_name = assetName;
+    const data = await this.requestData('/api/v1/submit/status', http.RequestMethod.POST, account, body);
+    return SubmitDraft.fromJson(data);
+  }
+
+  async confirmSubmit(draft: SubmitDraft, assetNames: string[], category: string,
+    account: DeveloperAccount): Promise<CatalogApp> {
+    if (assetNames.length > 1 && !draft.supportsMultiSelect) {
+      throw new Error('服务器尚未支持多包上架，请先更新服务端');
+    }
+    const body = new ConfirmBody();
+    body.draft_token = draft.token;
+    body.asset_name = assetNames[0] ?? '';
+    body.asset_names = assetNames;
     body.category = category;
     const data = await this.requestData('/api/v1/submit/confirm', http.RequestMethod.POST,
       account, body);

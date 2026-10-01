@@ -150,7 +150,8 @@ CREATE TABLE IF NOT EXISTS catalog_task (
 CREATE TABLE IF NOT EXISTS app_selection (
     app_id INTEGER PRIMARY KEY REFERENCES app(id) ON DELETE CASCADE,
     asset_name TEXT NOT NULL,
-    bundle_name TEXT NOT NULL DEFAULT ''
+    bundle_name TEXT NOT NULL DEFAULT '',
+    selections_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS app_category (
@@ -216,6 +217,14 @@ def init_db() -> None:
             conn.execute("ALTER TABLE submit_draft ADD COLUMN prepared_json TEXT NOT NULL DEFAULT '{}'")
         if 'completed_app_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(submit_draft)')}:
             conn.execute("ALTER TABLE submit_draft ADD COLUMN completed_app_id INTEGER NOT NULL DEFAULT 0")
+        for name, definition in (
+            ('inspection_state', "TEXT NOT NULL DEFAULT 'ready'"),
+            ('inspection_error', "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in {row['name'] for row in conn.execute('PRAGMA table_info(submit_draft)')}:
+                conn.execute(f'ALTER TABLE submit_draft ADD COLUMN {name} {definition}')
+        if 'selections_json' not in {row['name'] for row in conn.execute('PRAGMA table_info(app_selection)')}:
+            conn.execute("ALTER TABLE app_selection ADD COLUMN selections_json TEXT NOT NULL DEFAULT '[]'")
         if 'digest' not in {row['name'] for row in conn.execute('PRAGMA table_info(app_icon)')}:
             conn.execute("ALTER TABLE app_icon ADD COLUMN digest TEXT NOT NULL DEFAULT ''")
         for row in list(conn.execute("SELECT app_id,data FROM app_icon WHERE digest=''")):
@@ -295,25 +304,27 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True) -> dict[str, Any]
         ).fetchone()
         app["releases_count"] = n
         app["latest"] = dict(latest) if latest else None
-        app["latest_asset"] = latest_asset(c, row["id"])
+        app["latest_assets"] = latest_assets(c, row["id"])
+        app["latest_asset"] = app["latest_assets"][0] if app["latest_assets"] else None
     return app
 
 
-def latest_asset(c: sqlite3.Connection, app_id: int) -> dict[str, Any] | None:
-    """最新版本里最大的 HAP 附件。
-
-    客户端需要 bundleName / versionCode / sha256 才能判断「装没装」并直接安装。
-    没有这个字段时它得为目录里每个应用单独请求一次 releases —— 每请求一次
-    服务端往返约 1 秒，一屏 30 个应用就是半分钟。
-    取最大的附件与客户端选择默认版本的规则一致。
-    """
-    row = c.execute(
-        """SELECT a.* FROM asset a JOIN release r ON r.id = a.release_id
-           WHERE r.app_id=? AND r.prerelease=0 AND a.bundle_name <> ''
-           ORDER BY r.published_at DESC, a.size DESC LIMIT 1""",
+def latest_assets(c: sqlite3.Connection, app_id: int) -> list[dict[str, Any]]:
+    """All selected packages in the newest installable stable release."""
+    rows = c.execute(
+        """SELECT a.* FROM asset a WHERE a.release_id=(
+           SELECT r.id FROM release r JOIN asset first ON first.release_id=r.id
+           WHERE r.app_id=? AND r.prerelease=0 AND first.bundle_name <> ''
+           ORDER BY r.published_at DESC, first.size DESC LIMIT 1)
+           AND a.bundle_name <> '' ORDER BY a.size DESC, a.name""",
         (app_id,),
-    ).fetchone()
-    return _row_to_asset(row) if row else None
+    ).fetchall()
+    return [_row_to_asset(row) for row in rows]
+
+
+def latest_asset(c: sqlite3.Connection, app_id: int) -> dict[str, Any] | None:
+    assets = latest_assets(c, app_id)
+    return assets[0] if assets else None
 
 
 def list_apps(
@@ -619,7 +630,7 @@ def create_submit_draft(token: str, repo: str, account_id: str,
 def recent_submit_draft(repo: str, account_id: str) -> dict[str, Any] | None:
     row = connect().execute("""SELECT prepared_json,expires_at FROM submit_draft
         WHERE repo=? COLLATE NOCASE AND account_id=? AND expires_at>?
-          AND prepared_json!='{}' AND completed_app_id=0
+          AND prepared_json!='{}' AND completed_app_id=0 AND inspection_state!='error'
         ORDER BY expires_at DESC LIMIT 1""",
         (repo, account_id, int(time.time()) + 1500)).fetchone()
     if not row:
@@ -653,10 +664,13 @@ def set_app_selection(app_id: int, asset_name: str, bundle_name: str) -> None:
     c.commit()
 
 
-def get_app_selection(app_id: int) -> dict[str, str] | None:
-    row = connect().execute("SELECT asset_name,bundle_name FROM app_selection WHERE app_id=?",
+def get_app_selection(app_id: int) -> dict[str, Any] | None:
+    row = connect().execute("SELECT asset_name,bundle_name,selections_json FROM app_selection WHERE app_id=?",
                             (app_id,)).fetchone()
-    return dict(row) if row else None
+    if not row: return None
+    result = dict(row)
+    result['assets'] = json.loads(result.pop('selections_json'))
+    return result
 
 
 def publisher_account_id(app_id: int) -> str | None:
@@ -772,9 +786,11 @@ def cached_repository_snapshot(repo: str, max_age_seconds: int) -> dict[str, Any
 
 
 def publish_prepared_app(draft_token: str, account_id: str, nickname: str,
-                         category: str, choice: dict[str, Any],
+                         category: str, choice: dict[str, Any] | list[dict[str, Any]],
                          snapshot: dict[str, Any]) -> int:
     """Commit listing, exact selection and durable enrichment task atomically."""
+    choices = choice if isinstance(choice, list) else [choice]
+    choice = choices[0]
     c = connect()
     now = int(time.time())
     with c:
@@ -801,11 +817,13 @@ def publish_prepared_app(draft_token: str, account_id: str, nickname: str,
             raise ValueError("PUBLISHER_MISMATCH")
         selected_release = next((r for r in snapshot["releases"]
                                  if r["tag"] == choice["tag"]), None)
-        selected_asset = next((a for a in (selected_release or {}).get("assets", [])
-                               if a["name"] == choice["name"]
-                               and a.get("sha256", "") == choice.get("sha256", "")), None)
-        if selected_asset is None:
-            raise ValueError("INVALID_ASSET")
+        selected_assets = []
+        for selected in choices:
+            if selected['tag'] != choice['tag']: raise ValueError('INVALID_ASSET')
+            asset = next((a for a in (selected_release or {}).get('assets', [])
+                if a['name'] == selected['name'] and a.get('sha256', '') == selected.get('sha256', '')), None)
+            if asset is None: raise ValueError('INVALID_ASSET')
+            selected_assets.append(asset)
         fields = dict(snapshot["metadata"])
         fields["display_name"] = (choice.get("display_name") or
             (previous["display_name"] if previous else "") or fields.get("display_name") or
@@ -815,7 +833,7 @@ def publish_prepared_app(draft_token: str, account_id: str, nickname: str,
         # Publish the selected file immediately. Historical files and other HAPs
         # are filtered by their verified bundle identity by the worker later.
         initial_release = dict(selected_release)
-        initial_release["assets"] = [selected_asset]
+        initial_release["assets"] = selected_assets
         _replace_releases(c, app_id, [initial_release])
         c.execute("""INSERT INTO publisher(app_id,account_id,display_name,updated_at)
             VALUES (?,?,?,?) ON CONFLICT(app_id) DO UPDATE SET
@@ -826,8 +844,11 @@ def publish_prepared_app(draft_token: str, account_id: str, nickname: str,
                   (app_id, category))
         selection = {"asset_name": choice["name"], "bundle_name": choice.get("bundle_name", ""),
                      "tag": choice["tag"], "sha256": choice.get("sha256", "")}
-        c.execute("""INSERT OR REPLACE INTO app_selection(app_id,asset_name,bundle_name)
-            VALUES (?,?,?)""", (app_id, selection["asset_name"], selection["bundle_name"]))
+        selection['assets'] = [{"asset_name": item['name'], "bundle_name": item.get('bundle_name', ''),
+            "tag": item['tag'], "sha256": item.get('sha256', '')} for item in choices]
+        c.execute("""INSERT OR REPLACE INTO app_selection(app_id,asset_name,bundle_name,selections_json)
+            VALUES (?,?,?,?)""", (app_id, selection["asset_name"], selection["bundle_name"],
+                                  json.dumps(selection['assets'], ensure_ascii=False)))
         payload = json.dumps({"repo": repo, "snapshot": snapshot, "selection": selection},
                              ensure_ascii=False)
         c.execute("""INSERT INTO catalog_task(app_id,payload_json,updated_at)
@@ -888,7 +909,8 @@ def apply_catalog_snapshot(repo: str, metadata: dict[str, Any],
                            releases: list[dict[str, Any]],
                            generation: int | None = None,
                            selected_bundle: str = "",
-                           source_fetched_at: int | None = None) -> tuple[int, int, bool]:
+                           source_fetched_at: int | None = None,
+                           selected_assets: list[dict[str, Any]] | None = None) -> tuple[int, int, bool]:
     """Atomic enrichment; a stale worker cannot overwrite a newer selection."""
     c = connect()
     now = int(time.time())
@@ -932,6 +954,9 @@ def apply_catalog_snapshot(repo: str, metadata: dict[str, Any],
             if selected_bundle:
                 c.execute("UPDATE app_selection SET bundle_name=? WHERE app_id=?",
                           (selected_bundle, app_id))
+            if selected_assets:
+                c.execute('UPDATE app_selection SET selections_json=? WHERE app_id=?',
+                          (json.dumps(selected_assets, ensure_ascii=False), app_id))
             c.execute("""UPDATE catalog_task SET status='done',last_error='',updated_at=?
                 WHERE app_id=? AND generation=?""", (now, app_id, generation))
     return app_id, count, True
@@ -1102,3 +1127,30 @@ def stats() -> dict[str, Any]:
         "last_sync": get_meta("last_sync", ""),
         "last_sync_ok": get_meta("last_sync_ok", "0"),
     }
+
+
+def queue_archive_inspection(token: str) -> None:
+    c = connect()
+    c.execute("UPDATE submit_draft SET inspection_state='pending' WHERE token=?", (token,))
+    c.commit()
+
+
+def claim_archive_inspection() -> dict[str, Any] | None:
+    c = connect()
+    with c:
+        c.execute('BEGIN IMMEDIATE')
+        row = c.execute("SELECT * FROM submit_draft WHERE inspection_state='pending' AND expires_at>? LIMIT 1",
+                        (int(time.time()),)).fetchone()
+        if not row: return None
+        c.execute("UPDATE submit_draft SET inspection_state='running' WHERE token=?", (row['token'],))
+    return dict(row)
+
+
+def finish_archive_inspection(token: str, prepared: dict[str, Any] | None, error: str = '') -> None:
+    c = connect()
+    if prepared:
+        c.execute("UPDATE submit_draft SET choices_json=?,prepared_json=?,inspection_state='ready',inspection_error='' WHERE token=? AND inspection_state='running'",
+                  (json.dumps(prepared['choices'], ensure_ascii=False), json.dumps(prepared, ensure_ascii=False), token))
+    else:
+        c.execute("UPDATE submit_draft SET inspection_state='error',inspection_error=? WHERE token=?", (error[:300], token))
+    c.commit()

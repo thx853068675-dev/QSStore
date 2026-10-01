@@ -77,6 +77,27 @@ def prepared_snapshot(repo: str, token: str = "") -> dict[str, Any]:
     return snapshot
 
 
+def process_prepare_one(token: str = '') -> bool:
+    task = db.claim_archive_inspection()
+    if not task: return False
+    try:
+        from .package_archive import inspect_snapshot
+        prepared = __import__('json').loads(task['prepared_json'])
+        snapshot = inspect_snapshot(prepared['snapshot'], token)
+        candidate = next(r for r in snapshot['releases'] if r.get('assets'))
+        prepared['choices'] = [dict(tag=candidate['tag'], **{k: a.get(k, '') for k in
+            ('name', 'size', 'bundle_name', 'version_name', 'version_code', 'min_api', 'display_name', 'sha256')})
+            for a in candidate['assets']]
+        for release in snapshot['releases']:
+            for asset in release['assets']: asset.pop('_icon', None)
+        prepared['snapshot'] = snapshot
+        prepared['inspection_status'] = 'ready'
+        db.finish_archive_inspection(task['token'], prepared)
+    except Exception as error:
+        db.finish_archive_inspection(task['token'], None, str(error))
+    return True
+
+
 def process_one(token: str = "") -> bool:
     task = db.claim_catalog_task()
     if task is None:
@@ -104,11 +125,14 @@ def start_worker(token: str = "") -> None:
             return
         _worker_started = True
     db.recover_catalog_tasks()
+    conn = db.connect()
+    conn.execute("UPDATE submit_draft SET inspection_state='pending' WHERE inspection_state='running'")
+    conn.commit()
 
     def run() -> None:
         while True:
             try:
-                if process_one(token):
+                if process_prepare_one(token) or process_one(token):
                     continue
             except Exception as e:
                 print(f"catalog worker error: {type(e).__name__}: {e}", flush=True)

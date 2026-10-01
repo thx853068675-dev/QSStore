@@ -394,7 +394,14 @@ export class JobStore {
       if (!await this.stopTransfer(context, job)) continue;
       const retained = await this.listAll();
       let clean = true;
-      const paths = [job.cachePath, job.signedPath, job.cachePath + '.part'];
+      const paths = [job.cachePath, job.signedPath, job.cachePath + '.part',
+        job.cachePath + '.package.hap', job.cachePath + '.package.app',
+        job.cachePath + '.package.hap.part', job.cachePath + '.package.app.part'];
+      if (!retained.some((other: InstallJob) => other.cachePath === job.cachePath)) {
+        for (const source of [job.cachePath, job.cachePath + '.package.app', job.cachePath + '.package.app.part']) {
+          for (let index = 0; index < 32; index++) paths.push(source + '.module-' + index + '.hap');
+        }
+      }
       if (job.signedPath.startsWith(prefix) && !job.signedPath.includes('/../') &&
         !retained.some((other: InstallJob) => other.signedPath === job.signedPath)) {
         const name = job.signedPath.substring(prefix.length);

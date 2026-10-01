@@ -14,14 +14,9 @@ export class CatalogApp {
   /** 服务端 /apps/{id} 返回的 rating: {count, average}。列表接口没有这个字段。 */
   ratingAverage: number = 0;
   ratingCount: number = 0;
-  /**
-   * 最新版本里最大的那个 HAP，服务端在列表接口里一并给出。
-   *
-   * 卡片要显示「安装 / 打开」、更新检查要比版本号，都需要 bundleName 与
-   * versionCode，而这两个字段只有 releases 里才有。没有它时客户端得为目录里
-   * 每个应用单独请求一次 releases，一屏 30 个应用就是 30 次来回。
-   */
+  /** Primary package for Discover; all packages are available for Management matching. */
   latestAsset: HapAsset | undefined = undefined;
+  latestAssets: HapAsset[] = [];
 
   static fromJson(row: Record<string, Object>): CatalogApp {
     const app = new CatalogApp();
@@ -41,6 +36,9 @@ export class CatalogApp {
     app.ratingCount = rating ? Number(rating['count'] ?? 0) : 0;
     const asset = row['latest_asset'] as Record<string, Object> | undefined;
     app.latestAsset = asset ? HapAsset.fromJson(asset) : undefined;
+    const assets = row['latest_assets'] as Record<string, Object>[] | undefined;
+    app.latestAssets = assets ? assets.map((item: Record<string, Object>) => HapAsset.fromJson(item)) :
+      (app.latestAsset !== undefined ? [app.latestAsset] : []);
     return app;
   }
 }

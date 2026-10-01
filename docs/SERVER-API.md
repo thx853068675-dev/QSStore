@@ -48,8 +48,9 @@ curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 | POST | `/api/v1/apps/{id}/reviews` | 已验证华为开发者账号新增评分与评论（同账号可多条） |
 | GET | `/api/v1/signing-identity` | 已验证账号取回加密保存的签名身份；无记录时 `identity` 为 `null` |
 | POST | `/api/v1/signing-identity` | 备份 P-256 签名身份；首次写入或携带已确认版本进行 CAS 轮换，冲突返回 409 |
-| POST | `/api/v1/submit/prepare` | 检查 GitHub Release，返回各 HAP 的实际应用名、包名与建议分类；需 Bearer 凭证 |
-| POST | `/api/v1/submit/confirm` | 携带 `draft_token`、`asset_name`、`category` 确认上架；重新核对所选 HAP |
+| POST | `/api/v1/submit/prepare` | 检查 GitHub Release；APP/ZIP 由后台解析，返回草稿与检查状态；需 Bearer 凭证 |
+| POST | `/api/v1/submit/status` | 携带 `draft_token` 查询 APP/ZIP 检查状态，仅草稿所属账号可访问 |
+| POST | `/api/v1/submit/confirm` | 携带 `draft_token`、`asset_names`、`category` 确认多包上架；兼容旧 `asset_name` 单包接口 |
 | GET | `/api/v1/categories` | 获取上架和配置共用的软件分类列表 |
 | POST | `/api/v1/me/apps/{id}/category` | 上架者修改 `category`；需要已验证账号，分类在后续采集中保留 |
 | GET | `/api/v1/me/apps` | 获取当前已验证华为账号上架的公开应用 |
@@ -76,14 +77,18 @@ curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 不要用 `items.length` 反推。`/reviews` 额外带 `summary`（`{count, average}`）。
 `page` 从 1 开始。`page_size` 上限：`/apps` 100，`/releases` 与 `/reviews` 50。
 
-`/apps` 与 `/apps/{id}` 还带 `latest_asset`：最新版本里**最大的**那个 HAP 附件
-（与客户端选中默认版本的规则一致），字段同 `/releases` 里的 asset
-（`name` `size` `sha256` `url` `mirror_urls` `bundle_name` `version_code` …），
-没有可用附件时为 `null`。
+`/apps` 与 `/apps/{id}` 返回 `latest_assets`：最新可安装正式版中全部已上架包，包含
+`name`、`size`、`sha256`、`url`、`mirror_urls`、`bundle_name`、`version_code` 等信息。
+`latest_asset` 保留为默认包，兼容旧客户端；无可用包时为空。
 
-客户端要用它判断「这个应用装没装、本机版本是不是落后」：`bundle_name` 与
-`version_code` 只在 releases 里才有，没有这个字段时客户端得为目录里**每个**
-应用单独请求一次 `/releases` —— 一屏 30 个应用就是 30 次往返。
+APP/ZIP 预处理返回 `inspection_status`（`pending`、`running`、`ready`），状态接口
+返回相同草稿内容；解析失败返回 `INVALID_PACKAGE_ARCHIVE`。检查完成才允许确认。
+`supports_multi_select: true` 表示可使用 `asset_names` 选择最多 32 个有效包。
+ZIP 候选 URL 使用 `#qingqi-package=<URL 编码条目名>` 表示下载后提取的 APP/HAP，
+摘要与下载大小对应原始 ZIP。服务端解析仍要求可信的 GitHub 摘要并核对实际下载。
+
+客户端直接用包名与版本判断本地安装与更新；多变体无法唯一匹配时由用户在详情
+选择。发现页默认包、管理更新队列和详情选中包共享安装任务状态。
 
 **安全**：全站安全响应头、普通接口按 IP 限流（默认 120/分），上架预处理按已验证账号限流（3/分）。同一账号、同一仓库五分钟内重复检查复用预处理结果；无效地址不占次数；429 响应提供实际剩余等待时间。管理接口仅本机、请求体上限 32KB、SQLite 全参数化。
 

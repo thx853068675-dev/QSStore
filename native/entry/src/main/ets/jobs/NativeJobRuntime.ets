@@ -1,3 +1,4 @@
+import { PackageArchive } from './PackageArchive';
 import { LocalBundles } from './LocalBundles';
 import { common } from '@kit.AbilityKit';
 import { fileIo, hash } from '@kit.CoreFileKit';
@@ -11,7 +12,7 @@ import { FailureKind, InstallJob, InstallStage, RecoveryEvidence } from './Insta
 import { JobFailure, JobPaths, JobRuntime, PackageIdentity } from './JobRunner';
 import { JobStore } from './JobStore';
 import { InstalledSigningIdentity } from './InstalledAppRegistry';
-import { checkCatalogIdentity, inspectPackage, PackageInspectError, requestedPermissions } from './PackageInspector';
+import { checkCatalogIdentity, inspectPackage, PackageInspectError, PackageIdentity as InspectedIdentity, requestedPermissions } from './PackageInspector';
 import { JobCancellation } from './JobCancellation';
 import { InstallTaskState } from './InstallTaskState';
 
@@ -35,6 +36,7 @@ export class NativeJobRuntime implements JobRuntime {
   private device: NativeDeviceBridge;
   // These proofs live only for this runner invocation. A resumed job must
   // recheck its files, but the same private HAP need not be read twice here.
+  private selectedPackagePath: string = '';
   private verifiedCachePath: string = '';
   private verifiedCacheSha256: string = '';
   private freshlySignedPath: string = '';
@@ -46,6 +48,20 @@ export class NativeJobRuntime implements JobRuntime {
     this.store = store;
     this.account = account;
     this.device = device;
+  }
+
+  private async packagePath(job: InstallJob): Promise<string> {
+    if (!job.sourceUrl.includes('#qingqi-package=')) return job.cachePath;
+    const entry = PackageArchive.selectedEntry(job.sourceUrl);
+    if (!entry) return job.cachePath;
+    if (this.selectedPackagePath.length > 0) return this.selectedPackagePath;
+    const output = job.cachePath + '.package' + PackageArchive.extension(entry);
+    this.selectedPackagePath = await PackageArchive.extractSelected(job.cachePath, entry, output);
+    return this.selectedPackagePath;
+  }
+
+  private async packageIdentity(path: string): Promise<InspectedIdentity> {
+    return path.endsWith('.app') ? PackageArchive.inspect(path) : inspectPackage(path);
   }
 
   async planPaths(job: InstallJob): Promise<JobPaths> {
@@ -78,7 +94,7 @@ export class NativeJobRuntime implements JobRuntime {
       // 兼容旧版已签名制品。未签名制品以及已选本机证书的任务都必须走
       // 下方的 Profile、签名和恢复校验，不能把原包当成已签名。
       try {
-        const original = inspectPackage(job.cachePath);
+        const original = await this.packageIdentity(await this.packagePath(job));
         evidence.verifiedSignature = original.bundleName === job.bundleName &&
           original.versionCode === job.versionCode;
         evidence.validProfile = evidence.verifiedSignature;
@@ -99,7 +115,7 @@ export class NativeJobRuntime implements JobRuntime {
         evidence.validProfile = currentHash === job.profileSha256 &&
           AgcProfile.valid(job.profilePath, job.bundleName, job.deviceUdid,
             identity.certificatePath,
-            AgcProfile.effectiveAcls(requestedPermissions(job.cachePath)));
+            AgcProfile.effectiveAcls(requestedPermissions(await this.packagePath(job))));
         if (evidence.validProfile && LocalBundles.isSelfBundle(job.bundleName)) {
           evidence.validProfile = await this.profileMatchesInstalledInstaller(job.profilePath);
         }
@@ -110,7 +126,7 @@ export class NativeJobRuntime implements JobRuntime {
       job.signedPath.length > 0 && fileIo.accessSync(job.signedPath)) {
       try {
         await verifyHap(job.signedPath);
-        const signed = inspectPackage(job.signedPath);
+        const signed = await this.packageIdentity(job.signedPath);
         evidence.verifiedSignature = signed.bundleName === job.bundleName &&
           signed.versionCode === job.versionCode;
       } catch (_) {}
@@ -143,7 +159,7 @@ export class NativeJobRuntime implements JobRuntime {
 
   async inspectPackage(job: InstallJob): Promise<PackageIdentity> {
     try {
-      const parsed = inspectPackage(job.cachePath);
+      const parsed = await this.packageIdentity(await this.packagePath(job));
       checkCatalogIdentity(job.catalogBundleName, job.catalogVersionCode, parsed);
       const result = new PackageIdentity();
       result.bundleName = parsed.bundleName;
@@ -231,7 +247,7 @@ export class NativeJobRuntime implements JobRuntime {
     selected = await SigningIdentityRecovery.pinForJob(this.context, selected);
     job.signingCertId = selected.certId;
     job.profilePath = await AgcProfile.ensure(this.context, this.account, selected,
-      job.bundleName, udid, requestedPermissions(job.cachePath));
+      job.bundleName, udid, requestedPermissions(await this.packagePath(job)));
     job.deviceUdid = udid;
     job.profileSha256 = (await hash.hash(job.profilePath, 'sha256')).toLowerCase();
     await this.store.save(job);
@@ -276,7 +292,7 @@ export class NativeJobRuntime implements JobRuntime {
       (await hash.hash(job.profilePath, 'sha256')).toLowerCase() !== job.profileSha256) {
       throw new JobFailure(FailureKind.ACCOUNT, '签名材料已改变，请重新准备设备授权');
     }
-    await signHap(job.cachePath, job.signedPath, identity.privateKeyPath,
+    await signHap(await this.packagePath(job), job.signedPath, identity.privateKeyPath,
       identity.certificatePath, job.profilePath);
     // The native signer verifies the complete pending HAP before atomically
     // moving it to signedPath. Repeating verifyHap immediately is another full
@@ -296,7 +312,7 @@ export class NativeJobRuntime implements JobRuntime {
       this.freshlySignedProfileSha256 !== job.profileSha256) {
       await verifyHap(job.signedPath);
     }
-    const signed = inspectPackage(job.signedPath);
+    const signed = await this.packageIdentity(job.signedPath);
     if (signed.bundleName !== job.bundleName || signed.versionCode !== job.versionCode ||
       job.signedProfileSha256 !== job.profileSha256) {
       throw new JobFailure(FailureKind.INVALID_PACKAGE, '签名包与原始 HAP 或设备授权不一致');
@@ -309,7 +325,7 @@ export class NativeJobRuntime implements JobRuntime {
         !await new AssetDownload(this.context, this.store).verifiedFileExists(job)) {
         throw new Error('更新包的下载摘要已改变');
       }
-      const original = inspectPackage(job.cachePath);
+      const original = await this.packageIdentity(await this.packagePath(job));
       if (original.bundleName !== job.bundleName || original.versionCode !== job.versionCode) {
         throw new Error('更新包的应用身份与目录不一致');
       }

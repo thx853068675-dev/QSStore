@@ -12,6 +12,7 @@ export class PackageIdentity {
   /** 清单里的 `app.versionName`，如 0.4.13；缺省时为空。 */
   versionName: string = '';
   moduleName: string = '';
+  moduleType: string = '';
   mainAbility: string = '';
 }
 
@@ -30,6 +31,7 @@ export function inspectPackage(path: string): PackageIdentity {
     identity.versionName = String(app?.['versionName'] ?? '');
     const module = manifest['module'] as Record<string, Object> | undefined;
     identity.moduleName = String(module?.['name'] ?? '');
+    identity.moduleType = String(module?.['type'] ?? '');
     identity.mainAbility = String(module?.['mainElement'] ?? '');
     const packText = readPackInfo(path);
     if (packText.length > 0) {

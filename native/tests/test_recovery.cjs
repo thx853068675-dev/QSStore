@@ -16,7 +16,8 @@ function load(file, mocks = {}, globals = {}) {
   }).outputText;
   vm.runInNewContext(code, { exports, require: n => mocks[n] || (n === './InstallTaskState' ?
     load('jobs/InstallTaskState.ets', { './InstallJob': load('jobs/InstallJob.ets') }) :
-    n === './JobCancellation' ? load('jobs/JobCancellation.ets') : {}),
+    n === './JobCancellation' ? load('jobs/JobCancellation.ets') :
+    n === './BackgroundInstallTask' ? load('jobs/BackgroundInstallTask.ets') : {}),
     setTimeout, clearTimeout, console, ...globals });
   return exports;
 }
@@ -350,13 +351,16 @@ test('delete flow: retry after failed backup cannot delete the old certificate',
 });
 test('scheduler: timeout never unlocks live work, even after every timer fires', async () => {
   const timers = [];
+  let now = 0;
   const { JobScheduler: S } = load('jobs/JobScheduler.ets', {}, {
-    setTimeout: fn => (timers.push(fn), timers.length), clearTimeout: () => {}
+    Date: { now: () => now },
+    setTimeout: (fn, delay) => (timers.push(() => { now += delay; fn(); }), timers.length),
+    clearTimeout: () => {}
   });
   let finish; const gate = new Promise(r => finish = r); let writes = 0;
   const running = S.runExclusive('same', async () => { await gate; writes++; }, 1);
   const rejected = assert.rejects(running, /超时/);
-  await Promise.resolve(); timers.shift()(); await rejected;
+  await new Promise(setImmediate); timers.shift()(); await rejected;
   while (timers.length) timers.shift()();
   assert.equal(S.isRunning('same'), true);
   await assert.rejects(S.runExclusive('same', async () => { writes++; }), /收尾/);

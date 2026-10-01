@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
-const names = ['updateApps', 'catalogApp', 'catalogForJob', 'openJobDetails', 'loadUpdateCatalog',
+const names = ['latestAssets', 'assetForBundle', 'updateApps', 'catalogApp', 'catalogForJob', 'openJobDetails', 'loadUpdateCatalog',
   'installedVersionOf', 'installedBundleOf', 'installedJobFor', 'updateForApp',
   'installFromCatalog', 'checkInstalledUpdates', 'updateFor', 'allInstalledJobs', 'currentInstalledView',
   'recentInstalledJobs', 'startUpdate', 'versionLabel'];
@@ -194,4 +194,21 @@ test('a stale Discover update click cannot reinstall a version already installed
   ui.apps = [app()]; f.actual = 2;
   await ui.installFromCatalog(app(7, 'com.example.app', 1));
   assert.equal(f.enqueues.length, 0); assert.equal(f.downloads.length, 0);
+});
+
+
+test('an alternate selected HAP is matched by its bundle and exact variant name in Management', () => {
+  const f = fixture(), ui = f.ui;
+  const alternate = { ...app().latestAsset, name: 'alternate.hap', bundleName: 'com.example.alternate', versionCode: 4 };
+  const candidate = app(); candidate.latestAssets = [candidate.latestAsset, alternate];
+  const installed = { ...local(), bundleName: alternate.bundleName, assetName: alternate.name };
+  ui.installedJobs = [installed]; ui.updateCatalogReady = true; ui.updateCatalog = [candidate];
+  ui.checkInstalledUpdates();
+  const target = ui.updateFor(installed.bundleName);
+  assert.equal(target.appId, candidate.id); assert.equal(target.assetName, 'alternate.hap');
+  assert.equal(target.versionCode, 4); assert.equal(ui.catalogForJob(installed).id, candidate.id);
+  candidate.latestAssets.unshift({ ...alternate, name: 'different-variant.hap' });
+  ui.checkInstalledUpdates(); assert.equal(ui.updateFor(installed.bundleName).assetName, 'alternate.hap');
+  installed.assetName = 'old-variant-name.hap';
+  ui.checkInstalledUpdates(); assert.equal(ui.updateFor(installed.bundleName), undefined, 'ambiguous variants need explicit selection');
 });

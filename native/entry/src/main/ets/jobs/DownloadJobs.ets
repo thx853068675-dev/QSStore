@@ -1,4 +1,5 @@
 import { common } from '@kit.AbilityKit';
+import { PackageArchive } from './PackageArchive';
 import { AssetDownload } from './AssetDownload';
 import { FailureKind, InstallJob, InstallStage } from './InstallJob';
 import { JobStore } from './JobStore';
@@ -18,7 +19,15 @@ export class DownloadJobs {
       await new AssetDownload(context, store).downloadAndVerify(job, onProgress);
       job.stage = InstallStage.VERIFIED;
       await store.save(job);
-      const identity = inspectPackage(job.cachePath);
+      let path = job.cachePath;
+      if (job.sourceUrl.includes('#qingqi-package=')) {
+        const entry = PackageArchive.selectedEntry(job.sourceUrl);
+        try {
+          path = await PackageArchive.extractSelected(path, entry,
+            path + '.package' + PackageArchive.extension(entry));
+        } catch (error) { throw new PackageInspectError('无法读取所选压缩包：' + String(error)); }
+      }
+      const identity = path.endsWith('.app') ? await PackageArchive.inspect(path) : inspectPackage(path);
       checkCatalogIdentity(job.catalogBundleName, job.catalogVersionCode, identity);
       job.bundleName = identity.bundleName;
       job.versionCode = identity.versionCode;

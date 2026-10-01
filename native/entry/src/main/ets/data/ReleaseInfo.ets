@@ -42,7 +42,7 @@ export class ReleaseInfo {
     const raw = row['assets'] as Array<Record<string, Object>> | undefined;
     release.assets = (raw ?? [])
       .map((asset: Record<string, Object>) => HapAsset.fromJson(asset))
-      .filter((asset: HapAsset) => asset.name.toLowerCase().endsWith('.hap'));
+      .filter((asset: HapAsset) => /\.(hap|app)$/i.test(asset.name));
     return release;
   }
 }

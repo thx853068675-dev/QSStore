@@ -32,7 +32,7 @@ pub fn reset_install_progress(path: &str) {
     }
 }
 
-pub(crate) fn report_install_progress(path: &str, phase: &'static str, sent: u64, total: u64) {
+pub fn report_install_progress(path: &str, phase: &'static str, sent: u64, total: u64) {
     if let Ok(mut row) = INSTALL_PROGRESS.lock() {
         *row = Some((path.into(), phase, sent.min(total), total));
     }

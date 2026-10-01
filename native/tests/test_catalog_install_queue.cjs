@@ -50,7 +50,7 @@ test('multiple Discover clicks enqueue immediately and install strictly in FIFO 
     InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' },
     LocalBundles: { isSelfBundle: () => false },
     JobStore: { open: async () => store }, getContext: () => ({}), errorText: String,
-    JobScheduler: { runDownload: async (_context, _store, job) => {
+    JobScheduler: { runningJobIds: () => [], runDownload: async (_context, _store, job) => {
       starts.push(job.appId);
       if (job.appId === 1) await firstGate;
       job.stage = 'PACKAGE_INSPECTED';
@@ -87,7 +87,7 @@ test('a confirmed local HAP joins FIFO installation without any network download
     LocalBundles: { isSelfBundle: () => false }, getContext: () => ({}), errorText: String,
     JobStore: { open: async () => ({ listAll: async () => queued,
       get: async id => queued.find(row => row.id === id) }) },
-    JobScheduler: { runDownload: async (_context, _store, row) => downloaded.push(row.id) } };
+    JobScheduler: { runningJobIds: () => [], runDownload: async (_context, _store, row) => downloaded.push(row.id) } };
   vm.runInNewContext(code, box);
   const ui = new box.Page();
   Object.assign(ui, { queueRecoveryReady: true, queueDraining: false, activeJobId: '',

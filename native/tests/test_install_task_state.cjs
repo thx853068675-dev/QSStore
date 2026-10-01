@@ -48,7 +48,7 @@ function pages(f) {
     LocalInstallTimeline: f.load('jobs/LocalInstallTimeline').LocalInstallTimeline,
     setInterval: () => 1, clearInterval: () => {},
     isPending: f.load('jobs/RecoveryPlanner').isPending };
-  const index = pageClass('Index', ['observeInstallTasks', 'taskForApp', 'taskPending', 'taskRunning',
+  const index = pageClass('Index', ['latestAssets', 'assetForBundle', 'observeInstallTasks', 'taskForApp', 'taskPending', 'taskRunning',
     'taskLabel', 'jobRunning', 'taskJobLabel', 'refreshLocalTimeline', 'startStageTicker', 'stopStageTicker'], globals);
   Object.assign(index, { installSubscription: -1, installTasks: [], pendingJobs: [], installedJobs: [],
     localJobId: '', stageTicker: -1,
@@ -400,15 +400,17 @@ test('stageElapsedMs falls back to zero when the stage has no mark yet', () => {
 test('cancel removes the task immediately, blocks late saves, and cleans after live work settles', async () => {
   const f = fixture(); await f.store.save(f.job);
   let release; const gate = new Promise(r => release = r);
+  let started; const entered = new Promise(resolve => { started = resolve; });
   let cleanups = 0, stopped = 0;
   f.store.cleanupCancelled = async () => { cleanups++; };
   f.store.stopTransfer = async () => { stopped++; return true; };
   const work = f.scheduler.runInstall(f.job.id, async () => {
+    started();
     await gate;
     f.job.stage = f.InstallStage.INSTALLED;
     await f.store.save(f.job);
   });
-  await Promise.resolve(); // 已进入模拟原生调用，再取消正在执行的任务。
+  await entered; // 等后台任务申请结束并进入模拟原生调用，再取消。
   const cancelled = assert.rejects(work, /已取消/);
   await f.scheduler.cancel({ filesDir: '/sandbox' }, f.store, f.job);
   await cancelled;
@@ -543,4 +545,32 @@ test('late native progress cannot revive a completed or canceled task', async ()
   assert.equal(f.state.snapshot()[0].percent, 100);
   f.state.remove(f.job.id); f.state.installProgress(f.job.id, 'transfer', 50, 100);
   assert.equal(f.state.snapshot().length, 0);
+});
+
+
+test('switching between selected packages resets unrelated progress then restores the matching live task', async () => {
+  const f = fixture(), { detail } = pages(f), d = detail();
+  f.job.stage = f.InstallStage.DOWNLOADING; await f.store.save(f.job);
+  f.state.setRunning(f.job.id, true); f.state.downloadProgress(f.job.id, 35, 100);
+  assert.equal(d.downloadBusy, true); assert.equal(d.downloadPercent, 35);
+  const original = d.selectedAsset;
+  d.selectedAsset = { ...original, name: 'other.app', bundleName: 'com.other.app' };
+  d.syncInstallTask(); assert.equal(d.downloadBusy, false); assert.equal(d.downloadPercent, 0);
+  assert.equal(d.activeInstallId, '');
+  d.selectedAsset = original; d.syncInstallTask();
+  assert.equal(d.downloadBusy, true); assert.equal(d.downloadPercent, 35);
+});
+
+test('Detail submits another selected package to the shared FIFO without starting a parallel install', async () => {
+  let queued = 0, downloaded = 0;
+  const d = pageClass('Detail', ['downloadSelected'], {
+    getContext: () => ({}), InstallStage: { QUEUED: 'QUEUED' },
+    JobStore: { open: async () => ({ enqueue: async () => ({ id: 'new', stage: 'QUEUED' }) }) },
+    JobScheduler: { requestQueue: () => { queued++; return true; }, runDownload: () => { downloaded++; } },
+    errorText: e => e.message
+  });
+  Object.assign(d, { selectedAsset: { name: 'other.hap', url: 'https://example.com/other.hap' }, app: { id: 42 },
+    currentInstallTask: () => undefined, notify() {}, syncInstallTask() {},
+    resumeInstall: () => { throw Error('parallel installation'); } });
+  await d.downloadSelected(); assert.equal(queued, 1); assert.equal(downloaded, 0);
 });

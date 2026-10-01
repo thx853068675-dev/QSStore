@@ -314,6 +314,7 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
         result.pop("snapshot", None)
         result["expires_in_seconds"] = max(0, cached["expires_at"] - int(time.time()))
         result["existing"] = _repo_owner_state(repo, identity[0])
+        result["supports_multi_select"] = True
         return result
 
     account_key = _ip_hash(identity[0])
@@ -329,8 +330,8 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
         candidate = next((r for r in releases if r["assets"]), None)
         if candidate is None:
             raise ApiError(422, "NO_HAP_ASSET",
-                           "该仓库的 release 里没有找到 .hap 附件",
-                           hint="请确认已在 GitHub Release 中上传 .hap 文件")
+                           "该仓库的 Release 里没有找到 HAP、APP 或 ZIP 附件",
+                           hint="请确认已上传 HAP、APP 或包含安装包的 ZIP")
         # HAP downloads/decoding must never block the old client's 20s request.
         # Cached identity is useful here; missing fields are filled after listing.
         choices = [{
@@ -345,7 +346,9 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
             "sha256": a.get("sha256") or "",
         } for a in candidate["assets"]]
         token = secrets.token_urlsafe(24)
-        result = {"draft_token": token, "repo": repo,
+        needs_inspection = any(a['name'].lower().endswith(('.app', '.zip')) for a in candidate['assets'])
+        result = {"draft_token": token, "repo": repo, "supports_multi_select": True,
+                "inspection_status": 'pending' if needs_inspection else 'ready',
                 "display_name": meta["display_name"],
                 "description": meta["description"],
                 "choices": choices,
@@ -356,6 +359,9 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
                 "expires_in_seconds": 1800}
         stored = dict(result, snapshot=snapshot)
         db.create_submit_draft(token, repo, identity[0], choices, meta["category"], stored)
+        if needs_inspection:
+            db.queue_archive_inspection(token)
+            submissions.wake_worker()
         return result
     except ApiError:
         raise
@@ -366,14 +372,32 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
         raise ApiError(500, "PREPARE_FAILED", f"检查失败：{e}") from e
 
 
+def h_submit_status(body: dict[str, Any], identity: tuple[str, str]) -> dict[str, Any]:
+    draft = db.get_submit_draft(str(body.get('draft_token') or ''), identity[0])
+    if not draft: raise ApiError(404, 'DRAFT_EXPIRED', '检查结果已过期，请重新检查')
+    if draft['inspection_state'] == 'error':
+        raise ApiError(422, 'INVALID_PACKAGE_ARCHIVE', draft['inspection_error'])
+    result = json.loads(draft['prepared_json'])
+    result.pop('snapshot', None)
+    result['inspection_status'] = draft['inspection_state']
+    result['existing'] = _repo_owner_state(draft['repo'], identity[0])
+    result["supports_multi_select"] = True
+    return result
+
+
 def h_submit_confirm(body: dict[str, Any], identity: tuple[str, str]) -> dict[str, Any]:
     draft = db.get_submit_draft(str(body.get("draft_token") or ""), identity[0])
     if draft is None:
         raise ApiError(404, "DRAFT_EXPIRED", "检查结果已过期，请重新检查仓库")
-    selected_name = str(body.get("asset_name") or "")
-    choice = next((a for a in draft["choices"] if a["name"] == selected_name), None)
-    if choice is None:
-        raise ApiError(400, "INVALID_ASSET", "请选择预处理列表中的 HAP")
+    if draft['inspection_state'] != 'ready':
+        raise ApiError(409, 'PACKAGE_INSPECTION_PENDING', '安装包仍在检查，请稍候')
+    names = body.get('asset_names', [body.get('asset_name', '')])
+    if (not isinstance(names, list) or not names or len(names) > 32 or
+            any(not isinstance(name, str) for name in names) or len(set(names)) != len(names)):
+        raise ApiError(400, 'INVALID_ASSET', '请选择一个或多个安装包')
+    choices = [next((a for a in draft['choices'] if a['name'] == name), None) for name in names]
+    if any(choice is None for choice in choices):
+        raise ApiError(400, 'INVALID_ASSET', '请选择检查列表中的安装包')
     category = str(body.get("category") or "")
     if category not in SUBMIT_CATEGORIES:
         raise ApiError(400, "INVALID_CATEGORY", "请选择应用分类")
@@ -384,7 +408,7 @@ def h_submit_confirm(body: dict[str, Any], identity: tuple[str, str]) -> dict[st
         # Drafts created before this rollout retain the same token and choices.
         snapshot = stored.get("snapshot") or submissions.prepared_snapshot(draft["repo"], GITHUB_TOKEN)
         app_id = db.publish_prepared_app(draft["token"], identity[0], identity[1],
-                                        category, choice, snapshot)
+                                        category, choices, snapshot)
     except ValueError as e:
         errors = {
             "DRAFT_EXPIRED": (404, "检查结果已过期，请重新检查仓库"),
@@ -557,6 +581,7 @@ router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/releases/(?P<tag>[^/]+)", h_app
 router.add("GET", r"/api/v1/healthz", lambda q: {"ok": True, "stage": "M1"})
 router.add("POST", r"/api/v1/submit/prepare", "SUBMIT_PREPARE")
 router.add("POST", r"/api/v1/submit/confirm", "SUBMIT_CONFIRM")
+router.add("POST", r"/api/v1/submit/status", "SUBMIT_STATUS")
 router.add("POST", r"/api/v1/apps/refresh-stale", "APPS_REFRESH_STALE")
 router.add("POST", r"/api/v1/apps/(?P<app_id>\d+)/refresh", "APP_REFRESH")
 router.add("GET", r"/api/v1/me/apps", "MY_APPS")
@@ -678,6 +703,8 @@ class Handler(BaseHTTPRequestHandler):
 
             if fn == "SUBMIT_PREPARE":
                 self._json(h_submit_prepare(self._read_body(), ip, self._identity()))
+            elif fn == "SUBMIT_STATUS":
+                self._json(h_submit_status(self._read_body(), self._identity()))
             elif fn == "SUBMIT_CONFIRM":
                 self._json(h_submit_confirm(self._read_body(), self._identity()))
             elif fn == "APPS_REFRESH_STALE":

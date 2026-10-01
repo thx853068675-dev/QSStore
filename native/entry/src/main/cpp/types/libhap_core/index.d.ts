@@ -1,3 +1,6 @@
+export interface PackageEntry { name: string; size: number; }
+export const listPackageEntries: (path: string) => PackageEntry[];
+export const extractPackageEntry: (path: string, entry: string, output: string) => Promise<void>;
 export const readModuleJson: (path: string) => string;
 export const readPackInfo: (path: string) => string;
 /** JSON permission list, including a validated embedded QuietStart worker. */

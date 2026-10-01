@@ -512,7 +512,7 @@ def normalize_repo(repo_url: str) -> str | None:
 
 
 def is_hap_asset(name: str) -> bool:
-    return name.lower().endswith(".hap")
+    return name.lower().endswith((".hap", ".app", ".zip"))
 
 
 # ───────────────────────── 采集主流程 ─────────────────────────
@@ -584,7 +584,15 @@ def enrich_assets_with_hap_metadata(
     for rel in releases:
         if done >= limit:
             break
+        expanded = []
         for a in rel.get("assets") or []:
+            if a['name'].lower().endswith(('.app', '.zip')) or '#qingqi-package=' in a['download_url']:
+                from .package_archive import scan_asset
+                try: expanded.extend(scan_asset(a, token))
+                except CollectError:
+                    if not a['name'].lower().endswith('.zip'): expanded.append(a)
+                continue
+            expanded.append(a)
             tmp = _download_to_temp(a["download_url"], token=token)
             if not tmp:
                 continue
@@ -615,15 +623,17 @@ def enrich_assets_with_hap_metadata(
                     os.unlink(tmp)
                 except OSError:
                     pass
+        rel['assets'] = expanded
         done += 1
 
 
 def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
              progress: Callable[[str], None] | None = None,
-             selection: dict[str, str] | None = None,
+             selection: dict[str, Any] | None = None,
              snapshot: dict[str, Any] | None = None,
              generation: int | None = None) -> dict[str, Any]:
     """采集单个仓库并入库。返回统计信息。"""
+    explicit_selection = selection is not None
     meta = copy.deepcopy(snapshot["metadata"]) if snapshot else fetch_app_metadata(repo, token=token)
     releases = copy.deepcopy(snapshot["releases"]) if snapshot else fetch_releases(repo, token=token)
 
@@ -634,11 +644,18 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
             if selected:
                 target = dict(selected)
                 target["assets"] = [a for a in selected.get("assets", [])
-                                    if a["name"] == selection["asset_name"]]
+                                    if a['name'] in [item['asset_name'] for item in
+                                        (selection.get('assets') or [selection])]]
                 # The selected HAP comes first, including a legacy draft whose
                 # Release is no longer in GitHub's first three entries.
                 scan_releases = [target] + [r for r in releases if r is not selected and r.get("assets")]
         enrich_assets_with_hap_metadata(scan_releases, token=token, progress=progress)
+        if scan_releases is not releases and scan_releases:
+            for original in releases:
+                if original['tag'] == scan_releases[0]['tag']:
+                    replaced = {a['name'] for a in scan_releases[0]['assets']}
+                    original['assets'] = scan_releases[0]['assets'] + [a for a in original['assets'] if a['name'] not in replaced]
+                    break
 
     # A temporary download failure must not erase metadata already verified
     # against the same GitHub digest. This also keeps older releases usable:
@@ -665,33 +682,32 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
         selection = db.get_app_selection(existing_row["id"]) if existing_row else None
     if selection:
         selection = dict(selection)
-        selected_name = selection["asset_name"]
-        selected_bundle = selection.get("bundle_name") or ""
-        selected_tag = selection.get("tag") or ""
-        selected_sha = selection.get("sha256") or ""
-        if not selected_bundle:
-            selected_bundle = next((a.get("bundle_name", "") for r in releases
-                if not selected_tag or r["tag"] == selected_tag
-                for a in r.get("assets", []) if a["name"] == selected_name
-                and (not selected_sha or a.get("sha256") == selected_sha)), "")
-            selection["bundle_name"] = selected_bundle
-        if generation is not None and not selected_bundle:
-            raise CollectError("所选 HAP 的应用身份尚未解析成功，后台将重试")
-        if selected_tag and not any(
-            r["tag"] == selected_tag and a["name"] == selected_name and
-            (not selected_bundle or a.get("bundle_name") == selected_bundle) and
-            (not selected_sha or a.get("sha256") == selected_sha)
-            for r in releases for a in r.get("assets") or []
-        ):
-            raise CollectError("所选 HAP 已从该 GitHub Release 移除，请重新预处理")
+        selections = selection.get('assets') or [selection]
+        for chosen in selections:
+            name, bundle = chosen['asset_name'], chosen.get('bundle_name', '')
+            tag, sha = chosen.get('tag', ''), chosen.get('sha256', '')
+            if not bundle:
+                bundle = next((a.get('bundle_name', '') for r in releases if not tag or r['tag'] == tag
+                    for a in r.get('assets', []) if a['name'] == name and (not sha or a.get('sha256') == sha)), '')
+                chosen['bundle_name'] = bundle
+            if generation is not None and not bundle:
+                raise CollectError('所选安装包的应用身份尚未解析成功，后台将重试')
+            if (generation is not None or explicit_selection) and tag and not any(r['tag'] == tag and a['name'] == name and
+                (not bundle or a.get('bundle_name') == bundle) and (not sha or a.get('sha256') == sha)
+                for r in releases for a in r.get('assets', [])):
+                raise CollectError('所选安装包已从 Release 移除，请重新检查')
+        selection['assets'] = selections
+        selection['bundle_name'] = selections[0].get('bundle_name', '')
         for release in releases:
-            matching = [a for a in release.get("assets") or []
-                        if (a.get("bundle_name") == selected_bundle
-                            if selected_bundle else a["name"] == selected_name)]
-            # Signed/unsigned or device variants may share a bundle name.
-            # Keep the user's exact choice wherever that filename exists.
-            preferred = [a for a in matching if a["name"] == selected_name]
-            release["assets"] = preferred or matching
+            keep = []
+            for chosen in selections:
+                matching = [a for a in release.get('assets', []) if
+                    (a.get('bundle_name') == chosen.get('bundle_name') if chosen.get('bundle_name')
+                     else a['name'] == chosen['asset_name'])]
+                preferred = [a for a in matching if a['name'] == chosen['asset_name']]
+                for asset in preferred or matching:
+                    if not any(old['name'] == asset['name'] for old in keep): keep.append(asset)
+            release['assets'] = keep
 
     presentation_releases = [r for r in releases if not r.get("prerelease")] or releases
     selected_label = next((a.get("display_name") for r in presentation_releases
@@ -702,7 +718,8 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
     if selected_label:
         meta["display_name"] = selected_label
     app_id, n, applied = db.apply_catalog_snapshot(repo, meta, releases, generation,
-        (selection or {}).get("bundle_name", ""), (snapshot or {}).get("fetched_at"))
+        (selection or {}).get("bundle_name", ""), (snapshot or {}).get("fetched_at"),
+        (selection or {}).get("assets"))
     hap_count = sum(len(r.get("assets") or []) for r in releases)
     return {
         "app_id": app_id,

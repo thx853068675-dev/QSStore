@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <limits>
 #include <optional>
@@ -216,6 +218,112 @@ std::ifstream OpenHap(const std::string& hap_path, uint64_t& file_size) {
 }
 
 }  // namespace
+
+namespace {
+constexpr uint64_t kPackageLimit = 2ULL * 1024 * 1024 * 1024;
+bool PackageName(const std::string& name) {
+  if (name.empty() || name.size() > 1024 || name.front() == '/' ||
+      name.find('\\') != std::string::npos || name.find('\0') != std::string::npos ||
+      name.find(':') != std::string::npos) return false;
+  size_t pos = 0;
+  while (pos < name.size()) {
+    const auto end = name.find('/', pos);
+    const auto part = name.substr(pos, end == std::string::npos ? end : end - pos);
+    if (part.empty() || part == "." || part == "..") return false;
+    if (end == std::string::npos) break;
+    pos = end + 1;
+  }
+  auto lower = name;
+  std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+  return lower.size() >= 4 && (lower.compare(lower.size() - 4, 4, ".hap") == 0 ||
+                               lower.compare(lower.size() - 4, 4, ".app") == 0);
+}
+}
+
+std::vector<ArchiveEntry> ListPackageEntries(const std::string& archive_path) {
+  uint64_t size = 0, central = 0;
+  auto in = OpenHap(archive_path, size);
+  if (size > kPackageLimit) throw std::runtime_error("Archive exceeds 2 GB limit");
+  const auto entries = ReadCentralDirectory(in, size, central);
+  std::vector<ArchiveEntry> result;
+  uint64_t total = 0;
+  for (const auto& entry : entries) {
+    if (!PackageName(entry.name)) continue;
+    if ((entry.flags & 1) || (entry.method != 0 && entry.method != 8) ||
+        !entry.unpacked || entry.unpacked > kPackageLimit || !entry.packed ||
+        entry.unpacked / entry.packed > 200) throw std::runtime_error("Unsafe package archive entry");
+    if (std::any_of(result.begin(), result.end(), [&](const auto& row) { return row.name == entry.name; }))
+      throw std::runtime_error("Duplicate package archive entry");
+    total += entry.unpacked;
+    if (result.size() >= 32 || total > kPackageLimit) throw std::runtime_error("Too many or oversized packages in archive");
+    result.push_back({entry.name, entry.unpacked});
+  }
+  return result;
+}
+
+void ExtractPackageEntry(const std::string& archive_path, const std::string& name,
+                         const std::string& output) {
+  const auto allowed = ListPackageEntries(archive_path);
+  if (output == archive_path || std::none_of(allowed.begin(), allowed.end(),
+      [&](const auto& entry) { return entry.name == name; })) throw std::runtime_error("Invalid archive package selection");
+  uint64_t size = 0, central = 0;
+  auto in = OpenHap(archive_path, size);
+  const auto entries = ReadCentralDirectory(in, size, central);
+  const auto entry = *std::find_if(entries.begin(), entries.end(), [&](const auto& row) { return row.name == name; });
+  const auto local = Read(in, entry.local_offset, 30, size);
+  const auto name_size = U16(local.data() + 26);
+  const auto actual = Read(in, static_cast<uint64_t>(entry.local_offset) + 30, name_size, size);
+  const uint64_t offset = static_cast<uint64_t>(entry.local_offset) + 30 + name_size + U16(local.data() + 28);
+  if (U32(local.data()) != kLocal || U16(local.data() + 8) != entry.method ||
+      (U16(local.data() + 6) & 1) || std::string(actual.begin(), actual.end()) != name ||
+      offset + entry.packed > central) throw std::runtime_error("Archive package headers disagree");
+  std::ofstream out(output, std::ios::binary | std::ios::trunc);
+  if (!out) throw std::runtime_error("Cannot create extracted package");
+  z_stream stream{};
+  if (entry.method == 8 && inflateInit2(&stream, -MAX_WBITS) != Z_OK)
+    throw std::runtime_error("Cannot initialize package inflater");
+  std::array<uint8_t, 64 * 1024> packed{}, expanded{};
+  uint64_t consumed = 0, produced = 0;
+  uLong crc = crc32(0, Z_NULL, 0);
+  int state = Z_OK;
+  try {
+    in.seekg(static_cast<std::streamoff>(offset));
+    while (consumed < entry.packed) {
+      const size_t chunk = std::min<uint64_t>(packed.size(), entry.packed - consumed);
+      if (!in.read(reinterpret_cast<char*>(packed.data()), chunk)) throw std::runtime_error("Truncated package entry");
+      consumed += chunk;
+      stream.next_in = packed.data(); stream.avail_in = chunk;
+      do {
+        size_t count = chunk;
+        const uint8_t* bytes = packed.data();
+        if (entry.method == 8) {
+          stream.next_out = expanded.data(); stream.avail_out = expanded.size();
+          state = inflate(&stream, Z_NO_FLUSH);
+          // A full output buffer can consume the last input byte. The next
+          // flush then legitimately reports Z_BUF_ERROR: refill the input,
+          // rather than treating this chunk boundary as a corrupted package.
+          if (state == Z_BUF_ERROR && stream.avail_in == 0 && stream.avail_out == expanded.size()) break;
+          if (state != Z_OK && state != Z_STREAM_END)
+            throw std::runtime_error("Package decompression failed (zlib " + std::to_string(state) + ")");
+          count = expanded.size() - stream.avail_out; bytes = expanded.data();
+        } else stream.avail_in = 0;
+        produced += count;
+        if (produced > entry.unpacked) throw std::runtime_error("Package expansion exceeds declared size");
+        out.write(reinterpret_cast<const char*>(bytes), count);
+        if (!out) throw std::runtime_error("Cannot write extracted package");
+        crc = crc32(crc, bytes, count);
+        if (state == Z_STREAM_END && (stream.avail_in || consumed != entry.packed))
+          throw std::runtime_error("Package entry has trailing compressed data");
+      } while (stream.avail_in || (entry.method == 8 && state != Z_STREAM_END && !stream.avail_out));
+    }
+    if (produced != entry.unpacked || crc != entry.crc || (entry.method == 8 && state != Z_STREAM_END))
+      throw std::runtime_error("Extracted package checksum or length mismatch");
+  } catch (...) {
+    if (entry.method == 8) inflateEnd(&stream);
+    out.close(); std::remove(output.c_str()); throw;
+  }
+  if (entry.method == 8) inflateEnd(&stream);
+}
 
 std::vector<uint8_t> ReadEntryBytes(const std::string& hap_path,
                                     const std::string& entry_name, size_t limit) {

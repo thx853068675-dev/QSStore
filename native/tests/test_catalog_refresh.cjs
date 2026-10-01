@@ -24,7 +24,7 @@ const code = ts.transpileModule(`class Index {
   static STAR_FIELD_COUNT = 46;
   static STARRED_MIN_STARS = 100;
   ${['catalogHasMore', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
-    'refreshCatalogInstallState', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice',
+    'latestAssets', 'assetForBundle', 'refreshCatalogInstallState', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice',
     'displayApps', 'featuredTier', 'featuredColors']
     .map(method).join('\n')}
 }; globalThis.Page = Index;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;

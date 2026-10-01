@@ -4,6 +4,7 @@ import { DownloadJobs } from './DownloadJobs';
 import { InstallJob } from './InstallJob';
 import { JobStore } from './JobStore';
 import { JobCancellation } from './JobCancellation';
+import { BackgroundInstallTask } from './BackgroundInstallTask';
 
 /**
  * 同一安装任务的唯一互斥点。
@@ -17,6 +18,18 @@ import { JobCancellation } from './JobCancellation';
  */
 export class JobScheduler {
   private static inFlight: Set<string> = new Set<string>();
+  private static queueWakeup: (() => void) | undefined = undefined;
+
+  static setQueueWakeup(handler: (() => void) | undefined): void {
+    JobScheduler.queueWakeup = handler;
+  }
+
+  /** Detail submits to the same FIFO dispatcher as Discover and local imports. */
+  static requestQueue(): boolean {
+    if (JobScheduler.queueWakeup === undefined) return false;
+    JobScheduler.queueWakeup();
+    return true;
+  }
   /** 已超时、但旧执行仍在后台收尾的任务。这些任务的锁还没放。 */
   private static timedOut: Set<string> = new Set<string>();
   private static cleanup: Map<string, () => Promise<void>> = new Map();
@@ -40,7 +53,7 @@ export class JobScheduler {
   }
 
   /**
-   * 单个任务的墙钟上限。
+   * 单个任务的执行预算；进程被系统挂起的时间不算设备无响应。
    *
    * 安装链路里最慢的一步是「安装到设备」，它能挂多久不由我们决定：设备休眠、
    * 无线调试掉线、授权弹窗没人点，底层调用都可能一直不返回。没有上限时任务会
@@ -89,7 +102,9 @@ export class JobScheduler {
     InstallTaskState.setRunning(jobId, true);
     let timer: number = -1;
     // 放在微任务内调用，同步抛错也会经过 finally，避免留下永久锁。
-    const work = Promise.resolve().then(() => {
+    const work = Promise.resolve().then(async () => {
+      JobCancellation.assertActive(jobId);
+      await BackgroundInstallTask.acquire(jobId);
       JobCancellation.assertActive(jobId);
       return body();
     }).finally(async () => {
@@ -104,14 +119,28 @@ export class JobScheduler {
       JobScheduler.cancelWaiters.delete(jobId);
       JobCancellation.clear(jobId);
       InstallTaskState.setRunning(jobId, false);
+      // 超时或取消只结束界面等待，保活一直保留到真实执行和残留清理退出。
+      await BackgroundInstallTask.release(jobId);
     });
     const timeout = new Promise<T>((_resolve, reject) => {
-      timer = setTimeout(() => {
+      let remaining = timeoutMs;
+      let lastTick = Date.now();
+      const tick = (): void => {
         if (JobCancellation.isCancelled(jobId)) return;
+        const now = Date.now();
+        const elapsed = Math.max(0, now - lastTick);
+        lastTick = now;
+        // 挂起后所有定时器会在回前台时集中触发；不能先超时再去读取已完成的下载。
+        if (elapsed < 5000) remaining -= elapsed;
+        if (remaining > 0) {
+          timer = setTimeout(tick, Math.min(1000, remaining));
+          return;
+        }
         JobScheduler.timedOut.add(jobId);
         InstallTaskState.setRunning(jobId, true, true);
         reject(new Error('等待设备响应超时，本次执行仍在收尾，请勿重复安装'));
-      }, timeoutMs);
+      };
+      timer = setTimeout(tick, Math.min(1000, remaining));
     });
     const cancelled = new Promise<T>((_resolve, reject) => {
       JobScheduler.cancelWaiters.set(jobId, () => reject(new Error('安装任务已取消')));

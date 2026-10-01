@@ -2873,18 +2873,22 @@ async fn handle_server_app_install(
             let hap_paths: Vec<PathBuf> = if is_app_pack {
                 let temp_dir = std::env::temp_dir().join(format!("hdc_app_extract_{}", rand::random::<u32>()));
                 std::fs::create_dir_all(&temp_dir)?;
+                cleanup_dirs.push(temp_dir.clone());
                 let haps = extract_haps_from_app(&app_path, &temp_dir)?;
                 if haps.is_empty() {
                     return Err(Error::new(ErrorKind::InvalidData, "No .hap found in .app package"));
                 }
-                cleanup_dirs.push(temp_dir);
                 haps
             } else {
                 vec![PathBuf::from(&app_path)]
             };
 
+            let total = hap_paths.iter().try_fold(0u64, |sum, path| std::fs::metadata(path).map(|meta| sum + meta.len()))?;
+            let mut sent = 0;
             for hap_path in &hap_paths {
-                install_single_hap(tcp_map, usb_map, session_id, channel_id, &mut rx, hap_path, &options).await?;
+                install_single_hap(tcp_map, usb_map, session_id, channel_id, &mut rx, hap_path, &options,
+                                   &app_path, sent, total).await?;
+                sent += std::fs::metadata(hap_path)?.len();
             }
         }
 
@@ -2904,16 +2908,21 @@ fn extract_haps_from_app(app_path: &str, out_dir: &Path) -> io::Result<Vec<PathB
     let mut archive = ZipArchive::new(file)
         .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Failed to open .app as zip: {e}")))?;
     let mut haps = Vec::new();
+    let mut total = 0;
+    let mut names = std::collections::HashSet::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)
             .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Zip entry error: {e}")))?;
         let name = entry.name().to_string();
         if name.to_ascii_lowercase().ends_with(".hap") {
-            let file_name = Path::new(&name)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&name);
-            let out_path = out_dir.join(file_name);
+            total += entry.size();
+            if name.starts_with('/') || name.contains(['\\', '\0', ':']) ||
+               name.split('/').any(|part| part == ".." || part == "." || part.is_empty()) ||
+               !names.insert(name.clone()) || haps.len() >= 32 || total > 2 * 1024 * 1024 * 1024 ||
+               entry.size() == 0 || entry.compressed_size() == 0 || entry.size() / entry.compressed_size() > 200 {
+                return Err(Error::new(ErrorKind::InvalidData, "Unsafe APP package"));
+            }
+            let out_path = out_dir.join(format!("module-{}.hap", haps.len()));
             let mut out = std::fs::File::create(&out_path)?;
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Extract failed: {e}")))?;
@@ -2932,6 +2941,9 @@ async fn install_single_hap(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<TaskMessage>,
     app_path: &Path,
     options: &str,
+    progress_path: &str,
+    base: u64,
+    total: u64,
 ) -> io::Result<()> {
     let app_path_str = app_path.to_str().unwrap_or("app.hap");
     let file_name = app_path
@@ -2947,7 +2959,7 @@ async fn install_single_hap(
     let file_size = metadata.len();
 
     // Step 1: Send AppInit to daemon (creates daemon slave task, no direct response).
-    crate::report_install_progress(app_path_str, "waiting", 0, file_size);
+    crate::report_install_progress(progress_path, "waiting", base, total);
     let app_init = TaskMessage {
         channel_id,
         command: HdcCommand::AppInit,
@@ -3011,7 +3023,7 @@ async fn install_single_hap(
     }
     info!("AppBegin received, daemon ready to receive data");
 
-    crate::report_install_progress(app_path_str, "transfer", 0, file_size);
+    crate::report_install_progress(progress_path, "transfer", base, total);
 
     // Step 3: Stream app data with TransferPayload header (same as file send)
     let chunk_size = MAX_SIZE_IOBUF - 64;
@@ -3042,12 +3054,12 @@ async fn install_single_hap(
         let data = concat_pack(&app_data);
         send_to_session(tcp_map, usb_map, session_id, &data).await?;
         offset += n as u64;
-        crate::report_install_progress(app_path_str, "transfer", offset, file_size);
+        crate::report_install_progress(progress_path, "transfer", base + offset, total);
     }
 
     // Step 4: Wait for daemon install result (AppFinish).
     info!("App data sent, waiting for daemon install result...");
-    crate::report_install_progress(app_path_str, "installing", offset, file_size);
+    crate::report_install_progress(progress_path, "installing", base + offset, total);
     let timeout = tokio::time::Duration::from_secs(120);
     let install_result = tokio::time::timeout(timeout, async {
         loop {

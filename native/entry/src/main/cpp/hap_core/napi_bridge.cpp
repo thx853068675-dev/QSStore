@@ -578,6 +578,103 @@ napi_value SignHap(napi_env env, napi_callback_info info) {
   return promise;
 }
 
+napi_value ExtractPackage(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value args[3]{};
+  if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 3) {
+    napi_throw_type_error(env, nullptr, "Expected archive, entry and output");
+    return nullptr;
+  }
+  auto* state = new SignWork();
+  for (size_t i = 0; i < argc; ++i) {
+    size_t length = 0;
+    if (napi_get_value_string_utf8(env, args[i], nullptr, 0, &length) != napi_ok ||
+        length == 0 || length > 4096) {
+      delete state;
+      napi_throw_type_error(env, nullptr, "Invalid signing path");
+      return nullptr;
+    }
+    std::vector<char> buffer(length + 1);
+    if (napi_get_value_string_utf8(env, args[i], buffer.data(), buffer.size(), &length) != napi_ok) {
+      delete state;
+      napi_throw_type_error(env, nullptr, "Invalid signing path");
+      return nullptr;
+    }
+    state->paths[i].assign(buffer.data(), length);
+  }
+  napi_value promise = nullptr;
+  if (napi_create_promise(env, &state->deferred, &promise) != napi_ok) {
+    delete state;
+    napi_throw_error(env, nullptr, "Cannot create signing task");
+    return nullptr;
+  }
+  napi_value name = nullptr;
+  napi_create_string_utf8(env, "qingqiExtractPackage", NAPI_AUTO_LENGTH, &name);
+  if (napi_create_async_work(env, nullptr, name,
+      [](napi_env, void* data) {
+        auto* task = static_cast<SignWork*>(data);
+        try {
+          qingqi::hap::ExtractPackageEntry(task->paths[0], task->paths[1], task->paths[2]);
+          task->result = 0;
+        } catch (const std::exception& error) {
+          std::strncpy(task->error.data(), error.what(), task->error.size() - 1);
+          task->result = 1;
+        }
+      },
+      [](napi_env env, napi_status status, void* data) {
+        auto* task = static_cast<SignWork*>(data);
+        if (status == napi_ok && task->result == 0) {
+          napi_value value = nullptr;
+          napi_get_undefined(env, &value);
+          napi_resolve_deferred(env, task->deferred, value);
+        } else {
+          napi_value message = nullptr;
+          napi_value error = nullptr;
+          const char* detail = task->error[0] ? task->error.data() : "HAP signing failed";
+          napi_create_string_utf8(env, detail, NAPI_AUTO_LENGTH, &message);
+          napi_create_error(env, nullptr, message, &error);
+          napi_reject_deferred(env, task->deferred, error);
+        }
+        napi_delete_async_work(env, task->work);
+        delete task;
+      }, state, &state->work) != napi_ok ||
+      napi_queue_async_work(env, state->work) != napi_ok) {
+    if (state->work) napi_delete_async_work(env, state->work);
+    delete state;
+    napi_throw_error(env, nullptr, "Cannot queue signing task");
+    return nullptr;
+  }
+  return promise;
+}
+
+napi_value ListPackages(napi_env env, napi_callback_info info) {
+  size_t argc = 1, length = 0;
+  napi_value arg = nullptr;
+  napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr);
+  if (argc != 1 || napi_get_value_string_utf8(env, arg, nullptr, 0, &length) != napi_ok || !length || length > 4096) {
+    napi_throw_type_error(env, nullptr, "Invalid archive path"); return nullptr;
+  }
+  std::vector<char> path(length + 1);
+  napi_get_value_string_utf8(env, arg, path.data(), path.size(), &length);
+  try {
+    const auto entries = qingqi::hap::ListPackageEntries(std::string(path.data(), length));
+    napi_value result = nullptr;
+    napi_create_array_with_length(env, entries.size(), &result);
+    for (size_t i = 0; i < entries.size(); ++i) {
+      napi_value row = nullptr, name = nullptr, size = nullptr;
+      napi_create_object(env, &row);
+      napi_create_string_utf8(env, entries[i].name.c_str(), entries[i].name.size(), &name);
+      napi_create_double(env, static_cast<double>(entries[i].size), &size);
+      napi_set_named_property(env, row, "name", name);
+      napi_set_named_property(env, row, "size", size);
+      napi_set_element(env, result, i, row);
+    }
+    return result;
+  } catch (const std::exception& error) {
+    napi_throw_error(env, "PACKAGE_ARCHIVE", error.what()); return nullptr;
+  }
+}
+
 napi_value HdcInstallProgress(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value args[2] = {};
@@ -605,6 +702,8 @@ napi_value HdcInstallProgress(napi_env env, napi_callback_info info) {
 
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
+    {"listPackageEntries", nullptr, ListPackages, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"extractPackageEntry", nullptr, ExtractPackage, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readModuleJson", nullptr, ReadModule, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readInstallPermissions", nullptr, ReadInstallPermissions, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readPackInfo", nullptr, ReadPack, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -625,7 +724,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"hdcInstallProgress", nullptr, HdcInstallProgress, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"hdcDisconnect", nullptr, HdcDisconnect, nullptr, nullptr, nullptr, napi_default, nullptr}
   };
-  napi_define_properties(env, exports, 13, properties);
+  napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   return exports;
 }
 

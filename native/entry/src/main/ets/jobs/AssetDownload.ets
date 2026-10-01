@@ -30,8 +30,9 @@ export class AssetDownload {
     // 没有商店摘要时使用一次性的短路径；任务记录会持久化该路径。
     const stem = job.appId + '-' + (job.expectedSha256.length > 0 ? job.expectedSha256 :
       'download-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1000000));
-    job.cachePath = dir + '/' + stem + '.hap';
-    job.signedPath = dir + '/' + stem + '.signed.hap';
+    const extension = (job.assetName.toLowerCase().endsWith('.app') ? '.app' : '.hap');
+    job.cachePath = dir + '/' + stem + extension;
+    job.signedPath = dir + '/' + stem + '.signed' + extension;
   }
 
   async verifiedFileExists(job: InstallJob): Promise<boolean> {
@@ -134,6 +135,9 @@ export class AssetDownload {
         action: request.agent.Action.DOWNLOAD,
         url: job.sourceUrl,
         mode: request.agent.Mode.BACKGROUND,
+        title: job.assetName,
+        description: '下载应用安装包',
+        gauge: true,
         saveas: partPath,
         overwrite: false,
         retry: true,
@@ -158,14 +162,19 @@ export class AssetDownload {
     // a slow but live transfer is never interrupted for taking too long.
     let lastProcessed = 0;
     let lastGrowthAt = Date.now();
+    let lastPollAt = lastGrowthAt;
     let carriedBytes = 0;
     let carriedTotal = info.progress.sizes.length > 0 ? info.progress.sizes[0] : 0;
-    while (Date.now() - lastGrowthAt < STALL_TIMEOUT_MS) {
+    for (;;) {
       JobCancellation.assertActive(job.id);
       info = await request.agent.show(task.tid);
+      const now = Date.now();
+      // 先读取系统任务再判断超时。进程被挂起时下载代理仍在工作，完成结果优先。
+      if (now - lastPollAt >= STALL_TIMEOUT_MS) lastGrowthAt = now;
+      lastPollAt = now;
       if (info.progress.processed > lastProcessed) {
         lastProcessed = info.progress.processed;
-        lastGrowthAt = Date.now();
+        lastGrowthAt = now;
       }
       if (onProgress && info.progress.sizes.length > 0) {
         carriedTotal = info.progress.sizes[0];
@@ -176,6 +185,7 @@ export class AssetDownload {
         info.progress.state === request.agent.State.REMOVED) {
         throw new Error('附件下载失败：' + info.reason);
       }
+      if (now - lastGrowthAt >= STALL_TIMEOUT_MS) break;
       await new Promise<void>((resolve: () => void) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
     if (info.progress.state !== request.agent.State.COMPLETED) {

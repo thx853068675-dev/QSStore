@@ -20,6 +20,8 @@ export class SubmitChoice {
 
 export class SubmitDraft {
   token: string = '';
+  inspectionStatus: string = 'ready';
+  supportsMultiSelect: boolean = false;
   repo: string = '';
   displayName: string = '';
   suggestedCategory: string = '';
@@ -33,6 +35,8 @@ export class SubmitDraft {
   static fromJson(row: Record<string, Object>): SubmitDraft {
     const draft = new SubmitDraft();
     draft.token = String(row['draft_token'] ?? '');
+    draft.inspectionStatus = String(row['inspection_status'] ?? 'ready');
+    draft.supportsMultiSelect = row['supports_multi_select'] === true;
     draft.repo = String(row['repo'] ?? '');
     draft.displayName = String(row['display_name'] ?? '');
     draft.suggestedCategory = String(row['suggested_category'] ?? '');

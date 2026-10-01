@@ -8,9 +8,14 @@
 #include <vector>
 
 int main(int argc, char** argv) {
-  if (argc != 2 && argc != 3 && argc != 4) return 2;
+  if (argc != 2 && argc != 3 && argc != 4 && argc != 5) return 2;
   try {
-    if (argc == 4 && std::string(argv[2]) == "icon") {
+    if (argc == 5 && std::string(argv[2]) == "extract") {
+      qingqi::hap::ExtractPackageEntry(argv[1], argv[3], argv[4]);
+    } else if (argc == 3 && std::string(argv[2]) == "list") {
+      for (const auto& entry : qingqi::hap::ListPackageEntries(argv[1]))
+        std::cout << entry.size << '\t' << entry.name << '\n';
+    } else if (argc == 4 && std::string(argv[2]) == "icon") {
       // Writes the raw icon bytes so tests can check the real payload.
       const std::vector<uint8_t> icon = qingqi::hap::ReadHapIcon(argv[1], argv[3]);
       std::cout.write(reinterpret_cast<const char*>(icon.data()),

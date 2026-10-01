@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 
-function loadAssetDownload(mocks) {
+function loadAssetDownload(mocks, globals = {}) {
   const cancellation = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
     '../entry/src/main/ets/jobs/JobCancellation.ets'), 'utf8'), {
@@ -19,7 +19,7 @@ function loadAssetDownload(mocks) {
   const exports = {};
   vm.runInNewContext(code, { exports, require: name => mocks[name] ||
     (name === './JobCancellation' ? cancellation : {}),
-    setTimeout, clearTimeout });
+    setTimeout, clearTimeout, ...globals });
   return exports.AssetDownload;
 }
 
@@ -107,7 +107,7 @@ test('a release without SHA-256 downloads into a persistent cache path', async (
     '@kit.CoreFileKit': { fileIo, hash: { hash: async () => 'c'.repeat(64) } },
     './InstallTaskState': { InstallTaskState: { downloadProgress: () => {} } }
   });
-  const job = { id: '7:app.hap:https://example.org/app.hap', appId: 7,
+  const job = { id: '7:app.hap:https://example.org/app.hap', appId: 7, assetName: 'app.hap',
     sourceUrl: 'https://example.org/app.hap', mirrorUrls: [],
     expectedSha256: '', cachePath: '', signedPath: '', transferTaskId: '' };
   const saves = [];
@@ -120,4 +120,70 @@ test('a release without SHA-256 downloads into a persistent cache path', async (
   assert.equal(files.has(job.cachePath), true);
   assert.ok(saves.some(row => row.cachePath === job.cachePath && row.digest === ''));
   assert.ok(saves.some(row => row.cachePath === job.cachePath && row.digest === 'c'.repeat(64)));
+});
+
+function suspendedDownload({ completedOnReturn = false, stillStalled = false } = {}) {
+  let now = 0, started = false, reads = 0, polls = 0, removed = 0, created = 0;
+  const files = new Set(), destination = '/sandbox/app.hap';
+  const states = { INITIALIZED: 0, RUNNING: 1, COMPLETED: 2, FAILED: 3, REMOVED: 4 };
+  const request = { agent: {
+    Action: { DOWNLOAD: 1 }, Mode: { BACKGROUND: 1 }, State: states,
+    create: async (_ctx, config) => {
+      created++;
+      assert.equal(config.mode, 1);
+      assert.equal(config.gauge, true);
+      return { tid: 'surviving-transfer', start: async () => { started = true; files.add(destination + '.part'); } };
+    },
+    show: async () => {
+      if (!started) return { progress: { state: 0, processed: 0, sizes: [100] } };
+      reads++;
+      const done = completedOnReturn ? polls >= 1 : !stillStalled && polls >= 2;
+      return { progress: { state: done ? 2 : 1, processed: done ? 100 : 0, sizes: [100] } };
+    },
+    getTask: async () => ({ pause: async () => {} }),
+    remove: async () => { removed++; }
+  } };
+  const AssetDownload = loadAssetDownload({
+    '@kit.BasicServicesKit': { request },
+    '@kit.CoreFileKit': { fileIo: {
+      accessSync: name => files.has(name), unlinkSync: name => files.delete(name),
+      renameSync: (from, to) => { files.delete(from); files.add(to); }
+    }, hash: { hash: async () => 'd'.repeat(64) } },
+    './InstallTaskState': { InstallTaskState: { downloadProgress: () => {} } }
+  }, {
+    Date: { now: () => now },
+    setTimeout: (callback, delay) => {
+      polls++;
+      // The first polling callback returns after a five-minute process freeze.
+      now += polls === 1 ? 300000 : delay;
+      callback(); return polls;
+    }
+  });
+  const job = { id: 'background', appId: 1, assetName: 'app.hap', sourceUrl: 'https://example.org/a.hap',
+    mirrorUrls: [], expectedSha256: '', cachePath: destination, signedPath: destination + '.signed', transferTaskId: '' };
+  return { downloader: new AssetDownload({ filesDir: '/sandbox' }, { save: async () => {} }), job,
+    evidence: () => ({ files, reads, created, removed, polls }) };
+}
+
+test('returning after suspension uses the completed system transfer without restarting it', async () => {
+  const f = suspendedDownload({ completedOnReturn: true });
+  await f.downloader.downloadAndVerify(f.job);
+  const e = f.evidence();
+  assert.equal(e.created, 1); assert.equal(e.removed, 1);
+  assert.equal(e.files.has(f.job.cachePath), true);
+  assert.equal(f.job.transferTaskId, '');
+});
+
+test('a surviving incomplete transfer gets a fresh stall budget after suspension', async () => {
+  const f = suspendedDownload();
+  await f.downloader.downloadAndVerify(f.job);
+  assert.equal(f.evidence().created, 1);
+  assert.equal(f.evidence().files.has(f.job.cachePath), true);
+});
+
+test('an actually stalled connection still fails after a full resumed stall budget', async () => {
+  const f = suspendedDownload({ stillStalled: true });
+  await assert.rejects(f.downloader.downloadAndVerify(f.job), /下载连接停滞/);
+  assert.equal(f.evidence().removed, 1);
+  assert.ok(f.evidence().polls >= 60);
 });

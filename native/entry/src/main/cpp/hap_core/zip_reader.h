@@ -6,6 +6,12 @@
 
 namespace qingqi::hap {
 
+struct ArchiveEntry { std::string name; uint64_t size; };
+std::vector<ArchiveEntry> ListPackageEntries(const std::string& archive_path);
+// Streams to a caller-chosen sandbox path; archive names never become paths.
+void ExtractPackageEntry(const std::string& archive_path, const std::string& name,
+                         const std::string& output);
+
 // Reads only the manifest entry. It never extracts arbitrary ZIP paths and
 // caps both compressed and expanded metadata before allocation.
 std::string ReadModuleJson(const std::string& hap_path);
@@ -24,4 +30,3 @@ std::vector<uint8_t> ReadEntryBytes(const std::string& hap_path,
 std::vector<uint8_t> ReadHapIcon(const std::string& hap_path, const std::string& icon_name);
 
 }  // namespace qingqi::hap
-

@@ -32,12 +32,13 @@ function fixture(t) {
       fs.writeFileSync(to, fs.readFileSync(from)) : fs.promises.copyFile(from, to)
   };
   const { LocalImport } = load('jobs/LocalImport', {
-    './InstallJob': jobs, './PackageInspector': { inspectPackage: p => JSON.parse(fs.readFileSync(p)) },
+    './InstallJob': jobs, './PackageArchive': { PackageArchive: { inspect: async p => JSON.parse(fs.readFileSync(p)),
+      extension: name => name.toLowerCase().endsWith('.app') ? '.app' : '.hap' } },
     '@kit.CoreFileKit': { fileIo, hash: { hash: async p =>
       crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex') },
     picker: { DocumentViewPicker: class { async select() { return selection; } } } }
   });
-  const store = { async enqueueLocal(cachePath, signedPath, sha256, bundleName, versionCode,
+  const store = { async save() {}, async enqueueLocal(cachePath, signedPath, sha256, bundleName, versionCode,
     versionName, moduleName, mainAbility) {
     enqueues++;
     return { id: 'local:' + sha256, cachePath, signedPath, expectedSha256: sha256,
@@ -70,7 +71,7 @@ test('a changed preview is rejected before creating a task and remains selectabl
 });
 test('cancelled selection and malformed metadata never leave staged preview files', async t => {
   const f = fixture(t); f.setSelection([]);
-  await assert.rejects(f.LocalImport.pickPreview(f.context), /未选择 HAP/);
+  await assert.rejects(f.LocalImport.pickPreview(f.context), /未选择安装文件/);
   f.setSelection([f.source]); fs.writeFileSync(f.source, 'not a package');
   await assert.rejects(f.LocalImport.pickPreview(f.context));
   assert.deepEqual(fs.readdirSync(f.context.cacheDir + '/local-hap-previews'), []);
@@ -99,8 +100,8 @@ function page(names, globals) {
 test('the local page selection action only displays a preview and never starts installation', async () => {
   const preview = { id: 'local:hash', cachePath: '/preview.hap', versionName: '1.2.0' };
   const ui = page(['pickLocalHap'], { getContext: () => ({}),
-    LocalImport: { pickPreview: async () => preview }, fileIo: { statSync: () => ({ size: 1048576 }) } });
-  Object.assign(ui, { localPreviewReady: false, loadLocalIcon: async () => {},
+    LocalImport: { pickPreviews: async () => [preview] }, fileIo: { statSync: () => ({ size: 1048576 }) } });
+  Object.assign(ui, { localPreviewReady: false, localChoices: [], loadLocalIcon: async () => {},
     refreshLocalTimeline: () => {}, continueInstall: () => assert.fail('selection must not install'),
     loadJobs: () => assert.fail('selection must not enqueue') });
   await ui.pickLocalHap();
@@ -113,7 +114,7 @@ test('the Install action queues the selected local HAP even when another job is 
     errorText: String, JobStore: { open: async () => ({ save: async row => saved = row.stage }) },
     LocalImport: { commitPreview: async () => job } });
   Object.assign(ui, { localBusy: false, localPreviewReady: true, localJobId: job.id,
-    localInfoJob: job, activeJobId: 'another-job', jobRunning: () => false,
+    localInfoJob: job, localChoices: [], activeJobId: 'another-job', jobRunning: () => false,
     loadJobs: async () => {}, refreshLocalTimeline: () => {}, drainInstallQueue: () => drains++ });
   await ui.installLocalPreview();
   assert.equal(saved, 'queued'); assert.equal(drains, 1); assert.equal(ui.localPreviewReady, false);
@@ -124,7 +125,7 @@ test('an old installed record must be queued for live verification rather than t
     errorText: String, JobStore: { open: async () => ({ save: async row => saved = row.stage }) },
     LocalImport: { commitPreview: async () => job } });
   Object.assign(ui, { localBusy: false, localPreviewReady: true, localJobId: job.id,
-    localInfoJob: job, jobRunning: () => false, loadJobs: async () => {},
+    localInfoJob: job, localChoices: [], jobRunning: () => false, loadJobs: async () => {},
     refreshLocalTimeline: () => {}, drainInstallQueue: () => {} });
   await ui.installLocalPreview();
   assert.equal(saved, 'queued');

@@ -487,7 +487,8 @@ pub extern "C" fn qingqi_verify_hap(
 ) -> i32 {
     match panic::catch_unwind(|| {
         let path = path(file_path)?;
-        verify_installable_hap(Path::new(&path))
+        if path.to_ascii_lowercase().ends_with(".app") { verify_app(Path::new(&path), Path::new(&path)) }
+        else { verify_installable_hap(Path::new(&path)) }
     }) {
         Ok(Ok(())) => {
             write_error(error_buffer, error_capacity, "");
@@ -537,6 +538,16 @@ fn module_permissions(module: &serde_json::Value) -> Vec<String> {
 }
 
 fn installation_permissions(input: &Path) -> Result<String, String> {
+    if input.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("app")) {
+        let mut names = Vec::new();
+        for (_, module) in stage_app_modules(input, input)? {
+            let row: Vec<String> = serde_json::from_str(&installation_permissions(&module.0)?)
+                .map_err(|_| "invalid APP permissions")?;
+            names.extend(row);
+        }
+        names.sort(); names.dedup();
+        return serde_json::to_string(&names).map_err(|_| "cannot encode APP permissions".into());
+    }
     let mut archive = ZipArchive::new(fs::File::open(input).map_err(|_| "cannot open source HAP")?)
         .map_err(|_| "source HAP is not a ZIP")?;
     let module: serde_json::Value = serde_json::from_slice(
@@ -671,6 +682,108 @@ fn repack_quietstart(input: &Path, output: &Path,
     Ok(())
 }
 
+const APP_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+
+fn safe_package_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 1024 && !name.starts_with('/') &&
+    !name.contains(['\\', '\0', ':']) && name.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn stage_app_modules(input: &Path, destination: &Path) -> Result<Vec<(String, PendingOutput)>, String> {
+    if fs::metadata(input).map_err(|_| "cannot inspect APP size")?.len() > APP_LIMIT {
+        return Err("APP file exceeds size limit".into());
+    }
+    let mut archive = ZipArchive::new(fs::File::open(input).map_err(|_| "cannot open APP")?)
+        .map_err(|_| "APP is not a ZIP")?;
+    let mut result = Vec::new();
+    let mut total: u64 = 0;
+    let mut identity = None;
+    let mut names = std::collections::HashSet::new();
+    let mut modules = std::collections::HashSet::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("APP entry: {e}"))?;
+        let name = entry.name().to_owned();
+        if !name.to_ascii_lowercase().ends_with(".hap") { continue; }
+        total = total.checked_add(entry.size()).ok_or("APP module size overflow")?;
+        if !safe_package_name(&name) || !names.insert(name.clone()) || entry.is_dir() ||
+           entry.size() == 0 || total > APP_LIMIT || result.len() >= 32 ||
+           entry.compressed_size() == 0 || entry.size() / entry.compressed_size() > 200 {
+            return Err("unsafe or oversized APP module".into());
+        }
+        let staged = PendingOutput::beside(destination)?;
+        let mut file = fs::File::create(&staged.0).map_err(|_| "cannot stage APP module")?;
+        let expected = entry.size();
+        let copied = std::io::copy(&mut entry.by_ref().take(expected + 1), &mut file)
+            .map_err(|e| format!("APP extraction: {e}"))?;
+        if copied != expected { return Err("APP module length mismatch".into()); }
+        drop(file);
+        let mut hap = ZipArchive::new(fs::File::open(&staged.0).map_err(|_| "cannot inspect APP module")?)
+            .map_err(|_| "APP module is not a HAP")?;
+        let manifest: serde_json::Value = serde_json::from_slice(&zip_entry(&mut hap, "module.json", 256 * 1024)?)
+            .map_err(|_| "APP module manifest is invalid")?;
+        let bundle = manifest.pointer("/app/bundleName").and_then(|v| v.as_str()).unwrap_or("");
+        validate_bundle_name(bundle)?;
+        let mut version = manifest.pointer("/app/versionCode").and_then(|v| v.as_u64()).unwrap_or(0);
+        let has_pack = hap.file_names().any(|name| name == "pack.info");
+        if has_pack {
+            let pack: serde_json::Value = serde_json::from_slice(&zip_entry(&mut hap, "pack.info", 256 * 1024)?)
+                .map_err(|_| "APP module pack.info is invalid")?;
+            if pack.pointer("/summary/app/bundleName").and_then(|v| v.as_str()) != Some(bundle) {
+                return Err("APP module pack.info bundle differs from manifest".into());
+            }
+            version = pack.pointer("/summary/app/version/code").and_then(|v| v.as_u64()).unwrap_or(0);
+        }
+        let module = manifest.pointer("/module/name").and_then(|v| v.as_str()).unwrap_or("");
+        if version > 0 && !module.is_empty() && modules.insert(module.to_owned()) {
+            let current = (bundle.to_owned(), version);
+            if identity.as_ref().is_some_and(|old| old != &current) { return Err("APP modules have different bundle or version".into()); }
+            identity = Some(current);
+        } else { return Err("APP module name or version is invalid or duplicated".into()); }
+        result.push((name, staged));
+    }
+    if result.is_empty() { return Err("APP contains no HAP modules".into()); }
+    Ok(result)
+}
+
+fn verify_app(input: &Path, destination: &Path) -> Result<(), String> {
+    for (_, module) in stage_app_modules(input, destination)? {
+        verify_installable_hap(&module.0)?;
+    }
+    Ok(())
+}
+
+fn sign_app(input: &Path, output: &Path, key: *const c_char, cert: *const c_char,
+            profile: *const c_char) -> Result<(), String> {
+    let modules = stage_app_modules(input, output)?;
+    let pending = PendingOutput::beside(output)?;
+    let file = fs::File::create(&pending.0).map_err(|_| "cannot create signed APP")?;
+    let mut writer = ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, module) in &modules {
+        let signed = PendingOutput::beside(output)?;
+        let from = std::ffi::CString::new(module.0.to_string_lossy().as_bytes()).map_err(|_| "invalid APP module path")?;
+        let to = std::ffi::CString::new(signed.0.to_string_lossy().as_bytes()).map_err(|_| "invalid APP signed path")?;
+        sign(from.as_ptr(), to.as_ptr(), key, cert, profile)?;
+        writer.start_file(name, options).map_err(|e| format!("APP output: {e}"))?;
+        let mut source = fs::File::open(&signed.0).map_err(|_| "cannot read signed APP module")?;
+        std::io::copy(&mut source, &mut writer).map_err(|_| "cannot write signed APP module")?;
+    }
+    // Preserve APP package metadata; never carry source HAP bytes/signatures through.
+    let mut original = ZipArchive::new(fs::File::open(input).map_err(|_| "cannot reopen APP")?)
+        .map_err(|_| "invalid APP")?;
+    for i in 0..original.len() {
+        let entry = original.by_index(i).map_err(|_| "invalid APP metadata")?;
+        if entry.name().eq("pack.info") {
+            if entry.size() > 4 * 1024 * 1024 { return Err("APP pack.info exceeds limit".into()); }
+            writer.raw_copy_file(entry).map_err(|_| "cannot preserve APP pack.info")?;
+        }
+    }
+    writer.finish().map_err(|_| "cannot finish APP")?.sync_all().map_err(|_| "cannot sync APP")?;
+    verify_app(&pending.0, output)?;
+    fs::rename(&pending.0, output).map_err(|_| "cannot commit signed APP")?;
+    Ok(())
+}
+
 fn sign(
     input: *const c_char,
     output: *const c_char,
@@ -678,8 +791,17 @@ fn sign(
     certificates: *const c_char,
     profile: *const c_char,
 ) -> Result<(), String> {
-    let input = path(input)?;
-    let output = path(output)?;
+    let input_path = path(input)?;
+    let output_path = path(output)?;
+    if input_path.to_ascii_lowercase().ends_with(".app") {
+        if input_path == output_path || (Path::new(&output_path).exists() &&
+            fs::canonicalize(&input_path).ok() == fs::canonicalize(&output_path).ok()) {
+            return Err("input and output APP paths must differ".into());
+        }
+        return sign_app(Path::new(&input_path), Path::new(&output_path), private_key, certificates, profile);
+    }
+    let input = input_path;
+    let output = output_path;
     let private_key = path(private_key)?;
     let certificates = path(certificates)?;
     let profile = path(profile)?;
@@ -817,6 +939,64 @@ fn validate_bundle_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn remote_command(port: u16, args: &[String], seconds: u64) -> Result<String, String> {
+    qingqi_hdc_transport::command(port, args, Duration::from_secs(seconds))
+        .map_err(|e| format!("APP device operation: {e}"))
+}
+
+fn stage_app_remote(port: u16, input: &Path) -> Result<(String, Vec<String>), String> {
+    let modules = stage_app_modules(input, input)?;
+    let folder = format!("/data/local/tmp/qingqi-app-{}-{}", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed));
+    remote_command(port, &["shell".into(), "mkdir".into(), "-p".into(), folder.clone()], 15)?;
+    let total = modules.iter().try_fold(0u64, |sum, (_, m)| fs::metadata(&m.0).map(|meta| sum + meta.len()))
+        .map_err(|_| "cannot inspect APP module sizes")?;
+    let mut sent = 0;
+    let mut paths = Vec::new();
+    let result = (|| {
+        for (i, (_, module)) in modules.iter().enumerate() {
+            verify_installable_hap(&module.0)?;
+            let remote = format!("{folder}/module-{i}.hap");
+            qingqi_hdc_transport::report_install_progress(&input.to_string_lossy(), "transfer", sent, total);
+            let output = remote_command(port, &["file".into(), "send".into(),
+                module.0.to_string_lossy().into(), remote.clone()], 300)?;
+            if output.contains("[Fail]") || !output.contains("FileTransfer finish") {
+                return Err(format!("APP module transfer did not finish: {output}"));
+            }
+            let mut file = fs::File::open(&module.0).map_err(|_| "cannot hash APP module")?;
+            let mut digest = Sha256::new();
+            let mut bytes = [0u8; 64 * 1024];
+            loop {
+                let count = file.read(&mut bytes).map_err(|_| "cannot read APP module")?;
+                if count == 0 { break; }
+                digest.update(&bytes[..count]);
+            }
+            let checksum = remote_command(port, &["shell".into(), "sha256sum".into(), remote.clone()], 45)?;
+            if !checksum.to_ascii_lowercase().contains(&format!("{:x}", digest.finalize())) {
+                return Err("APP module transfer checksum differs".into());
+            }
+            sent += fs::metadata(&module.0).map_err(|_| "cannot inspect APP module")?.len();
+            qingqi_hdc_transport::report_install_progress(&input.to_string_lossy(), "transfer", sent, total);
+            paths.push(remote);
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = remote_command(port, &["shell".into(), "rm".into(), "-rf".into(), folder], 15);
+        return Err(error);
+    }
+    Ok((folder, paths))
+}
+
+fn install_app_remote(port: u16, input: &Path) -> Result<String, String> {
+    let (folder, modules) = stage_app_remote(port, input)?;
+    qingqi_hdc_transport::report_install_progress(&input.to_string_lossy(), "installing", 0, 0);
+    let mut args = vec!["shell".into(), "bm".into(), "install".into(), "-p".into()];
+    args.extend(modules);
+    let result = remote_command(port, &args, 300);
+    let _ = remote_command(port, &["shell".into(), "rm".into(), "-rf".into(), folder], 15);
+    result
+}
+
 /// Drop every HDC device link, releasing the device's wireless debugging endpoint.
 ///
 /// The protocol has no "disconnect" verb, so this drops the transport instead.
@@ -897,7 +1077,7 @@ pub extern "C" fn qingqi_hdc_command(
                 vec!["shell".into(), "bm".into(), "dump".into(), "-n".into(), argument]
             }
             4 => {
-                if !argument.starts_with(&format!("{root}/")) || !argument.ends_with(".hap") ||
+                if !argument.starts_with(&format!("{root}/")) || !(argument.ends_with(".hap") || argument.ends_with(".app")) ||
                     argument.contains('"') || argument.contains('\n') {
                     return Err("HAP path is outside the application sandbox".into());
                 }
@@ -919,7 +1099,7 @@ pub extern "C" fn qingqi_hdc_command(
             8 => {
                 let sandbox = fs::canonicalize(&root).map_err(|error| error.to_string())?;
                 let package = fs::canonicalize(&argument).map_err(|error| error.to_string())?;
-                if !package.starts_with(&sandbox) || !argument.ends_with(".hap") ||
+                if !package.starts_with(&sandbox) || !(argument.ends_with(".hap") || argument.ends_with(".app")) ||
                     argument.contains('"') || argument.contains('\n') || argument.contains(' ') {
                     return Err("self-update HAP path is invalid".into());
                 }
@@ -932,6 +1112,26 @@ pub extern "C" fn qingqi_hdc_command(
         // start() 返回实际监听端口：首选端口被别的程序占用时它会换一个空闲的
         let actual_port = qingqi_hdc_transport::start(Path::new(&root), port)
             .map_err(|error| format!("HDC server: {error}"))?;
+        if operation == 4 && args[2].ends_with(".app") {
+            return install_app_remote(actual_port, Path::new(&args[2]));
+        }
+        if operation == 8 && args[2].ends_with(".app") {
+            let (folder, modules) = stage_app_remote(actual_port, Path::new(&args[2]))?;
+            let script = format!("#!/system/bin/sh\nsleep 2\nbm uninstall -n com.tonghongxiang.hapstore\nbm install -p {}\nstatus=$?\nif [ $status -eq 0 ]; then rm -rf {folder}; rm -f {SELF_UPDATE_SCRIPT}; fi\nexit $status\n", modules.join(" "));
+            let local_script = format!("{root}/qingqi-self-update.sh");
+            fs::write(&local_script, &script).map_err(|e| e.to_string())?;
+            let result = (|| {
+                let sent = remote_command(actual_port, &["file".into(), "send".into(), local_script, SELF_UPDATE_SCRIPT.into()], 30)?;
+                if sent.contains("[Fail]") || !sent.contains("FileTransfer finish") { return Err("APP self-update script transfer failed".into()); }
+                let checksum = remote_command(actual_port, &["shell".into(), "sha256sum".into(), SELF_UPDATE_SCRIPT.into()], 15)?;
+                if !checksum.to_ascii_lowercase().contains(&format!("{:x}", Sha256::digest(script.as_bytes()))) {
+                    return Err("APP self-update script checksum differs".into());
+                }
+                Ok("self-update staged and verified".into())
+            })();
+            if result.is_err() { let _ = remote_command(actual_port, &["shell".into(), "rm".into(), "-rf".into(), folder], 15); }
+            return result;
+        }
         if operation == 8 {
             let mut local = fs::File::open(&args[2])
                 .map_err(|error| format!("cannot read self-update HAP: {error}"))?;
@@ -1090,7 +1290,9 @@ mod tests {
         let root_name = Name::from_str("CN=Test Root,O=Qingqi,C=CN").unwrap();
         let root_spki = root_signer.verifying_key().to_public_key_der().unwrap();
         let root_public = SubjectPublicKeyInfoOwned::try_from(root_spki.as_bytes()).unwrap();
-        let validity = Validity::from_now(Duration::from_secs(3600)).unwrap();
+        // All serial variants must share the exact issuer DER even across a clock-second boundary.
+        static VALIDITY: std::sync::OnceLock<Validity> = std::sync::OnceLock::new();
+        let validity = *VALIDITY.get_or_init(|| Validity::from_now(Duration::from_secs(3600)).unwrap());
         let root = CertificateBuilder::new(Profile::Root, SerialNumber::from(1u32),
             validity, root_name.clone(), root_public, &root_signer).unwrap()
             .build::<p384::ecdsa::DerSignature>().unwrap();
@@ -1294,4 +1496,52 @@ mod tests {
         fs::remove_file(destination).unwrap();
         fs::remove_dir(dir).unwrap();
     }
+    fn app_module(bundle: &str, module: &str, manifest_code: u64, pack_code: u64, permission: &str) -> Vec<u8> {
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "app":{"bundleName":bundle,"versionCode":manifest_code},
+            "module":{"name":module,"requestPermissions":[{"name":permission}]}})).unwrap();
+        let pack = serde_json::to_vec(&serde_json::json!({
+            "summary":{"app":{"bundleName":bundle,"version":{"code":pack_code}}}})).unwrap();
+        sample_zip(&[("module.json", &manifest), ("pack.info", &pack)])
+    }
+
+    #[test]
+    fn app_all_modules_use_pack_identity_and_union_permissions_and_clean_staging() {
+        let dir = std::env::temp_dir().join(format!("qingqi-app-{}-{}",
+            std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("input.app");
+        let a = app_module("com.example.app", "entry", 999, 12, "ohos.permission.INTERNET");
+        let b = app_module("com.example.app", "feature", 1000, 12, "ohos.permission.CAMERA");
+        fs::write(&input, sample_zip(&[("entry.hap", &a), ("feature.hap", &b)])).unwrap();
+        let staged = super::stage_app_modules(&input, &input).unwrap();
+        assert_eq!(staged.len(), 2);
+        assert!(staged.iter().all(|(_, file)| file.0.exists()));
+        drop(staged);
+        assert_eq!(super::installation_permissions(&input).unwrap(),
+            r#"["ohos.permission.CAMERA","ohos.permission.INTERNET"]"#);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn app_rejects_mixed_versions_bundles_duplicate_modules_and_unsafe_paths() {
+        let dir = std::env::temp_dir().join(format!("qingqi-app-bad-{}-{}",
+            std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("input.app");
+        let a = app_module("com.example.app", "entry", 12, 12, "ohos.permission.INTERNET");
+        for b in [app_module("com.example.app", "feature", 12, 13, ""),
+                  app_module("com.example.other", "feature", 12, 12, ""), a.clone()] {
+            fs::write(&input, sample_zip(&[("entry.hap", &a), ("feature.hap", &b)])).unwrap();
+            assert!(super::stage_app_modules(&input, &input).is_err());
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "failure must clean every staged module");
+        }
+        fs::write(&input, sample_zip(&[("../entry.hap", &a)])).unwrap();
+        assert!(super::stage_app_modules(&input, &input).is_err());
+        fs::write(&input, sample_zip(&[("readme.txt", b"not an app")])).unwrap();
+        assert!(super::stage_app_modules(&input, &input).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
 }

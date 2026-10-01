@@ -1,5 +1,6 @@
 import { UIAbility, Want, AbilityConstant, Configuration, ConfigurationConstant } from '@kit.AbilityKit';
 import { window, display } from '@kit.ArkUI';
+import { BackgroundInstallTask } from '../jobs/BackgroundInstallTask';
 
 // 背景交给页面连续绘制，系统栏仅按主题切换文字颜色。
 const BARS_LIGHT: window.SystemBarProperties = {
@@ -61,6 +62,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onCreate(_want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+    BackgroundInstallTask.configure(this.context);
     AppStorage.setOrCreate<string>('qingqiFilesDir', this.context.filesDir);
   }
 
@@ -98,6 +100,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    BackgroundInstallTask.onForeground();
     // 从系统设置返回时也同步，覆盖部分设备在后台没有送达主题回调的情况。
     this.applyAppearance();
     this.syncStatusBarInset();

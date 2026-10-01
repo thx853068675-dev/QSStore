@@ -34,14 +34,10 @@ struct Detail {
   @State private error: string = '';
   @State private releases: ReleaseInfo[] = [];
   @State private selectedAsset: HapAsset = new HapAsset();
-  @State @Watch('onBusyChanged') private downloadBusy: boolean = false;
-  // 有字节计数时平滑绘制实际阶段进度，其余阶段显示持续活动光效。
-  @State @Watch('onPercentChanged') private downloadPercent: number = 0;
-  private installFrameTimer: number = -1;
-  private renderedPercent: number = 0;
-  private renderedPhase: string = '';
-  private pulseSettings: RenderingContextSettings = new RenderingContextSettings(true);
-  private pulseCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.pulseSettings);
+  @State private downloadBusy: boolean = false;
+  @State private downloadPercent: number = 0;
+  @State private installButtonWidth: number = 0;
+  @State private installGlowForward: boolean = false;
   @State private installTasks: InstallTaskSnapshot[] = [];
   private installSubscription: number = -1;
   private reconnectSubscription: number = -1;
@@ -101,8 +97,6 @@ struct Detail {
   syncPalette(): void {
     // 主题一变，之前按旧主题算出的底色就不再合适，重新推导一次
     this.refreshHeroColor();
-    // Canvas 不会随组件属性更新自动重画，下载时切换主题也要同步进度填充色。
-    if (this.downloadBusy) this.paintInstallButton();
   }
 
   private refreshHeroColor(): void {
@@ -139,7 +133,6 @@ struct Detail {
   aboutToDisappear(): void {
     InstallReconnect.unsubscribe(this.reconnectSubscription);
     this.reconnectSubscription = -1;
-    this.stopInstallAnimation();
     InstallTaskState.unsubscribe(this.installSubscription);
     this.installSubscription = -1;
   }
@@ -193,7 +186,6 @@ struct Detail {
     this.activeInstallId = row.job.id;
     this.downloadBusy = row.running;
     this.downloadPercent = row.percent;
-    this.paintInstallButton();
     // 只把「失败原因」说出来。这里是每秒轮询的入口，若把正常阶段也弹一遍，
     // 用户会被持续刷屏；阶段本身由按钮文案表达，不需要额外提示。
     if (!row.running && row.job.lastError.length > 0) this.notify(row.job.lastError);
@@ -225,55 +217,9 @@ struct Detail {
       (this.updateAvailable() ? '更新到 ' + this.selectedVersionLabel() : '打开应用');
   }
 
-  onBusyChanged(): void {
-    if (this.downloadBusy) this.paintInstallButton();
-    else this.stopInstallAnimation();
-  }
-
-  onPercentChanged(): void {
-    if (this.downloadBusy) this.paintInstallButton();
-  }
-
-  private stopInstallAnimation(): void {
-    if (this.installFrameTimer !== -1) clearInterval(this.installFrameTimer);
-    this.installFrameTimer = -1;
-  }
-
-  private paintInstallButton(): void {
-    this.renderInstallFrame();
-    if (this.downloadBusy && this.installFrameTimer === -1) {
-      this.installFrameTimer = setInterval(() => this.renderInstallFrame(), 33);
-    }
-  }
-
-  private renderInstallFrame(): void {
-    const ctx = this.pulseCtx;
-    const w = ctx.width, h = ctx.height;
-    if (w <= 0 || h <= 0) return;
+  private installProgressDeterminate(): boolean {
     const row = this.currentInstallTask();
-    const phase = row === undefined ? '' : row.job.id + ':' + row.job.stage + ':' + row.phase;
-    if (phase !== this.renderedPhase) {
-      this.renderedPhase = phase;
-      this.renderedPercent = 0;
-    }
-    ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = this.colors().accent;
-    ctx.fillRect(0, 0, w, h);
-    if (row !== undefined && InstallTaskState.determinate(row)) {
-      // 插值仅用于宽度动画，文字始终显示实际计数；不预估未完成工作。
-      this.renderedPercent += (row.percent - this.renderedPercent) * 0.3;
-      if (Math.abs(row.percent - this.renderedPercent) < 0.1) this.renderedPercent = row.percent;
-      ctx.fillStyle = '#FFFFFF30';
-      ctx.fillRect(0, 0, w * this.renderedPercent / 100, h);
-    } else {
-      const left = ((Date.now() % 1600) / 1600) * (w + w * 0.35) - w * 0.35;
-      const band = ctx.createLinearGradient(left, 0, left + w * 0.35, 0);
-      band.addColorStop(0, '#FFFFFF00');
-      band.addColorStop(0.5, '#FFFFFF40');
-      band.addColorStop(1, '#FFFFFF00');
-      ctx.fillStyle = band;
-      ctx.fillRect(Math.max(0, left), 0, w * 0.35, h);
-    }
+    return row !== undefined && row.running && InstallTaskState.determinate(row);
   }
 
   /**
@@ -1204,14 +1150,30 @@ struct Detail {
             }.width('100%').padding({ left: 20, right: 20, top: 10, bottom: 115 })
           }.width('100%').height('100%')
           Column({ space: 7 }) {
-            // 按钮上方原本还有一行进度文字（downloadMessage）。按钮本身就是进度
-            // 显示（Canvas 波浪前沿 + 文案带百分比），上面再挂一行纯文字既重复
-            // 又占高度，已去掉。
+            // 有计数时用原生平滑填充，其余阶段只在底边显示细流光，主体与文案保持稳定。
             Stack({ alignContent: Alignment.Center }) {
-              if (this.downloadBusy) {
-                Canvas(this.pulseCtx)
+              if (this.downloadBusy && this.installProgressDeterminate()) {
+                Progress({ value: this.downloadPercent, total: 100, type: ProgressType.Capsule })
                   .width('100%').height(52)
-                  .onReady(() => this.paintInstallButton())
+                  .color('#30FFFFFF').backgroundColor('#00000000')
+                  .style({ borderWidth: 0, borderColor: '#00000000',
+                    showDefaultPercentage: false, enableScanEffect: false, enableSmoothEffect: true })
+                  .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+              }
+              if (this.downloadBusy && !this.installProgressDeterminate()) {
+                Stack({ alignContent: Alignment.Start }) {
+                  Row().width('100%').height(2).backgroundColor('#10FFFFFF')
+                  Row().width(80).height(2)
+                    .linearGradient({ angle: 90,
+                      colors: [['#00FFFFFF', 0], ['#80FFFFFF', 0.5], ['#00FFFFFF', 1]] })
+                    .translate({ x: this.installGlowForward ? Math.max(0, this.installButtonWidth - 112) : 0 })
+                    .animation({ duration: 1800, curve: Curve.EaseInOut,
+                      iterations: -1, playMode: PlayMode.Alternate })
+                    .onAppear(() => { this.installGlowForward = true; })
+                    .onDisAppear(() => { this.installGlowForward = false; })
+                }.width('calc(100% - 32vp)').height(2).borderRadius(1).clip(true)
+                  .position({ left: 16, bottom: 6 })
+                  .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
               }
               Text(this.installButtonLabel())
                 .fontSize(17).fontWeight(FontWeight.Medium)
@@ -1220,6 +1182,10 @@ struct Detail {
             .width('100%').height(52)
             .backgroundColor(this.colors().accent)
             .borderRadius(18).clip(true)
+            .onSizeChange((_old: SizeOptions, size: SizeOptions) => {
+              const width = Number(size.width);
+              if (Number.isFinite(width) && width > 0 && width !== this.installButtonWidth) this.installButtonWidth = width;
+            })
             .onClick(() => {
               if (this.downloadBusy) return;
               const task = this.currentInstallTask();

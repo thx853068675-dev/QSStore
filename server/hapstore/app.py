@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, urlparse
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from . import auth, collector, db, identity_vault
+from . import auth, collector, db, identity_vault, submissions
 
 API_VERSION = 1
 HOST = os.environ.get("HAPSTORE_HOST", "127.0.0.1")
@@ -279,10 +279,12 @@ SUBMIT_CATEGORIES = (
 def _repo_owner_state(repo: str, account_id: str) -> dict[str, Any]:
     """这个仓库在本店的归属：没有记录 / 属于自己 / 属于别人。"""
     row = db.connect().execute(
-        "SELECT id FROM app WHERE repo_full_name=?", (repo,)
+        "SELECT id,status FROM app WHERE repo_full_name=? COLLATE NOCASE", (repo,)
     ).fetchone()
     if not row:
         return {"state": "new", "app_id": 0}
+    if row["status"] != "published":
+        return {"state": "new", "app_id": int(row["id"])}
     owner = db.publisher_account_id(row["id"])
     if owner and owner != account_id:
         return {"state": "other", "app_id": int(row["id"])}
@@ -308,7 +310,8 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
     # 同一账号五分钟内重复检查复用完整预处理结果，不重采 HAP、不占额度。
     cached = db.recent_submit_draft(repo, identity[0])
     if cached is not None:
-        result = cached["prepared"]
+        result = dict(cached["prepared"])
+        result.pop("snapshot", None)
         result["expires_in_seconds"] = max(0, cached["expires_at"] - int(time.time()))
         result["existing"] = _repo_owner_state(repo, identity[0])
         return result
@@ -320,15 +323,16 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
                        retry_after=wait)
 
     try:
-        meta = collector.fetch_app_metadata(repo, token=GITHUB_TOKEN)
-        releases = collector.fetch_releases(repo, token=GITHUB_TOKEN)
+        snapshot = submissions.prepared_snapshot(repo, GITHUB_TOKEN)
+        meta = snapshot["metadata"]
+        releases = snapshot["releases"]
         candidate = next((r for r in releases if r["assets"]), None)
         if candidate is None:
             raise ApiError(422, "NO_HAP_ASSET",
                            "该仓库的 release 里没有找到 .hap 附件",
                            hint="请确认已在 GitHub Release 中上传 .hap 文件")
-        collector.enrich_assets_with_hap_metadata([candidate], token=GITHUB_TOKEN,
-                                                   limit=1)
+        # HAP downloads/decoding must never block the old client's 20s request.
+        # Cached identity is useful here; missing fields are filled after listing.
         choices = [{
             "tag": candidate["tag"],
             "name": a["name"],
@@ -336,6 +340,7 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
             "bundle_name": a.get("bundle_name") or "",
             "version_name": a.get("version_name") or "",
             "version_code": a.get("version_code") or 0,
+            "min_api": a.get("min_api") or 0,
             "display_name": a.get("display_name") or "",
             "sha256": a.get("sha256") or "",
         } for a in candidate["assets"]]
@@ -349,7 +354,8 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
                 # 客户端据此提示「这是更新已有的那条」还是「已被别人上架」
                 "existing": _repo_owner_state(repo, identity[0]),
                 "expires_in_seconds": 1800}
-        db.create_submit_draft(token, repo, identity[0], choices, meta["category"], result)
+        stored = dict(result, snapshot=snapshot)
+        db.create_submit_draft(token, repo, identity[0], choices, meta["category"], stored)
         return result
     except ApiError:
         raise
@@ -373,23 +379,27 @@ def h_submit_confirm(body: dict[str, Any], identity: tuple[str, str]) -> dict[st
         raise ApiError(400, "INVALID_CATEGORY", "请选择应用分类")
     # 先判归属再同步：别人的仓库直接拒绝，不必浪费一次 GitHub 采集
     _reject_foreign_repo(draft["repo"], identity[0])
-    selection = {"asset_name": choice["name"], "bundle_name": choice["bundle_name"],
-                 "tag": choice["tag"], "sha256": choice.get("sha256") or ""}
     try:
-        info = collector.sync_app(draft["repo"], token=GITHUB_TOKEN,
-                                  with_metadata=True, selection=selection)
+        stored = json.loads(draft["prepared_json"])
+        # Drafts created before this rollout retain the same token and choices.
+        snapshot = stored.get("snapshot") or submissions.prepared_snapshot(draft["repo"], GITHUB_TOKEN)
+        app_id = db.publish_prepared_app(draft["token"], identity[0], identity[1],
+                                        category, choice, snapshot)
+    except ValueError as e:
+        errors = {
+            "DRAFT_EXPIRED": (404, "检查结果已过期，请重新检查仓库"),
+            "APP_UNLISTED": (409, "该应用已下架，请重新检查仓库后上架"),
+            "PUBLISHER_MISMATCH": (403, "该仓库已由其他账号上架"),
+            "INVALID_ASSET": (409, "所选 HAP 已变化，请重新检查仓库"),
+        }
+        if str(e) not in errors:
+            raise
+        status, message = errors[str(e)]
+        raise ApiError(status, str(e), message) from e
     except collector.CollectError as e:
-        raise ApiError(502, "COLLECT_FAILED", f"上架时重新检查失败：{e}") from e
-    if info["hap_assets"] == 0:
-        raise ApiError(422, "NO_SELECTED_HAP", "所选 HAP 已不存在，请重新检查")
-    db.set_app_selection(info["app_id"], choice["name"], choice["bundle_name"])
-    if choice.get("display_name"):
-        db.upsert_app(draft["repo"], display_name=choice["display_name"])
-    db.upsert_app(draft["repo"], category=category, status="published")
-    db.set_app_category(info["app_id"], category)
-    db.set_publisher(info["app_id"], identity[0], identity[1])
-    db.finish_submit_draft(draft["token"])
-    return {"app": db.get_app(info["app_id"]), "status": "ok"}
+        raise ApiError(502, "COLLECT_FAILED", f"上架检查失败：{e}") from e
+    submissions.wake_worker()
+    return {"app": db.get_app(app_id), "status": "ok"}
 
 
 def h_refresh_stale_apps(ip: str, limit: int, budget_seconds: float,
@@ -737,6 +747,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve_forever() -> None:
     db.init_db()
+    submissions.start_worker(GITHUB_TOKEN)
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     httpd.daemon_threads = True
     print(f"hapstore api listening on http://{HOST}:{PORT}", flush=True)

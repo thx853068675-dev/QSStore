@@ -136,6 +136,17 @@ CREATE TABLE IF NOT EXISTS submit_draft (
     expires_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS catalog_task (
+    app_id INTEGER PRIMARY KEY REFERENCES app(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'pending',
+    payload_json TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS app_selection (
     app_id INTEGER PRIMARY KEY REFERENCES app(id) ON DELETE CASCADE,
     asset_name TEXT NOT NULL,
@@ -203,6 +214,8 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         if 'prepared_json' not in {row['name'] for row in conn.execute('PRAGMA table_info(submit_draft)')}:
             conn.execute("ALTER TABLE submit_draft ADD COLUMN prepared_json TEXT NOT NULL DEFAULT '{}'")
+        if 'completed_app_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(submit_draft)')}:
+            conn.execute("ALTER TABLE submit_draft ADD COLUMN completed_app_id INTEGER NOT NULL DEFAULT 0")
         if 'digest' not in {row['name'] for row in conn.execute('PRAGMA table_info(app_icon)')}:
             conn.execute("ALTER TABLE app_icon ADD COLUMN digest TEXT NOT NULL DEFAULT ''")
         for row in list(conn.execute("SELECT app_id,data FROM app_icon WHERE digest=''")):
@@ -606,7 +619,8 @@ def create_submit_draft(token: str, repo: str, account_id: str,
 def recent_submit_draft(repo: str, account_id: str) -> dict[str, Any] | None:
     row = connect().execute("""SELECT prepared_json,expires_at FROM submit_draft
         WHERE repo=? COLLATE NOCASE AND account_id=? AND expires_at>?
-          AND prepared_json!='{}' ORDER BY expires_at DESC LIMIT 1""",
+          AND prepared_json!='{}' AND completed_app_id=0
+        ORDER BY expires_at DESC LIMIT 1""",
         (repo, account_id, int(time.time()) + 1500)).fetchone()
     if not row:
         return None
@@ -672,9 +686,15 @@ def download_counts(app_id: int) -> int:
 def upsert_app(repo_full_name: str, **fields: Any) -> int:
     """插入或更新应用，返回 app.id。"""
     c = connect()
+    app_id = _upsert_app(c, repo_full_name, fields)
+    c.commit()
+    return app_id
+
+
+def _upsert_app(c: sqlite3.Connection, repo_full_name: str, fields: dict[str, Any]) -> int:
     now = int(time.time())
     row = c.execute(
-        "SELECT id FROM app WHERE repo_full_name=?", (repo_full_name,)
+        "SELECT id FROM app WHERE repo_full_name=? COLLATE NOCASE", (repo_full_name,)
     ).fetchone()
     if row:
         app_id = row["id"]
@@ -698,7 +718,6 @@ def upsert_app(repo_full_name: str, **fields: Any) -> int:
             f"INSERT INTO app({','.join(keys)}) VALUES ({placeholders})", vals
         )
         app_id = cur.lastrowid
-    c.commit()
     return app_id
 
 
@@ -707,6 +726,215 @@ _APP_COLUMNS = {
     "tags_json", "stars", "license", "homepage", "verified", "status",
     "featured", "synced_at", "sync_error",
 }
+
+
+def reuse_asset_metadata(repo: str, releases: list[dict[str, Any]]) -> None:
+    """Only reuse package identity verified for the exact GitHub asset digest."""
+    c = connect()
+    for release in releases:
+        for asset in release.get("assets", []):
+            if not asset.get("sha256"):
+                continue
+            row = c.execute("""SELECT a.bundle_name,a.version_code,a.version_name,a.min_api,
+                app.display_name,s.bundle_name AS selected_bundle
+                FROM asset a JOIN release r ON r.id=a.release_id
+                JOIN app ON app.id=r.app_id LEFT JOIN app_selection s ON s.app_id=app.id
+                WHERE app.repo_full_name=? COLLATE NOCASE AND r.tag=? AND a.name=?
+                  AND a.sha256=? AND a.bundle_name<>''""",
+                (repo, release["tag"], asset["name"], asset["sha256"])).fetchone()
+            if row:
+                for field in ("bundle_name", "version_code", "version_name", "min_api"):
+                    asset[field] = row[field]
+                if row["bundle_name"] == row["selected_bundle"]:
+                    asset["display_name"] = row["display_name"]
+
+
+def cached_repository_snapshot(repo: str, max_age_seconds: int) -> dict[str, Any] | None:
+    """Previously trusted GitHub index, including hidden listings, for outages."""
+    c = connect()
+    row = c.execute("""SELECT * FROM app WHERE repo_full_name=? COLLATE NOCASE
+        AND synced_at>=?""", (repo, int(time.time()) - max_age_seconds)).fetchone()
+    if not row:
+        return None
+    releases = []
+    for rel in c.execute("""SELECT * FROM release WHERE app_id=?
+        ORDER BY published_at DESC LIMIT 30""", (row["id"],)):
+        release = dict(rel)
+        release["prerelease"] = bool(release["prerelease"])
+        release["assets"] = [dict(a) for a in c.execute(
+            "SELECT * FROM asset WHERE release_id=?", (release["id"],))]
+        releases.append(release)
+    if not any(r["assets"] for r in releases):
+        return None
+    metadata = {k: row[k] for k in ("display_name", "description", "summary", "category",
+        "tags_json", "stars", "homepage", "license", "icon_url")}
+    return {"metadata": metadata, "releases": releases, "fetched_at": row["synced_at"]}
+
+
+def publish_prepared_app(draft_token: str, account_id: str, nickname: str,
+                         category: str, choice: dict[str, Any],
+                         snapshot: dict[str, Any]) -> int:
+    """Commit listing, exact selection and durable enrichment task atomically."""
+    c = connect()
+    now = int(time.time())
+    with c:
+        c.execute("BEGIN IMMEDIATE")
+        draft = c.execute("""SELECT * FROM submit_draft WHERE token=? AND account_id=?
+            AND expires_at>=?""", (draft_token, account_id, now)).fetchone()
+        if not draft:
+            raise ValueError("DRAFT_EXPIRED")
+        if draft["completed_app_id"]:
+            row = c.execute("""SELECT app.status,p.account_id FROM app
+                LEFT JOIN publisher p ON p.app_id=app.id WHERE app.id=?""",
+                            (draft["completed_app_id"],)).fetchone()
+            if not row or row["status"] != "published":
+                raise ValueError("APP_UNLISTED")
+            if row["account_id"] != account_id:
+                raise ValueError("PUBLISHER_MISMATCH")
+            return int(draft["completed_app_id"])
+        repo = draft["repo"]
+        previous = c.execute("""SELECT app.id,app.status,app.display_name,p.account_id
+            FROM app LEFT JOIN publisher p ON p.app_id=app.id
+            WHERE repo_full_name=? COLLATE NOCASE""", (repo,)).fetchone()
+        if (previous and previous["status"] == "published" and previous["account_id"]
+                and previous["account_id"] != account_id):
+            raise ValueError("PUBLISHER_MISMATCH")
+        selected_release = next((r for r in snapshot["releases"]
+                                 if r["tag"] == choice["tag"]), None)
+        selected_asset = next((a for a in (selected_release or {}).get("assets", [])
+                               if a["name"] == choice["name"]
+                               and a.get("sha256", "") == choice.get("sha256", "")), None)
+        if selected_asset is None:
+            raise ValueError("INVALID_ASSET")
+        fields = dict(snapshot["metadata"])
+        fields["display_name"] = (choice.get("display_name") or
+            (previous["display_name"] if previous else "") or fields.get("display_name") or
+            repo.split("/")[-1])
+        fields.update(category=category, status="published", sync_error="")
+        app_id = _upsert_app(c, repo, fields)
+        # Publish the selected file immediately. Historical files and other HAPs
+        # are filtered by their verified bundle identity by the worker later.
+        initial_release = dict(selected_release)
+        initial_release["assets"] = [selected_asset]
+        _replace_releases(c, app_id, [initial_release])
+        c.execute("""INSERT INTO publisher(app_id,account_id,display_name,updated_at)
+            VALUES (?,?,?,?) ON CONFLICT(app_id) DO UPDATE SET
+            account_id=excluded.account_id,display_name=excluded.display_name,
+            updated_at=excluded.updated_at""",
+            (app_id, account_id, nickname[:100], now))
+        c.execute("INSERT OR REPLACE INTO app_category(app_id,category) VALUES (?,?)",
+                  (app_id, category))
+        selection = {"asset_name": choice["name"], "bundle_name": choice.get("bundle_name", ""),
+                     "tag": choice["tag"], "sha256": choice.get("sha256", "")}
+        c.execute("""INSERT OR REPLACE INTO app_selection(app_id,asset_name,bundle_name)
+            VALUES (?,?,?)""", (app_id, selection["asset_name"], selection["bundle_name"]))
+        payload = json.dumps({"repo": repo, "snapshot": snapshot, "selection": selection},
+                             ensure_ascii=False)
+        c.execute("""INSERT INTO catalog_task(app_id,payload_json,updated_at)
+            VALUES (?,?,?) ON CONFLICT(app_id) DO UPDATE SET
+              generation=catalog_task.generation+1,status='pending',
+              payload_json=excluded.payload_json,attempts=0,next_attempt=0,last_error='',
+              updated_at=excluded.updated_at""", (app_id, payload, now))
+        c.execute("UPDATE submit_draft SET completed_app_id=? WHERE token=?",
+                  (app_id, draft_token))
+    return app_id
+
+
+def recover_catalog_tasks() -> None:
+    c = connect()
+    with c:
+        c.execute("""UPDATE catalog_task SET status='pending',next_attempt=0
+            WHERE status='running'""")
+
+
+def claim_catalog_task() -> dict[str, Any] | None:
+    c = connect()
+    now = int(time.time())
+    with c:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("""UPDATE catalog_task SET status='cancelled' WHERE status='pending'
+            AND EXISTS (SELECT 1 FROM app WHERE app.id=catalog_task.app_id AND status='hidden')""")
+        row = c.execute("""SELECT t.* FROM catalog_task t JOIN app a ON a.id=t.app_id
+            WHERE t.status='pending' AND t.next_attempt<=? AND a.status='published'
+            ORDER BY t.next_attempt,t.updated_at,t.app_id LIMIT 1""", (now,)).fetchone()
+        if not row:
+            return None
+        c.execute("""UPDATE catalog_task SET status='running',attempts=attempts+1,
+            updated_at=? WHERE app_id=?""", (now, row["app_id"]))
+    task = dict(row)
+    task["attempts"] += 1
+    task["payload"] = json.loads(task.pop("payload_json"))
+    return task
+
+
+def fail_catalog_task(app_id: int, generation: int, error: str) -> None:
+    c = connect()
+    with c:
+        row = c.execute("""SELECT attempts FROM catalog_task
+            WHERE app_id=? AND generation=? AND status='running'""",
+            (app_id, generation)).fetchone()
+        if not row:
+            return
+        now = int(time.time())
+        c.execute("""UPDATE catalog_task SET status=?,next_attempt=?,last_error=?,
+            updated_at=? WHERE app_id=? AND generation=?""",
+            ("pending" if row["attempts"] < 4 else "failed",
+             now + min(300, 15 * 2 ** (row["attempts"] - 1)), error[:500], now,
+             app_id, generation))
+        c.execute("UPDATE app SET sync_error=? WHERE id=?", (error[:500], app_id))
+
+
+def apply_catalog_snapshot(repo: str, metadata: dict[str, Any],
+                           releases: list[dict[str, Any]],
+                           generation: int | None = None,
+                           selected_bundle: str = "",
+                           source_fetched_at: int | None = None) -> tuple[int, int, bool]:
+    """Atomic enrichment; a stale worker cannot overwrite a newer selection."""
+    c = connect()
+    now = int(time.time())
+    with c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute("SELECT id,status FROM app WHERE repo_full_name=? COLLATE NOCASE",
+                        (repo,)).fetchone()
+        if generation is None and row and c.execute("""SELECT 1 FROM catalog_task
+            WHERE app_id=? AND status IN ('pending','running')""", (row["id"],)).fetchone():
+            return int(row["id"]), 0, False
+        if generation is not None:
+            task = c.execute("SELECT generation,status FROM catalog_task WHERE app_id=?",
+                             (row["id"],)).fetchone() if row else None
+            if not task or task["generation"] != generation or task["status"] != "running":
+                return (int(row["id"]) if row else 0, 0, False)
+            if row["status"] != "published":
+                c.execute("UPDATE catalog_task SET status='cancelled' WHERE app_id=?",
+                          (row["id"],))
+                return int(row["id"]), 0, False
+        fields = dict(metadata)
+        if row:
+            category = c.execute("SELECT category FROM app_category WHERE app_id=?",
+                                 (row["id"],)).fetchone()
+            if category:
+                fields["category"] = category["category"]
+        fields.update(synced_at=min(now, source_fetched_at) if source_fetched_at else now,
+                      sync_error="")
+        app_id = _upsert_app(c, repo, fields)
+        count = _replace_releases(c, app_id, releases)
+        presentation = [r for r in releases if not r.get("prerelease")] or releases
+        icon = next((a["_icon"] for r in presentation for a in r.get("assets", [])
+                     if a.get("_icon")), None)
+        if icon:
+            mime, data = icon
+            if mime not in ("image/png", "image/jpeg", "image/webp") or not data or len(data) > 1024 * 1024:
+                raise ValueError("invalid application icon")
+            c.execute("""INSERT OR REPLACE INTO app_icon(app_id,mime,data,digest)
+                VALUES (?,?,?,?)""",
+                (app_id, mime, data, hashlib.sha256(data).hexdigest()[:16]))
+        if generation is not None:
+            if selected_bundle:
+                c.execute("UPDATE app_selection SET bundle_name=? WHERE app_id=?",
+                          (selected_bundle, app_id))
+            c.execute("""UPDATE catalog_task SET status='done',last_error='',updated_at=?
+                WHERE app_id=? AND generation=?""", (now, app_id, generation))
+    return app_id, count, True
 
 
 def replace_releases(app_id: int, releases: Iterable[dict[str, Any]]) -> int:
@@ -718,6 +946,13 @@ def replace_releases(app_id: int, releases: Iterable[dict[str, Any]]) -> int:
     的 release（asset 由外键级联删除，`PRAGMA foreign_keys = ON` 已开启）。
     """
     c = connect()
+    count = _replace_releases(c, app_id, releases)
+    c.commit()
+    return count
+
+
+def _replace_releases(c: sqlite3.Connection, app_id: int,
+                      releases: Iterable[dict[str, Any]]) -> int:
     now = int(time.time())
     count = 0
     tags: list[str] = []
@@ -776,7 +1011,6 @@ def replace_releases(app_id: int, releases: Iterable[dict[str, Any]]) -> int:
         placeholders = ",".join("?" for _ in tags)
         c.execute(f"DELETE FROM release WHERE app_id=? AND tag NOT IN ({placeholders})",
                   [app_id, *tags])
-    c.commit()
     return count
 
 
@@ -814,6 +1048,8 @@ def apps_needing_sync(limit: int = 50, max_age_seconds: int = 6 * 3600) -> list[
     cutoff = int(time.time()) - max_age_seconds
     rows = connect().execute(
         """SELECT * FROM app WHERE status='published' AND synced_at < ?
+           AND NOT EXISTS (SELECT 1 FROM catalog_task t WHERE t.app_id=app.id
+                           AND t.status IN ('pending','running'))
            ORDER BY synced_at ASC LIMIT ?""",
         (cutoff, limit),
     ).fetchall()

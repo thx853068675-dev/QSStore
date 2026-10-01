@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import io
 import json
 import os
@@ -74,16 +75,16 @@ def _http_get(url: str, *, token: str = "", accept: str = "application/vnd.githu
         return resp.read()
 
 
-def _try_chain(path: str, *, token: str = "") -> tuple[bytes, str]:
+def _try_chain(path: str, *, token: str = "", timeout: int = TIMEOUT) -> tuple[bytes, str]:
     """摘要和下载地址只能取自 GitHub；不能让第三方代理签发校验值。"""
     try:
-        return _http_get(f"https://api.github.com{path}", token=token), "direct"
+        return _http_get(f"https://api.github.com{path}", token=token, timeout=timeout), "direct"
     except Exception as e:
         raise CollectError(f"GitHub API 直连失败（{path}）：{e}") from e
 
 
-def _json(path: str, *, token: str = "") -> Any:
-    body, _ = _try_chain(path, token=token)
+def _json(path: str, *, token: str = "", timeout: int = TIMEOUT) -> Any:
+    body, _ = _try_chain(path, token=token, timeout=timeout)
     return json.loads(body.decode("utf-8", "replace"))
 
 
@@ -517,9 +518,9 @@ def is_hap_asset(name: str) -> bool:
 # ───────────────────────── 采集主流程 ─────────────────────────
 
 
-def fetch_app_metadata(repo: str, *, token: str = "") -> dict[str, Any]:
+def fetch_app_metadata(repo: str, *, token: str = "", timeout: int = TIMEOUT) -> dict[str, Any]:
     """拉取仓库基础信息。"""
-    data = _json(f"/repos/{repo}", token=token)
+    data = _json(f"/repos/{repo}", token=token, timeout=timeout)
     return {
         "display_name": data.get("name") or repo.split("/")[-1],
         "description": data.get("description") or "",
@@ -534,9 +535,10 @@ def fetch_app_metadata(repo: str, *, token: str = "") -> dict[str, Any]:
     }
 
 
-def fetch_releases(repo: str, *, token: str = "", limit: int = 30) -> list[dict[str, Any]]:
+def fetch_releases(repo: str, *, token: str = "", limit: int = 30,
+                   timeout: int = TIMEOUT) -> list[dict[str, Any]]:
     """拉取 release 列表并筛出 HAP 附件。"""
-    raw = _json(f"/repos/{repo}/releases?per_page={limit}", token=token)
+    raw = _json(f"/repos/{repo}/releases?per_page={limit}", token=token, timeout=timeout)
     out: list[dict[str, Any]] = []
     for r in raw:
         assets = []
@@ -564,7 +566,7 @@ def fetch_releases(repo: str, *, token: str = "", limit: int = 30) -> list[dict[
             "etag": r.get("id") and str(r.get("id")) or "",
             "assets": assets,
         })
-    return out
+    return sorted(out, key=lambda r: r["published_at"], reverse=True)
 
 
 def enrich_assets_with_hap_metadata(
@@ -618,13 +620,25 @@ def enrich_assets_with_hap_metadata(
 
 def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
              progress: Callable[[str], None] | None = None,
-             selection: dict[str, str] | None = None) -> dict[str, Any]:
+             selection: dict[str, str] | None = None,
+             snapshot: dict[str, Any] | None = None,
+             generation: int | None = None) -> dict[str, Any]:
     """采集单个仓库并入库。返回统计信息。"""
-    meta = fetch_app_metadata(repo, token=token)
-    releases = fetch_releases(repo, token=token)
+    meta = copy.deepcopy(snapshot["metadata"]) if snapshot else fetch_app_metadata(repo, token=token)
+    releases = copy.deepcopy(snapshot["releases"]) if snapshot else fetch_releases(repo, token=token)
 
     if with_metadata and releases:
-        enrich_assets_with_hap_metadata(releases, token=token, progress=progress)
+        scan_releases = releases
+        if generation is not None and selection:
+            selected = next((r for r in releases if r["tag"] == selection.get("tag")), None)
+            if selected:
+                target = dict(selected)
+                target["assets"] = [a for a in selected.get("assets", [])
+                                    if a["name"] == selection["asset_name"]]
+                # The selected HAP comes first, including a legacy draft whose
+                # Release is no longer in GitHub's first three entries.
+                scan_releases = [target] + [r for r in releases if r is not selected and r.get("assets")]
+        enrich_assets_with_hap_metadata(scan_releases, token=token, progress=progress)
 
     # A temporary download failure must not erase metadata already verified
     # against the same GitHub digest. This also keeps older releases usable:
@@ -650,10 +664,19 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
     if selection is None:
         selection = db.get_app_selection(existing_row["id"]) if existing_row else None
     if selection:
+        selection = dict(selection)
         selected_name = selection["asset_name"]
         selected_bundle = selection.get("bundle_name") or ""
         selected_tag = selection.get("tag") or ""
         selected_sha = selection.get("sha256") or ""
+        if not selected_bundle:
+            selected_bundle = next((a.get("bundle_name", "") for r in releases
+                if not selected_tag or r["tag"] == selected_tag
+                for a in r.get("assets", []) if a["name"] == selected_name
+                and (not selected_sha or a.get("sha256") == selected_sha)), "")
+            selection["bundle_name"] = selected_bundle
+        if generation is not None and not selected_bundle:
+            raise CollectError("所选 HAP 的应用身份尚未解析成功，后台将重试")
         if selected_tag and not any(
             r["tag"] == selected_tag and a["name"] == selected_name and
             (not selected_bundle or a.get("bundle_name") == selected_bundle) and
@@ -670,34 +693,23 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
             preferred = [a for a in matching if a["name"] == selected_name]
             release["assets"] = preferred or matching
 
-    app_id = db.upsert_app(repo, sync_error="")
-    chosen_category = db.get_app_category(app_id)
-    if chosen_category:
-        meta["category"] = chosen_category
     presentation_releases = [r for r in releases if not r.get("prerelease")] or releases
     selected_label = next((a.get("display_name") for r in presentation_releases
                            for a in r.get("assets") or [] if a.get("display_name")), "")
     if not selected_label:
-        existing_app = db.get_app(app_id)
+        existing_app = db.get_app(existing_row["id"]) if existing_row else None
         selected_label = (existing_app or {}).get("display_name") or ""
     if selected_label:
         meta["display_name"] = selected_label
-    n = db.replace_releases(app_id, releases)
-    # A newer HAP whose icon cannot be decoded must not erase a previously
-    # verified icon. Another scanned release of this selected app can provide
-    # the fallback until its current resource format is supported.
-    icon_asset = next((asset for release in presentation_releases
-                       for asset in release.get("assets", []) if asset.get("_icon")), None)
-    if icon_asset:
-        icon = icon_asset["_icon"]
-        db.put_app_icon(app_id, icon[0], icon[1])
-    db.upsert_app(repo, **meta, synced_at=int(time.time()), sync_error="")
+    app_id, n, applied = db.apply_catalog_snapshot(repo, meta, releases, generation,
+        (selection or {}).get("bundle_name", ""), (snapshot or {}).get("fetched_at"))
     hap_count = sum(len(r.get("assets") or []) for r in releases)
     return {
         "app_id": app_id,
         "repo": repo,
         "releases": n,
         "hap_assets": hap_count,
+        "applied": applied,
     }
 
 

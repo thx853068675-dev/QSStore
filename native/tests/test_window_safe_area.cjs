@@ -58,6 +58,7 @@ test('edge-to-edge startup reads real insets before UI content without obtaining
   assert.equal(f.state.uiReads, 0);
   assert.equal(f.storage.get('statusBarInset'), 48);
   assert.equal(f.state.bars.statusBarColor, '#00000000');
+  assert.equal(f.state.bars.navigationBarColor, '#00000000');
 });
 
 test('cutout and density changes update the inset; unavailable windows retain the last value', async () => {
@@ -82,5 +83,6 @@ test('theme changes keep the status bar transparent while switching text contras
   f.ability.onConfigurationUpdate({ colorMode: 1 });
   assert.equal(f.storage.get('darkMode'), true);
   assert.equal(f.state.bars.statusBarColor, '#00000000');
+  assert.equal(f.state.bars.navigationBarColor, '#00000000');
   assert.notEqual(f.state.bars.statusBarContentColor, lightText);
 });

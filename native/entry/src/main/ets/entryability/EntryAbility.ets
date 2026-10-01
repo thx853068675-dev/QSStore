@@ -5,13 +5,13 @@ import { window, display } from '@kit.ArkUI';
 const BARS_LIGHT: window.SystemBarProperties = {
   statusBarColor: '#00000000',
   statusBarContentColor: '#17213A',
-  navigationBarColor: '#F9FAFD',
+  navigationBarColor: '#00000000',
   navigationBarContentColor: '#17213A'
 };
 const BARS_DARK: window.SystemBarProperties = {
   statusBarColor: '#00000000',
   statusBarContentColor: '#EAF0F7',
-  navigationBarColor: '#0B1220',
+  navigationBarColor: '#00000000',
   navigationBarContentColor: '#EAF0F7'
 };
 

@@ -2,7 +2,7 @@ import { InstallReconnect } from '../jobs/InstallReconnect';
 import { LocalInstallTimeline, LocalTimelineView, LocalTimelineStep } from '../jobs/LocalInstallTimeline';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
 import { router, SymbolGlyphModifier } from '@kit.ArkUI';
-import { HdsTabs, HdsNavigation, HdsNavigationTitleMode, ScrollEffectType, hdsMaterial } from '@kit.UIDesignKit';
+import { HdsTabs, hdsMaterial } from '@kit.UIDesignKit';
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
@@ -145,6 +145,7 @@ struct Index {
   // 每个颜色使用点通过 colors() 读取此状态，主题变化会更新对应组件。
   @StorageProp('darkMode') darkMode: boolean = false;
   @StorageProp('statusBarInset') statusBarInset: number = 0;
+  @State private searchMaterialWidth: number = 0;
   @State private currentTab: number = 0;
   @State private pendingJobs: InstallJob[] = [];
   @State private installedJobs: InstallJob[] = [];
@@ -2692,23 +2693,28 @@ struct Index {
   @Builder
   private discoverSearchHeader() {
     Stack({ alignContent: Alignment.Top }) {
-      // 6.1 的 HDS 原生材质只开放在系统容器上，用无交互的标题栏承载背景。
-      // 材质仅覆盖搜索框，不给整条吸顶区域加遮罩，也不拦截输入和下拉手势。
+      // 与底部导航使用同一个 HDS 浮动栏承载材质，避免标题栏渐变和额外填充改变观感。
+      // 空栏只绘制背景，不参与触摸、焦点和无障碍；输入由上层 Row 处理。
       Stack() {
-        HdsNavigation() {}
-          .titleMode(HdsNavigationTitleMode.MINI).hideBackButton(true).hideToolBar(true)
-          .mode(NavigationMode.Stack)
-          .titleBar({
-            content: { title: { mainTitle: '' } },
-            style: {
-              scrollEffectOpts: { enableScrollEffect: false,
-                scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR },
-              originalStyle: { backgroundStyle: { backgroundColor: this.darkMode ? '#80202D43' : '#80FFFFFF', maskExtraHeight: 0,
-                blurRadius: 24 } },
-              systemMaterialEffect: {
-                materialType: hdsMaterial.MaterialType.IMMERSIVE,
-                materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
-              }
+        HdsTabs({ barPosition: BarPosition.End, index: 0 }) {
+          TabContent() {}
+            .tabBar(BottomTabBarStyle.of({
+              normal: new SymbolGlyphModifier($r('sys.symbol.magnifyingglass'))
+                .fontColor(['#00000000']).fontSize(1),
+              selected: new SymbolGlyphModifier($r('sys.symbol.magnifyingglass'))
+                .fontColor(['#00000000']).fontSize(1)
+            }, '').labelStyle({ selectedColor: '#00000000', unselectedColor: '#00000000' }))
+        }
+          .barMode(BarMode.Fixed).vertical(false).barOverlap(true).barHeight(46)
+          .barFloatingStyle({
+            lightColor: this.colors().surface,
+            barSideMargin: 0, barBottomMargin: 0,
+            barWidth: { smallWidth: this.searchMaterialWidth,
+              mediumWidth: this.searchMaterialWidth, largeWidth: this.searchMaterialWidth },
+            gradientMask: { maskColor: '#00000000', maskHeight: 0 },
+            systemMaterialEffect: {
+              materialType: hdsMaterial.MaterialType.IMMERSIVE,
+              materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
             }
           })
           .width('100%').height(46).backgroundColor('#00000000')
@@ -2730,8 +2736,12 @@ struct Index {
               .onClick(() => this.clearSearch())
           }
         }.width('100%').height(46).padding({ left: 13, right: 7 })
-          .backgroundColor(this.darkMode ? '#A6202D43' : '#B3FFFFFF').borderRadius(15)
+          .backgroundColor('#00000000').borderRadius(15)
       }.width('calc(100% - 48vp)').height(46).margin({ top: 8 })
+        .onSizeChange((_old: SizeOptions, size: SizeOptions) => {
+          const width = Number(size.width);
+          if (Number.isFinite(width) && width > 0 && width !== this.searchMaterialWidth) this.searchMaterialWidth = width;
+        })
     }.width('100%').height(70)
   }
 
@@ -3709,6 +3719,8 @@ struct Index {
     // "暗区"。改成随主题的卡片色，材质才是正常的玻璃感。
     .barFloatingStyle({
       lightColor: this.colors().surface,
+      // 浮动栏自身保留材质，屏幕底部不再叠加 HDS 默认渐变遮罩。
+      gradientMask: { maskColor: '#00000000', maskHeight: 0 },
       barSideMargin: 12,
       // 系统导航栏已隐藏，底部不再有安全区，6 会让导航条贴着屏幕边缘。
       barBottomMargin: 20,

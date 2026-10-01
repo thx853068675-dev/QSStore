@@ -5,7 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const vm = require('node:vm');
-const ts = require('/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+const ts = require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const root = path.join(__dirname, '../entry/src/main/ets');
 function load(file, mocks = {}) {
   const exports = {};
@@ -27,12 +27,13 @@ function fixture(t) {
     OpenMode: { READ_ONLY: 0 },
     accessSync: fs.existsSync, mkdirSync: p => fs.mkdirSync(p, { recursive: true }),
     openSync: p => ({ fd: fs.openSync(p, 'r') }), closeSync: p => fs.closeSync(p.fd),
-    statSync: fs.statSync, renameSync: fs.renameSync, unlinkSync: fs.unlinkSync,
+    statSync: p => typeof p === 'number' ? fs.fstatSync(p) : fs.statSync(p), renameSync: fs.renameSync, unlinkSync: fs.unlinkSync,
     copyFile: async (from, to) => typeof from === 'number' ?
       fs.writeFileSync(to, fs.readFileSync(from)) : fs.promises.copyFile(from, to)
   };
   const { LocalImport } = load('jobs/LocalImport', {
-    './InstallJob': jobs, './PackageArchive': { PackageArchive: { inspect: async p => JSON.parse(fs.readFileSync(p)),
+    './StorageBudget': { StorageBudget: { require: async () => {} } },
+    './InstallJob': jobs, './PackageArchive': { PackageArchive: { release: () => {}, inspect: async p => JSON.parse(fs.readFileSync(p)),
       extension: name => name.toLowerCase().endsWith('.app') ? '.app' : '.hap' } },
     '@kit.CoreFileKit': { fileIo, hash: { hash: async p =>
       crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex') },

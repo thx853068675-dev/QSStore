@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const ts = require('/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+const ts = require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const root = path.resolve(__dirname, '../entry/src/main/ets/jobs');
 
 function load(name, mocks = {}, globals = {}) {
@@ -105,4 +105,16 @@ test('a frozen process does not consume the device response budget upon foregrou
   assert.equal(f.scheduler.stillFinishing('frozen'), false);
   finish('completed'); assert.equal(await work, 'completed');
   assert.deepEqual(f.released, ['frozen']);
+});
+
+test('different task IDs cannot execute concurrently even after timeout ends UI waiting', async () => {
+  const f = schedulerFixture(); let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  await assert.rejects(f.scheduler.runExclusive('first', () => gate, 5), /超时/);
+  let secondStarted = false;
+  const second = f.scheduler.runExclusive('second', async () => { secondStarted = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(secondStarted, false); assert.equal(f.scheduler.isRunning('second'), true);
+  release(); await second;
+  assert.equal(secondStarted, true); assert.deepEqual(f.acquired, ['first', 'second']);
 });

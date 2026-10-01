@@ -1,4 +1,5 @@
 import { FailureKind, InstallJob, InstallStage, RecoveryEvidence } from './InstallJob';
+import { ClassifiedFailure } from '../data/ServiceFailure';
 import { JobScheduler } from './JobScheduler';
 import { JobStore } from './JobStore';
 import { recoveryStage } from './RecoveryPlanner';
@@ -143,7 +144,7 @@ export class JobRunner {
     } catch (error) {
       if (JobCancellation.isCancelled(id)) throw new Error('安装任务已取消');
       const failure = error instanceof JobFailure ? error :
-        new JobFailure(FailureKind.TRANSIENT, String(error));
+        new JobFailure((error as ClassifiedFailure).failureKind ?? FailureKind.TRANSIENT, String(error));
       await this.store.recordFailure(job, failure.kind, failure.message);
       return job;
     }

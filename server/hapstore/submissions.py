@@ -109,9 +109,29 @@ def process_one(token: str = "") -> bool:
             generation=task["generation"])
         print(f"catalog enrichment app={task['app_id']} applied={info['applied']}", flush=True)
     except Exception as e:
-        db.fail_catalog_task(task["app_id"], task["generation"], str(e))
+        db.fail_catalog_task(task["app_id"], task["generation"], str(e), getattr(e, "retry_after", 0))
         print(f"catalog enrichment retry app={task['app_id']}: {e}", flush=True)
     return True
+
+
+def process_refresh_one(token: str = '') -> bool:
+    task = db.claim_refresh()
+    if not task:
+        return False
+    try:
+        collector.sync_app(task['repo_full_name'], token=token)
+        db.finish_refresh(task['app_id'])
+    except Exception as error:
+        db.finish_refresh(task['app_id'], str(error), getattr(error, 'retry_after', 0))
+    return True
+
+
+def queue_due(limit: int = 20, progress=None) -> dict[str, Any]:
+    rows = db.apps_needing_sync(limit=limit, max_age_seconds=collector.sync_max_age_seconds())
+    queued = sum(db.enqueue_refresh(row['id'], collector.sync_max_age_seconds())['queued'] for row in rows)
+    if rows:
+        wake_worker()
+    return {'queued': queued, 'synced': 0, 'failed': 0, 'errors': []}
 
 
 def wake_worker() -> None:
@@ -125,6 +145,8 @@ def start_worker(token: str = "") -> None:
             return
         _worker_started = True
     db.recover_catalog_tasks()
+    with db.connect():
+        db.connect().execute("UPDATE refresh_task SET status='pending' WHERE status='running'")
     conn = db.connect()
     conn.execute("UPDATE submit_draft SET inspection_state='pending' WHERE inspection_state='running'")
     conn.commit()
@@ -132,7 +154,11 @@ def start_worker(token: str = "") -> None:
     def run() -> None:
         while True:
             try:
-                if process_prepare_one(token) or process_one(token):
+                # Give each class of work a turn; archive discovery cannot starve updates.
+                prepared = process_prepare_one(token)
+                enriched = process_one(token)
+                refreshed = process_refresh_one(token)
+                if prepared or enriched or refreshed:
                     continue
             except Exception as e:
                 print(f"catalog worker error: {type(e).__name__}: {e}", flush=True)

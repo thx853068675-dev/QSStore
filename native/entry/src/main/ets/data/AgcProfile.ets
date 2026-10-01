@@ -3,6 +3,8 @@ import { fileIo } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { util } from '@kit.ArkTS';
 import { profileMatchesCertificate, readSignedProfile } from 'libhap_core.so';
+import { ClassifiedFailure } from './ServiceFailure';
+import { FailureKind } from '../jobs/InstallJob';
 import { AgcClient } from './AgcClient';
 import { DeveloperAccount } from './DeveloperAccount';
 import { LocalSigningIdentity, SigningIdentityRecovery } from './SigningIdentity';
@@ -165,6 +167,8 @@ export class AgcProfile {
       let url = '';
       try { url = await agc.createProfile(name, identity.certId, ids, acls, bundleName); }
       catch (error) {
+        if ((error as ClassifiedFailure).failureKind === FailureKind.ACCOUNT ||
+          (error as ClassifiedFailure).failureKind === FailureKind.NETWORK) throw error as Error;
         if (!cached) throw error instanceof Error ? error : new Error(String(error));
         AgcProfile.registrations.delete(key);
         const fresh = await AgcProfile.registeredDeviceIds(agc, udid);

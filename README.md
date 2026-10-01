@@ -1,54 +1,21 @@
 # 轻启·安装器
 
-一个 HarmonyOS 应用商店与侧载安装器：发现、下载 HAP，并在**本机用你自己的开发者证书重新签名**后安装到设备。签名、设备授权与上架记录都绑定在你自己的华为开发者账号下。
+HarmonyOS 原生侧载安装器，当前版本 **0.4.49**。
 
-## 制品
+[正式版](https://github.com/thx853068675-dev/QSStore/releases/tag/v0.4.49) · [预览版](https://github.com/thx853068675-dev/QSStore/releases/tag/v0.4.49-preview.1)
 
-**[最新版本](https://github.com/thx853068675-dev/QSStore/releases/latest)** — `com.tonghongxiang.hapstore`。ArkTS/ArkUI 原生实现，不含 Flutter 运行时。
-
-Release 里的包已指向正式元数据服务，装上即可用。
-
-从 0.4.47 起，Release 提供**无签名 HAP**，不绑定作者设备。请使用支持 HarmonyOS 的侧载工具，用自己的开发者身份为本机签名后安装；也可 clone 本仓库，用 DevEco Studio 打开 `native/` 配置自己的签名材料后构建。
-
-0.4.48 修复发现页高星应用背景丢失、按百星/千星/万星显示不同背景，以及管理页修改分类后仍显示旧分类的问题。服务端改为优先解析启动 Ability 的桌面图标；Kazumi 的真实图标已更新。构建码 2026093015 加入安装队列：发现页可连续点选多个应用，管理页按顺序安装，并修复其他卡片按钮变灰及星光卡片按钮底色不明显的问题。
-
-同一构建码的最新替换包修复版本显示：管理页展示系统当前版本，在线安装保存 HAP 实际版本名。服务端检查 Release 改为每个已验证账号每分钟 3 次，五分钟内重复检查同仓库复用结果。验证与实机限制见 [48 修复记录](docs/RELEASE-48-VERSION-AND-SUBMIT-20260930.md)。
-
-2026-10-01 的 48 替换包（构建码 2026100101）补齐深色导航、分类与历史版本选择菜单，以及首次识别本机侧载应用的引导。6.1 真机深浅主题切换及菜单检查通过，客户端 170 项测试通过。详见 [验证记录](docs/RELEASE-48-DARK-AND-FIRST-SCAN-20261001.md)。
-
-最新 48 替换包（构建码 2026100106）让下拉刷新不等待图标及设备扫描，加入原生沉浸光感的悬浮吸顶搜索与透明状态栏和大圆环中央两字的阶段进度，千星卡改用柔和光晕；连接弹窗随当前页面展示，端口居中并回填。详情头部并排显示版本和分类，大小接在上架人后面；标题按钮切换正式版和预览版，本地 HAP 先预览再点击安装。减少重复 UDID 和 AGC 设备登记查询，加快安装后的版本确认；首次安装自动复用或申请证书。222 项客户端与 9 项 HDC 测试通过，实机范围见 [验证记录](docs/RELEASE-48-REFRESH-PROGRESS-20261001.md)。
-
-0.4.47 修复轻启内嵌工作模块的授权及签名匹配，手机端两层重签和安装已通过 6.1 实机验证。已经安装同版本轻启但工作模块导入失败时，可在 47 中本地重新导入轻启 HAP 触发修复。详见 [验证记录](docs/RELEASE-47-INNER-SIGNING-20260930.md)。
-
-## 功能
-
-商店列表与详情、历史版本下拉、账号登录、上架与下架、评论（分页）、可恢复下载、本地 HAP 导入、AGC 调试证书管理（列表 / 左滑删除 / 配对使用 / 证书重置）、深色模式、强制登录闸门、设备连接检测。
-
-## 目录
-
-| 路径 | 内容 |
-|---|---|
-| `native/` | **当前实现**：ArkTS/ArkUI 原生版。签名核心与 HDC TCP 主机以 Rust 源码静态链接进 `libhap_core.so` |
-| `core/logic/` | HAP 校验、签名、设备授权逻辑 |
-| `app/` | 早期 Flutter 实现，保留作参考 |
-| `server/` | Python 元数据、上架、评论与签名身份服务 |
-| `core/logic/` | HAP 校验、签名、设备授权逻辑 |
-| `tools/` | 构建、部署与运维脚本 |
-| `docs/` | API、签名、安全与实机记录 |
-| `design/` | 图标源文件与预览 |
+- 从 GitHub 上架、下载和更新应用。
+- 支持 HAP、APP、ZIP，预览后加入安装队列。
+- 使用自己的华为开发者账号签名，通过无线调试安装。
 
 ## 构建
 
-ArkTS 版的构建与签名见 [native/README.md](native/README.md)。
+准备 DevEco、OHPM、Rust 和 Python 依赖后，在仓库根目录执行：
 
-早期 Flutter 版：
-
-```bash
-./tools/build-app.sh release
-python3 -m unittest discover -s server/tests -v
-cd app && flutter test
+```sh
+python3 tools/check_local.py --offline --build --output /tmp/qingqi-check
 ```
 
-## 许可
+生成无签名 HAP，由侧载工具签名安装。
 
-MIT，见 [LICENSE](LICENSE)。
+[原生工程](native/README.md) · [服务器](docs/SERVER-API.md) · [发行记录](docs/RELEASE-0.4.49.md)

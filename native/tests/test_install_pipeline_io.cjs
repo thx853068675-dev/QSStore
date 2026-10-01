@@ -22,7 +22,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
   alternateCertificate = false, backupFails = false) {
   const calls = { hapHashes: 0, profileHashes: 0, nativeSigns: 0,
     nativeVerifies: 0, installedPath: '', uninstalls: 0, selfStaged: '',
-    selectedCertId: '', identityBackups: 0, identityPrepares: 0 };
+    selectedCertId: '', identityBackups: 0, identityPrepares: 0, order: [], stagedCleanup: 0 };
   let deviceVersion = installedVersion;
   const job = {
     sourceUrl: 'local', assetName: 'installer-signed.hap',
@@ -34,6 +34,8 @@ function fixture(installedVersion = 0, selfUpdate = false,
   };
   const originalIdentity = { bundleName: job.bundleName, versionCode: job.versionCode };
   const mocks = {
+    './StorageBudget': { StorageBudget: { require: async () => {} } },
+    './PackageArchive': { PackageArchive: { permissions: async () => [], workingBytes: () => 123, release: () => {} } },
     './JobCancellation': { JobCancellation: { assertActive: () => {
       if (calls.cancelled) throw new Error('安装任务已取消');
     } } },
@@ -60,7 +62,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
       }
     } },
     '@kit.CoreFileKit': {
-      fileIo: { accessSync: () => true, readTextSync: () => 'private key' },
+      fileIo: { statSync: () => ({ size: 123 }), accessSync: () => true, readTextSync: () => 'private key' },
       hash: { hash: async file => {
         if (file === job.cachePath) { calls.hapHashes++; return 'abc'; }
         calls.profileHashes++; return 'profile';
@@ -115,6 +117,18 @@ function fixture(installedVersion = 0, selfUpdate = false,
     installedVersion: async () => deviceVersion,
     uninstall: async () => { calls.uninstalls++; deviceVersion = 0; },
     install: async file => { calls.installedPath = file; deviceVersion = job.versionCode; },
+    stageInstall: async file => {
+      calls.order.push('stage');
+      if (calls.stageFails) throw Error('transfer failed before uninstall');
+      calls.stagedPath = file;
+      if (calls.identityChangesDuringTransfer) installedIdentity.versionCode++;
+      return 'staging-ticket';
+    },
+    installStaged: async () => {
+      calls.order.push('uninstall-and-install'); calls.uninstalls++;
+      calls.installedPath = calls.stagedPath; deviceVersion = job.versionCode;
+    },
+    discardStaged: async () => { calls.stagedCleanup++; return true; },
     installSelfAfterUninstall: async file => { calls.selfStaged = file; }
   });
   return { job, calls, Runtime, runtime };
@@ -265,6 +279,8 @@ test('after approval a regular app uninstalls once and installs the verified sig
   await runtime.verifySignature(job);
   await runtime.install(job);
   assert.equal(calls.uninstalls, 1);
+  assert.deepEqual(calls.order, ['stage', 'uninstall-and-install']);
+  assert.equal(calls.stagedCleanup, 1);
   assert.equal(calls.installedPath, job.signedPath);
 });
 test('an approval cannot uninstall a different installed identity after the device changes', async () => {
@@ -395,4 +411,27 @@ test('a failed same-version repair is not masked by the old installed version', 
   job.reinstallRequired = true;
   runtime.device.install = async () => { throw new Error('code:9568423 device is unauthorized'); };
   await assert.rejects(runtime.install(job), /9568423/);
+});
+
+for (const changeIdentity of [false, true]) test('replacement protects the old app when ' +
+  (changeIdentity ? 'identity changes during staging' : 'staging transfer fails'), async () => {
+  const installed = { versionCode: 1, fingerprint: 'A'.repeat(64), appIdentifier: 'installed-app-id' };
+  const { job, calls, runtime } = fixture(1, false, false, false, installed);
+  Object.assign(job, { allowDataLoss: true, approvedInstalledVersion: 1,
+    approvedInstalledFingerprint: installed.fingerprint, approvedInstalledAppIdentifier: installed.appIdentifier });
+  calls.stageFails = !changeIdentity; calls.identityChangesDuringTransfer = changeIdentity;
+  await assert.rejects(runtime.install(job), changeIdentity ? /发生变化/ : /before uninstall/);
+  assert.equal(calls.uninstalls, 0); assert.equal(calls.installedPath, '');
+  if (changeIdentity) assert.equal(calls.stagedCleanup, 1);
+});
+
+test('staged replacement keeps a cleanup ticket when the link drops during cleanup', async () => {
+  const installed = { versionCode: 1, fingerprint: 'A'.repeat(64), appIdentifier: 'installed-app-id' };
+  const { runtime, job, calls } = fixture(1, false, false, false, installed);
+  Object.assign(job, { allowDataLoss: true, approvedInstalledVersion: installed.versionCode,
+    approvedInstalledFingerprint: installed.fingerprint,
+    approvedInstalledAppIdentifier: installed.appIdentifier });
+  runtime.device.discardStaged = async () => false;
+  await runtime.install(job);
+  assert.equal(calls.uninstalls, 1); assert.ok(job.stagedTicket.length > 0);
 });

@@ -85,3 +85,28 @@ test('a former successful UDID must not be returned after the link is lost', asy
   await assert.rejects(() => f.bridge.udid(), /尚未连接/);
   assert.equal(f.Bridge.deviceLinked(), false);
 });
+
+test('concurrent silent and install link checks share a single verified probe', async () => {
+  let resolve; const response = new Promise(yes => { resolve = yes; });
+  const f = fixture([response]);
+  const one = f.bridge.connected(), two = f.bridge.connected();
+  await new Promise(done => setImmediate(done));
+  assert.deepEqual(f.calls.map(row => row[0]), [2]);
+  resolve(UDID); assert.deepEqual(await Promise.all([one, two]), [true, true]);
+});
+
+test('silent restoration without a saved port does not query or pair a device', async () => {
+  const f = fixture([], 0);
+  assert.equal(await f.bridge.restoreSavedLink(() => true), false);
+  assert.equal(f.calls.length, 0);
+});
+
+test('automatic fallback queued behind a manual connection preserves the newly verified port', async () => {
+  const f = fixture(['[Info] connected', UDID, UDID], 5555);
+  const manual = f.bridge.connect(6666, true, false);
+  const automatic = f.bridge.connect(5555, false, false);
+  assert.deepEqual(await Promise.all([manual, automatic]), [true, true]);
+  assert.equal(f.savedPort, 6666);
+  assert.equal(f.calls.filter(row => row[0] === 'disconnect').length, 1);
+  assert.deepEqual(f.calls.filter(row => row[0] === 1).map(row => row[1]), ['127.0.0.1:6666']);
+});

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const crypto = require('node:crypto'), vm = require('node:vm');
-const ts = require('/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+const ts = require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const root = path.join(__dirname, '..');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qingqi-package-test-'));
 const cli = path.join(dir, 'archive-reader');
@@ -19,7 +19,7 @@ function load(file, mocks) {
 }
 const io = { accessSync: fs.existsSync, mkdirSync: p => fs.mkdirSync(p, { recursive: true }),
   OpenMode: { READ_ONLY: 0 }, openSync: p => ({ fd: fs.openSync(p, 'r') }), closeSync: f => fs.closeSync(f.fd),
-  statSync: fs.statSync, unlinkSync: fs.unlinkSync, renameSync: fs.renameSync,
+  statSync: p => typeof p === 'number' ? fs.fstatSync(p) : fs.statSync(p), unlinkSync: fs.unlinkSync, renameSync: fs.renameSync,
   copyFile: async (from,to) => typeof from === 'number' ? fs.writeFileSync(to, fs.readFileSync(from)) : fs.promises.copyFile(from,to) };
 const native = {
   listPackageEntries: p => execFileSync(cli, [p, 'list'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean).map(line => {
@@ -29,7 +29,8 @@ const native = {
   readPackInfo: p => execFileSync(cli,[p,'pack'], {encoding:'utf8'}), readHapIcon: () => new Uint8Array()
 };
 const inspector = load('jobs/PackageInspector', { 'libhap_core.so': native });
-const archive = load('jobs/PackageArchive', { 'libhap_core.so': native, '@kit.CoreFileKit': {fileIo:io}, './PackageInspector': inspector });
+const storage = { StorageBudget: { require: async () => {} } };
+const archive = load('jobs/PackageArchive', { './StorageBudget': storage, 'libhap_core.so': native, '@kit.CoreFileKit': {fileIo:io}, './PackageInspector': inspector });
 const jobs = load('jobs/InstallJob', {});
 function fixtures(name) {
   const sub = path.join(dir,name); fs.mkdirSync(sub);
@@ -63,7 +64,7 @@ function local(sub,source) {
   let selected = source, saved;
   const core = {fileIo:io,hash:{hash:async p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')},
     picker:{DocumentViewPicker: class { async select(options) {assert.match(options.fileSuffixFilters[0], /\.app,\.zip/);return [selected];}}}};
-  const {LocalImport}=load('jobs/LocalImport',{'@kit.CoreFileKit':core,'./PackageArchive':archive,'./InstallJob':jobs,'libhap_core.so':native});
+  const {LocalImport}=load('jobs/LocalImport',{'./StorageBudget': storage, '@kit.CoreFileKit':core,'./PackageArchive':archive,'./InstallJob':jobs,'libhap_core.so':native});
   const store={save:async job=>saved=job,enqueueLocal:async(cachePath,signedPath,hash,bundleName,versionCode,versionName,moduleName,mainAbility)=>
     ({cachePath,signedPath,expectedSha256:hash,bundleName,versionCode,versionName,moduleName,mainAbility})};
   return {context,LocalImport,store,saved:()=>saved};
@@ -82,7 +83,7 @@ test('ZIP previews enumerate valid HAP/APP candidates; selection does not enqueu
   const sub=fixtures('zip'),f=local(sub,path.join(sub,'apps.zip'));
   const previews=await f.LocalImport.pickPreviews(f.context);
   assert.deepEqual(Array.from(previews,x=>x.assetName),['dir/main.hap','multi.app']);
-  assert.equal(f.saved(),undefined);assert.equal(fs.readdirSync(f.context.cacheDir+'/local-hap-previews').length,2);
+  assert.equal(f.saved(),undefined);assert.equal(fs.readdirSync(f.context.cacheDir+'/local-hap-previews').filter(n => !n.includes('.module-')).length,2);
   previews.forEach(p=>f.LocalImport.discardPreview(f.context,p));
   assert.equal(fs.readdirSync(f.context.cacheDir+'/local-hap-previews').length,0);
 });
@@ -106,7 +107,7 @@ test('online APP and ZIP-selected APP downloads inspect module identity before e
   const sub = fixtures('online');
   const { DownloadJobs } = load('jobs/DownloadJobs', {
     '@kit.AbilityKit': {}, './PackageArchive': archive, './PackageInspector': inspector, './InstallJob': jobs,
-    './AssetDownload': { AssetDownload: class { async downloadAndVerify() {} } }
+    './AssetDownload': { AssetDownload: class { async downloadAndVerify(_job, _progress, validate) { await validate(); } } }
   });
   for (const selected of [false, true]) {
     const source = path.join(sub, selected ? 'apps.zip' : 'multi.app');
@@ -121,6 +122,7 @@ test('online APP and ZIP-selected APP downloads inspect module identity before e
     assert.equal(job.bundleName, 'com.example.main'); assert.equal(job.moduleName, 'entry');
     assert.equal(job.versionCode, 12); assert.equal(job.versionName, '1.2.0');
     assert.equal(crypto.createHash('sha256').update(fs.readFileSync(cache)).digest('hex'), sha);
+    archive.PackageArchive.release(selected ? cache + '.package.app' : cache);
     assert(!fs.readdirSync(sub).some(name => name.includes('.module-')));
   }
 });
@@ -152,4 +154,22 @@ test('single-package publication stays compatible with the old API and multi-sel
   draft.supportsMultiSelect = true;
   await client.confirmSubmit(draft, ['main.hap', 'other.app'], '工具', {});
   assert.deepEqual(Array.from(captured[1].asset_names), ['main.hap', 'other.app']);
+});
+
+test('APP inspection and icon reuse extracted modules; a changed file invalidates the cache', async () => {
+  const sub = fixtures('reuse'), source = path.join(sub, 'multi.app');
+  const original = native.extractPackageEntry;
+  let extractions = 0;
+  native.extractPackageEntry = async (...args) => { extractions++; return original(...args); };
+  try {
+    await archive.PackageArchive.inspect(source);
+    await archive.PackageArchive.icon(source);
+    await archive.PackageArchive.inspect(source);
+    assert.equal(extractions, 2);
+    const next = new Date(Date.now() + 2000); fs.utimesSync(source, next, next);
+    await archive.PackageArchive.inspect(source);
+    assert.equal(extractions, 4);
+    archive.PackageArchive.release(source);
+    assert(!fs.readdirSync(sub).some(n => n.includes('.module-')));
+  } finally { native.extractPackageEntry = original; archive.PackageArchive.release(source); }
 });

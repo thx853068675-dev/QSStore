@@ -34,6 +34,7 @@ import ssl
 import struct
 import tempfile
 import time
+import threading
 import urllib.error
 import urllib.request
 import zipfile
@@ -60,25 +61,78 @@ _CTX = ssl.create_default_context()
 
 
 class CollectError(Exception):
-    pass
+    def __init__(self, message, *, retry_after=0):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+_github_lock = threading.Lock()
+_github_cooldown: dict[str, float] = {}
+
 
 
 def _http_get(url: str, *, token: str = "", accept: str = "application/vnd.github+json",
               timeout: int = TIMEOUT) -> bytes:
-    req = urllib.request.Request(url, headers={
-        "User-Agent": USER_AGENT,
-        "Accept": accept,
-    })
+    github = urlparse(url).netloc == 'api.github.com'
+    credential_key = hashlib.sha256(token.encode()).hexdigest()
+    cache_key = hashlib.sha256((url + '|' + accept + '|' + credential_key).encode()).hexdigest()
+    cached = None
+    if github:
+        with _github_lock:
+            delay = int(_github_cooldown.get(credential_key, 0) - time.time())
+        if delay > 0:
+            raise CollectError(f'GitHub 请求配额冷却中，请在 {delay} 秒后重试', retry_after=delay)
+        if db._initialized:
+            cached = db.connect().execute('SELECT etag,payload FROM github_http_cache WHERE cache_key=?', (cache_key,)).fetchone()
+    headers = {'User-Agent': USER_AGENT, 'Accept': accept}
     if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as resp:
-        return resp.read()
+        headers['Authorization'] = f'Bearer {token}'
+    if cached:
+        headers['If-None-Match'] = cached['etag']
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as resp:
+            body = resp.read(8 * 1024 * 1024 + 1)
+            if len(body) > 8 * 1024 * 1024:
+                raise CollectError('GitHub 元数据响应超限')
+            etag = resp.headers.get('ETag', '')
+            if github and etag and db._initialized:
+                c = db.connect()
+                with c:
+                    c.execute('INSERT OR REPLACE INTO github_http_cache(cache_key,etag,payload,updated_at) VALUES (?,?,?,?)',
+                              (cache_key, etag, body, int(time.time())))
+                    c.execute('DELETE FROM github_http_cache WHERE cache_key IN (SELECT cache_key FROM github_http_cache ORDER BY updated_at DESC LIMIT -1 OFFSET 128)')
+                    rows = c.execute('SELECT cache_key,length(payload) AS bytes FROM github_http_cache ORDER BY updated_at DESC').fetchall()
+                    retained = 0
+                    for row in rows:
+                        retained += row['bytes']
+                        if retained > 64 * 1024 * 1024:
+                            c.execute('DELETE FROM github_http_cache WHERE cache_key=?', (row['cache_key'],))
+            return body
+    except urllib.error.HTTPError as error:
+        if error.code == 304 and cached:
+            return cached['payload']
+        if github and (error.code == 429 or (error.code == 403 and error.headers.get('X-RateLimit-Remaining') == '0')):
+            now = time.time()
+            try:
+                delay = max(60, int(error.headers.get('Retry-After', '0')),
+                            int(error.headers.get('X-RateLimit-Reset', '0')) - int(now))
+            except ValueError:
+                delay = 60
+            delay = min(delay, 3600)
+            with _github_lock:
+                if len(_github_cooldown) >= 16:
+                    _github_cooldown.clear()
+                _github_cooldown[credential_key] = now + delay
+            raise CollectError(f'GitHub 请求配额已用尽，{delay} 秒后自动重试', retry_after=delay) from error
+        raise
 
 
 def _try_chain(path: str, *, token: str = "", timeout: int = TIMEOUT) -> tuple[bytes, str]:
     """摘要和下载地址只能取自 GitHub；不能让第三方代理签发校验值。"""
     try:
         return _http_get(f"https://api.github.com{path}", token=token, timeout=timeout), "direct"
+    except CollectError:
+        raise
     except Exception as e:
         raise CollectError(f"GitHub API 直连失败（{path}）：{e}") from e
 
@@ -89,6 +143,15 @@ def _json(path: str, *, token: str = "", timeout: int = TIMEOUT) -> Any:
 
 
 # ───────────────────────── HAP 内嵌元数据 ─────────────────────────
+
+
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+
+def validate_hap_manifests(archive: zipfile.ZipFile) -> None:
+    for name in ('pack.info', 'module.json'):
+        matches = [row for row in archive.infolist() if row.filename == name]
+        if len(matches) > 1 or (matches and (matches[0].file_size > MAX_MANIFEST_BYTES or matches[0].flag_bits & 1)):
+            raise CollectError('安装包清单重复、加密或超限')
 
 
 def parse_hap_metadata(path: str) -> dict[str, Any]:
@@ -102,6 +165,7 @@ def parse_hap_metadata(path: str) -> dict[str, Any]:
     }
     try:
         with zipfile.ZipFile(path) as z:
+            validate_hap_manifests(z)
             names = set(z.namelist())
 
             # ① pack.info —— 权威来源
@@ -140,6 +204,8 @@ def parse_hap_metadata(path: str) -> dict[str, Any]:
                                 z.read("resources.index"), label_id)
                 except Exception:
                     pass
+    except CollectError:
+        raise
     except zipfile.BadZipFile:
         return out
     except Exception:
@@ -580,6 +646,7 @@ def enrich_assets_with_hap_metadata(
 
     只处理前 [limit] 个 release 的 HAP，避免一次采集下载过多文件。
     """
+    from . import artifact_cache
     done = 0
     for rel in releases:
         if done >= limit:
@@ -593,6 +660,10 @@ def enrich_assets_with_hap_metadata(
                     if not a['name'].lower().endswith('.zip'): expanded.append(a)
                 continue
             expanded.append(a)
+            cached = artifact_cache.get(a.get('sha256', ''), 'hap')
+            if cached is not None:
+                a.update(cached[0])
+                continue
             tmp = _download_to_temp(a["download_url"], token=token)
             if not tmp:
                 continue
@@ -612,6 +683,7 @@ def enrich_assets_with_hap_metadata(
                 icon = extract_hap_icon(tmp)
                 if icon:
                     a["_icon"] = icon
+                artifact_cache.put(trusted_sha, 'hap', [a])
                 if progress:
                     progress(
                         f"  {a['name']}: bundle={meta['bundle_name']} "

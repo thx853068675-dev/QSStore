@@ -61,12 +61,25 @@ function fixture() {
   f.bridge = new HdcDeviceBridge({ filesDir: '/sandbox' });
   f.bridge.connected = async () => true;
   f.bridge.command = async (op, arg) => { f.calls.push([op, arg]); return op === 6 ? f.list : f.detail; };
-  f.registry = registry; return f;
+  f.registry = registry; f.Bridge = HdcDeviceBridge; return f;
 }
 test('real 6.1 list format only proves presence; requested versions come from package details', async () => {
   const f = fixture(); const values = await f.bridge.installedBundleVersions([bundle, bundle]);
   assert.equal(values.get(bundle), 110003); assert.equal(f.registry.version(bundle), 110003);
   assert.equal(f.calls.length, 2); assert.equal(f.calls[0][0], 6); assert.equal(f.calls[1][0], 3);
+});
+test('inventory progress counts unique present and absent packages and protects the full scan', async () => {
+  const f = fixture(); const progress = [];
+  const absent = 'com.example.absent';
+  const values = await f.bridge.installedBundleVersions([absent, bundle, bundle], (checked, total) => {
+    assert.equal(f.Bridge.busy(), true, 'the scan lease covers gaps between native commands');
+    progress.push([checked, total]);
+  });
+  assert.deepEqual(progress, [[0, 2], [1, 2], [2, 2]]);
+  assert.equal(values.get(bundle), 110003);
+  assert.equal(f.registry.version(absent), 0);
+  assert.equal(f.calls.filter(([operation]) => operation === 3).length, 1);
+  assert.equal(f.Bridge.busy(), false);
 });
 test('permission-denied system lookup reuses an HDC-confirmed side-loaded version across pages', async () => {
   const f = fixture(); await f.bridge.installedVersion(bundle);
@@ -188,7 +201,9 @@ test('HDC unsigned and unauthorized errors are rejected even inside an Info resp
   const io = f.bridge;
   const src = fs.readFileSync(path.join(root, 'jobs/HdcDeviceBridge.ets'), 'utf8');
   const start = src.indexOf('  async install(signedHapPath');
-  const method = src.slice(start, src.indexOf('\n  }', start) + 4);
+  const helperStart = src.indexOf('  private async observedCommand');
+  const method = src.slice(start, src.indexOf('\n  }', start) + 4) + '\n' +
+    src.slice(helperStart, src.indexOf('\n  }', helperStart) + 4);
   const sandbox = { fileIo: { accessSync: () => true } };
   vm.runInNewContext(ts.transpileModule(`class Bridge { ${method} }; globalThis.Bridge = Bridge;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }

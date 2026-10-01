@@ -1,7 +1,7 @@
 # HAP 商店 · 元数据服务（已上线）
 
 > 生产地址：**https://47.98.250.230/api/v1**（自签证书，客户端校验证书指纹）
-> 状态：**运行中** · systemd 托管 · 开机自启
+> 状态：生产服务由 systemd 托管；本轮后台刷新及缓存改动已于 2026-10-02 部署，健康和缓存接口验证通过。
 
 ---
 
@@ -43,7 +43,10 @@ curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 | GET | `/api/v1/apps/{id}` | 详情 |
 | GET | `/api/v1/apps/{id}/releases` | 版本列表（含 asset 与镜像链）。支持 `page` `page_size`（上限 50），默认仅正式版；`prerelease=1` 手动查看预览版 |
 | GET | `/api/v1/apps/{id}/releases/{tag}` | 单版本 |
-| GET | `/api/v1/apps/{id}/icon` | 优先返回 HAP 图标，缺失时 302 跳转至 GitHub 头像 |
+| GET | `/api/v1/apps/{id}/icon` | 返回选中安装包的真实图标；缺失返回 404，支持 `?v=<icon_rev>` 和 ETag |
+| POST | `/api/v1/apps/{id}/refresh` | 去重入队后台检查；60 秒内已采集则返回 `fresh` |
+| GET | `/api/v1/apps/{id}/refresh` | 查询 `pending/running/done/failed/fresh` 与 `last_error` |
+| POST | `/api/v1/apps/refresh-stale` | 兼容旧客户端，仅按新鲜度入队，不在请求中采集 |
 | GET | `/api/v1/apps/{id}/reviews` | 评分与评论列表。支持 `page` `page_size`（上限 50） |
 | POST | `/api/v1/apps/{id}/reviews` | 已验证华为开发者账号新增评分与评论（同账号可多条） |
 | GET | `/api/v1/signing-identity` | 已验证账号取回加密保存的签名身份；无记录时 `identity` 为 `null` |
@@ -56,7 +59,7 @@ curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 | GET | `/api/v1/me/apps` | 获取当前已验证华为账号上架的公开应用 |
 | DELETE | `/api/v1/me/apps/{id}` | 当前上架者删除应用的公开展示；保留历史数据以便重新上架 |
 | GET | `/api/v1/admin/sync` | **仅本机** 探测采集通道 |
-| POST | `/api/v1/admin/sync` | **仅本机** 手动触发采集 |
+| POST | `/api/v1/admin/sync` | **仅本机** 入队到统一后台采集 worker |
 | POST | `/api/v1/admin/apps/{id}/hide` | **仅本机** 上下架 |
 | POST | `/api/v1/admin/apps/{id}/feature` | **仅本机** 精选 |
 
@@ -95,6 +98,26 @@ ZIP 候选 URL 使用 `#qingqi-package=<URL 编码条目名>` 表示下载后提
 上架、评价及签名身份接口使用 `Authorization: Bearer <DevEco JWT>` 验证华为账号。客户端同时发送 `X-Huawei-Access-Token`，服务端用华为 `GOpen.User.getInfo` 的 `getNickName=1` 获取公开昵称和 `headPictureURL` 头像，并核对返回的 `userID` 与 JWT 账号一致。评论列表返回 `avatar_url`；头像按账号保存，因此账号再次核验后，已有评论也会显示头像。资料接口暂不可用时回退完整账号 ID；不使用证书主体中的实名。
 
 签名身份在服务端以独立随机密钥通过 AES-256-GCM 加密，密钥位于 `/var/lib/hapstore/identity-vault.key`，权限 `0600`。设备取回后会从 AGC 下载当前账号的有效调试证书，只有私钥与证书公钥配对才采用。密钥文件与数据库必须一起备份；丢失密钥文件则现有密文无法恢复。
+
+---
+
+## 本轮服务优化
+
+公开目录、详情、版本和评论 GET 提供 `ETag` 与 `Cache-Control: public, max-age=30, must-revalidate`，命中 `If-None-Match` 返回无响应体的 304。账号、草稿、私钥备份及管理接口仍为 `no-store`。图标修订地址匹配 `icon_rev` 时可长期缓存；上架状态仍在读取时核实，已下架应用不返回图标。
+
+刷新接口只执行短事务并返回状态，例如：
+
+```json
+{"ok":true,"data":{"app_id":1,"status":"pending","queued":true}}
+```
+
+重复请求返回已有任务状态，`queued:false` 表示没有新增任务。准备草稿、补全目录和检查更新共用单个后台 worker，三类任务轮流执行；定时采集和管理员批量同步也使用同一队列。管理员指定单个仓库的诊断同步仍直接执行。失败最多尝试四次并退避，GitHub 配额冷却会推迟所有使用同一凭证的仓库请求。采集中的应用下架后不会重新公开。
+
+服务器只缓存可信摘要对应的已解析包元数据与图标，不保存整包。`artifact_inspection` 上限 512 条/64 MB、单条 4 MB；同一 ZIP 选择多个包可复用一次下载结果。GitHub API 使用条件请求，缓存上限 128 条/64 MB，缓存键隔离凭证和 Accept 类型；数据库不保存 GitHub Token。
+
+新表 `refresh_task`、`artifact_inspection`、`github_http_cache` 由启动时幂等创建。客户端查询后台刷新状态需要匹配本轮服务端；旧服务刷新接口返回同步结果时新版客户端仍可读取，旧客户端不会自动等待本轮后台任务完成。
+
+详细改动见 [优化报告](LOCAL-OPTIMIZATION-20261001.md)。2026-10-02 部署前已备份数据库、身份加密密钥及旧服务代码，备份目录 `/opt/hapstore-backups/2026100201`。新运行环境为 `/opt/hapstore-venv-2026100201`，保留原服务环境与代理设置。生产数据库副本迁移和全部 216 条身份解密验证通过，应用、评论及身份数量未变化；目录及图标条件请求、健康接口和刷新状态接口已核对。
 
 ---
 

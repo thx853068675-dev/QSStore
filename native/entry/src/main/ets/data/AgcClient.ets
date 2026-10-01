@@ -1,5 +1,8 @@
 import { http } from '@kit.NetworkKit';
 import { DeveloperAccount } from './DeveloperAccount';
+import { AccountService } from './AccountService';
+import { ServiceFailure, ClassifiedFailure } from './ServiceFailure';
+import { FailureKind } from '../jobs/InstallJob';
 
 const AGC_API = 'https://connect-api.cloud.huawei.com/api';
 
@@ -29,7 +32,7 @@ export class AgcClient {
   constructor(account: DeveloperAccount) { this.account = account; }
 
   private async request(path: string, body?: Object,
-    method?: http.RequestMethod): Promise<Record<string, Object>> {
+    method?: http.RequestMethod, retried: boolean = false): Promise<Record<string, Object>> {
     const request = http.createHttp();
     const verb = method ?? (body ? http.RequestMethod.POST : http.RequestMethod.GET);
     try {
@@ -48,15 +51,32 @@ export class AgcClient {
       // HarmonyOS rejects extraData: '' before a bodyless GET reaches AGC.
       if (body) options.extraData = JSON.stringify(body);
       const response = await request.request(AGC_API + path, options);
+      if (response.responseCode === 401 && !retried) {
+        await AccountService.refresh(this.account, true);
+        return this.request(path, body, method, true);
+      }
       if (response.responseCode !== 200 || typeof response.result !== 'string') {
-        throw new Error('AGC 暂时无法完成请求');
+        const code = response.responseCode;
+        throw new ServiceFailure(code === 401 ? FailureKind.ACCOUNT :
+          code === 403 ? FailureKind.INTERNAL : FailureKind.NETWORK,
+          code === 401 ? '登录已过期，请重新登录' : code === 403 ? 'AGC 权限不足，请检查开发者账号授权' :
+            code === 429 ? 'AGC 请求过于频繁，请稍后重试' : 'AGC 暂时无法完成请求（HTTP ' + code + '）', code);
       }
       const data = JSON.parse(response.result) as Record<string, Object>;
       const ret = data['ret'] as Record<string, Object> | undefined;
       if (ret && Number(ret['code'] ?? 0) !== 0) {
-        throw new Error('AGC 拒绝请求：' + String(ret['msg'] ?? ret['code']));
+        const code = Number(ret['code']);
+        if (code === 401 && !retried) {
+          await AccountService.refresh(this.account, true);
+          return this.request(path, body, method, true);
+        }
+        throw new ServiceFailure(code === 401 ? FailureKind.ACCOUNT : FailureKind.INTERNAL,
+          'AGC 拒绝请求：' + String(ret['msg'] ?? ret['code']), code);
       }
       return data;
+    } catch (error) {
+      if ((error as ClassifiedFailure).failureKind !== undefined) throw error as Error;
+      throw new ServiceFailure(FailureKind.NETWORK, 'AGC 网络请求失败：' + String(error));
     } finally {
       request.destroy();
     }

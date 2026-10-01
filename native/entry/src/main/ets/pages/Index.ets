@@ -1,3 +1,7 @@
+import { InstallConfirmation } from '../jobs/InstallConfirmation';
+import { ClassifiedFailure } from '../data/ServiceFailure';
+import { AccountService } from '../data/AccountService';
+import { InstallCoordinator } from '../jobs/InstallCoordinator';
 import { InstallReconnect } from '../jobs/InstallReconnect';
 import { LocalInstallTimeline, LocalTimelineView, LocalTimelineStep } from '../jobs/LocalInstallTimeline';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
@@ -8,14 +12,12 @@ import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
-import { InstallJob, InstallStage, StageMark } from '../jobs/InstallJob';
+import { FailureKind, InstallJob, InstallStage, StageMark } from '../jobs/InstallJob';
 import { JobStore } from '../jobs/JobStore';
 import { LegacyInstalledMigration } from '../jobs/LegacyInstalledMigration';
 import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
-import { JobRunner } from '../jobs/JobRunner';
 import { JobScheduler } from '../jobs/JobScheduler';
 import { isPending } from '../jobs/RecoveryPlanner';
-import { NativeJobRuntime } from '../jobs/NativeJobRuntime';
 import { retryDelayMs } from '../jobs/RecoveryPlanner';
 import { LocalImport } from '../jobs/LocalImport';
 import { LocalBundles } from '../jobs/LocalBundles';
@@ -26,7 +28,7 @@ import { CatalogCache, CachedIcon } from '../data/CatalogCache';
 import { ReleaseInfo, HapAsset } from '../data/ReleaseInfo';
 import { StoreClient } from '../data/StoreClient';
 import { AccountSession, DeveloperAccount } from '../data/DeveloperAccount';
-import { DevEcoLogin, isTransientAuthError } from '../data/DevEcoLogin';
+import { DevEcoLogin } from '../data/DevEcoLogin';
 import { LocalSigningIdentity, SigningIdentityRecovery, EnrollmentOptions, EnrollmentOutcome } from '../data/SigningIdentity';
 import { AgcClient } from '../data/AgcClient';
 import { SubmitDraft, SubmitChoice } from '../data/StoreActions';
@@ -176,15 +178,20 @@ struct Index {
   /** 目录里每个应用在本机的版本（来自系统 bundleManager），0/缺失表示没装。 */
   @State private installedVersions: Map<number, number> = new Map<number, number>();
   @State private needsInstallScan: boolean = false;
+  @StorageProp('wirelessLinkRevision') @Watch('onWirelessLinkChanged') private wirelessLinkRevision: number = 0;
+  @StorageProp('wirelessDebugRestoring') @Watch('onWirelessLinkChanged') private wirelessDebugRestoring: boolean = false;
+  @State private catalogProbeChecked: number = 0;
+  @State private catalogProbeTotal: number = 0;
+  private pageVisible: boolean = true;
   private initialScanDismissed: boolean = false;
   private catalogProbePending: string[] = [];
   private catalogProbeNames: string[] = [];
   /** 入队写库中的应用；只锁住被重复点击的那张卡。 */
   @State private enqueuingAppIds: number[] = [];
-  private queueDraining: boolean = false;
   private queueRecoveryReady: boolean = false;
   @State private installTasks: InstallTaskSnapshot[] = [];
   private installSubscription: number = -1;
+  private confirmationSubscription: number = -1;
   private reconnectSubscription: number = -1;
   /** 与设备核对卸载状态。 */
   @State private syncBusy: boolean = false;
@@ -307,7 +314,7 @@ struct Index {
   }
 
   aboutToAppear(): void {
-    JobScheduler.setQueueWakeup(() => { this.drainInstallQueue(); });
+    InstallCoordinator.configure(getContext(this) as common.UIAbilityContext);
     this.observeReconnect();
     this.observeInstallTasks();
     InstalledAppRegistry.load(getContext(this) as common.UIAbilityContext)
@@ -332,6 +339,7 @@ struct Index {
    * 任务标成可重试，让用户看到「继续安装」而不是一个永远转圈的进度。
    */
   onPageShow(): void {
+    this.pageVisible = true;
     this.observeReconnect();
     this.observeInstallTasks();
     this.drainInstallQueue();
@@ -345,8 +353,10 @@ struct Index {
   }
 
   aboutToDisappear(): void {
-    JobScheduler.setQueueWakeup(undefined);
+    this.pageVisible = false;
     if (this.localPreviewReady) this.resetLocalTimeline();
+    InstallConfirmation.unsubscribe(this.confirmationSubscription);
+    this.confirmationSubscription = -1;
     InstallReconnect.unsubscribe(this.reconnectSubscription);
     this.reconnectSubscription = -1;
     InstallTaskState.unsubscribe(this.installSubscription);
@@ -378,19 +388,20 @@ struct Index {
         return;
       }
       try {
-        const refreshed = await DevEcoLogin.refresh(saved);
-        await AccountSession.save(context, refreshed);
+        AccountService.configure(context);
+        const refreshed = await AccountService.refresh(saved);
         this.account = refreshed;
         this.sessionNotice = '';
       } catch (error) {
         // 断网 / 账号服务 5xx 时不要把用户踢回登录页：本地账号还在，
         // 沿用已保存的登录态，等下次启动或操作时再校验。
-        if (!isTransientAuthError(error)) throw new Error(String(error));
+        if ((error as ClassifiedFailure).failureKind !== FailureKind.NETWORK) throw new Error(String(error));
         this.account = saved;
         this.sessionNotice = '账号服务暂时不可用，正在使用本地登录态';
       }
       this.signedIn = true;
       this.loginMessage = '';
+      InstallCoordinator.conditionReady(context, InstallStage.WAITING_ACCOUNT);
       this.drainInstallQueue();
       this.recoverSigningIdentity();
       this.loadMyApps();
@@ -413,6 +424,7 @@ struct Index {
       this.account = account;
       this.signedIn = true;
       this.loginMessage = '登录成功';
+      InstallCoordinator.conditionReady(context, InstallStage.WAITING_ACCOUNT);
       this.updateInstallScanPrompt();
       this.drainInstallQueue();
       this.recoverSigningIdentity();
@@ -1579,10 +1591,25 @@ struct Index {
   }
 
   onPageHide(): void {
+    this.pageVisible = false;
+    InstallConfirmation.deactivate(this.confirmationSubscription);
     InstallReconnect.deactivate(this.reconnectSubscription);
   }
 
   private observeReconnect(): void {
+    if (this.confirmationSubscription === -1) {
+      this.confirmationSubscription = InstallConfirmation.subscribe((id: string) => {
+        if (!id) return;
+        JobStore.open(getContext(this) as common.UIAbilityContext).then(async (store: JobStore) => {
+          const job = await store.get(id);
+          if (!job || job.stage !== InstallStage.WAITING_CONFIRMATION ||
+            !InstallConfirmation.isOwner(this.confirmationSubscription) || !InstallConfirmation.isRequested(id)) return;
+          InstallConfirmation.clear(id);
+          this.confirmDataLoss(job);
+        }).catch(() => {});
+      });
+    }
+    InstallConfirmation.activate(this.confirmationSubscription);
     if (this.reconnectSubscription === -1) {
       this.reconnectSubscription = InstallReconnect.subscribe((jobId: string) => {
         if (jobId.length > 0) {
@@ -1720,45 +1747,15 @@ struct Index {
     }
   }
 
-  /** stageHistory 保留最初入队时间，updatedAt 则随进度变化。 */
+  /** Display FIFO position using the original enqueue timestamp. */
   private queueTime(job: InstallJob): number {
-    return job.stageHistory.length > 0 ? job.stageHistory[0].at : job.updatedAt;
+    return job.stageHistory[0]?.at ?? job.updatedAt;
   }
 
   /** 只自动处理排队项；需要用户连接、确认或手动重试的任务保持原状态。 */
   private async drainInstallQueue(): Promise<void> {
-    if (!this.queueRecoveryReady || this.queueDraining || this.activeJobId.length > 0 ||
-      JobScheduler.runningJobIds().length > 0) return;
-    this.queueDraining = true;
-    try {
-      const context = getContext(this) as common.UIAbilityContext;
-      const store = await JobStore.open(context);
-      while (this.activeJobId.length === 0) {
-        const queued = (await store.listAll()).filter((job: InstallJob) =>
-          job.stage === InstallStage.QUEUED && (job.appId > 0 || job.sourceUrl === 'local'))
-          .sort((a: InstallJob, b: InstallJob) => this.queueTime(a) - this.queueTime(b));
-        const job = queued[0];
-        if (job === undefined) break;
-        // 需要登录的任务不启动；自更新可以直接使用发布包原签名。
-        if (!this.signedIn && !LocalBundles.isSelfBundle(job.catalogBundleName || job.bundleName)) break;
-        try {
-          if (job.sourceUrl !== 'local') await JobScheduler.runDownload(context, store, job);
-          if (await store.get(job.id) === undefined) continue; // 已被用户取消
-          await this.continueInstall(job);
-          const finished = await store.get(job.id);
-          if (finished !== undefined && finished.stage !== InstallStage.INSTALLED) break;
-        } catch (error) {
-          if (await store.get(job.id) === undefined) continue;
-          this.jobsError = errorText(error);
-          break;
-        }
-      }
-    } catch (error) {
-      this.jobsError = errorText(error);
-    } finally {
-      this.queueDraining = false;
-      await this.loadJobs();
-    }
+    if (!this.queueRecoveryReady) return;
+    await InstallCoordinator.recovered(getContext(this) as common.UIAbilityContext);
   }
 
   /** 「已安装」区块展示的全部条目：轻启装过的 + 商店里探测到的。 */
@@ -2031,11 +2028,11 @@ struct Index {
    *
    * 点击立即写入持久队列；后台按入队顺序下载、签名、安装。
    */
-  private async installFromCatalog(app: CatalogApp): Promise<void> {
+  private async installFromCatalog(app: CatalogApp, selected?: HapAsset): Promise<void> {
     if (this.enqueuingAppIds.includes(app.id) ||
-      this.taskPending(app.id, app.latestAsset?.bundleName ?? '')) return;
+      this.taskPending(app.id, selected?.bundleName ?? app.latestAsset?.bundleName ?? '')) return;
     // ForEach 的点击闭包可能还持有上一轮卡片；与「更新」判断使用同一份当前目录。
-    const asset = this.catalogApp(app.id)?.latestAsset;
+    const asset = selected ?? this.catalogApp(app.id)?.latestAsset;
     if (asset === undefined || !/^https:\/\//.test(asset.url)) {
       this.jobsError = '「' + app.displayName + '」缺少 HTTPS 下载地址';
       return;
@@ -2046,7 +2043,9 @@ struct Index {
       this.currentTab = Index.TAB_MINE;
       return;
     }
-    if (this.installedVersionOf(app.id) >= asset.versionCode && asset.versionCode > 0) {
+    const installedVersion = selected === undefined ? this.installedVersionOf(app.id) :
+      LocalBundles.installedVersion(asset.bundleName);
+    if (installedVersion >= asset.versionCode && asset.versionCode > 0) {
       this.checkInstalledUpdates();
       return;
     }
@@ -2055,8 +2054,13 @@ struct Index {
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const store = await JobStore.open(context);
-      await store.enqueue(app.id, asset.name, asset.url, asset.sha256,
+      const job = await store.enqueue(app.id, asset.name, asset.url, asset.sha256,
         asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode);
+      if (job.stage === InstallStage.INSTALLED) {
+        // Explicit reinstall after an external uninstall must re-enter the FIFO.
+        job.stage = InstallStage.QUEUED; job.stageHistory = []; job.lastError = '';
+        await store.save(job);
+      }
       this.drainInstallQueue();
     } catch (error) {
       this.jobsError = errorText(error);
@@ -2112,14 +2116,14 @@ struct Index {
     this.needsInstallScan = this.updateApps().some((app: CatalogApp) =>
       (app.latestAsset?.bundleName.length ?? 0) > 0 && this.installedVersionOf(app.id) < 0);
     if (!this.needsInstallScan || !this.updateCatalogReady || !this.accountChecked ||
-      !this.signedIn || this.catalogProbeBusy || this.initialScanDismissed ||
+      !this.signedIn || this.catalogProbeBusy || this.wirelessDebugRestoring || this.initialScanDismissed ||
       InstalledAppRegistry.hasCatalogSnapshot() || this.showReconnect || this.showSubmit ||
       this.showAppConfig || this.activeJobId.length > 0 || this.pendingJobs.length > 0) return;
     this.openInstallScan();
   }
 
   private openInstallScan(): void {
-    if (this.reconnectBusy) return;
+    if (this.reconnectBusy || this.catalogProbeBusy || this.wirelessDebugRestoring) return;
     this.initialScanDismissed = true;
     this.resumeJobId = '';
     this.reconnectMessage = '';
@@ -2133,7 +2137,13 @@ struct Index {
    * `installedVersions`；问不到就什么都不做 —— 卡片宁可少显示一次「已安装」，
    * 也不能谎报「未安装」，那会让用户把已经装好的应用再装一遍。
    */
-  private catalogProbeBusy: boolean = false;
+  @State private catalogProbeBusy: boolean = false;
+
+  onWirelessLinkChanged(): void {
+    if (!this.pageVisible || this.wirelessDebugRestoring) return;
+    if (HdcDeviceBridge.deviceLinked()) this.refreshCatalogInstallState(true);
+    else this.updateInstallScanPrompt();
+  }
 
   private async confirmCatalogVersionsViaDevice(bundleNames: string[]): Promise<void> {
     if (this.catalogProbeBusy) {
@@ -2145,9 +2155,14 @@ struct Index {
     }
     this.catalogProbeBusy = true;
     this.catalogProbeNames = bundleNames;
+    this.catalogProbeChecked = 0;
+    this.catalogProbeTotal = new Set<string>(bundleNames).size;
     try {
       const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
-      const versions = await bridge.installedBundleVersions(bundleNames);
+      const versions = await bridge.installedBundleVersions(bundleNames, (checked: number, total: number) => {
+        this.catalogProbeChecked = checked;
+        this.catalogProbeTotal = total;
+      });
       if (versions === undefined) return;
       await this.reconcileCatalogInstallState(bundleNames, versions);
       await this.reconcileDetectedJobs(versions);
@@ -2392,7 +2407,12 @@ struct Index {
       this.jobsError = '更新来源暂不可用，请刷新应用列表';
       return;
     }
-    await this.installFromCatalog(app);
+    const asset = this.assetForBundle(app, target.bundleName, target.assetName);
+    if (asset === undefined) {
+      this.jobsError = '该安装包已变化，请刷新后重新选择';
+      return;
+    }
+    await this.installFromCatalog(app, asset);
   }
 
   private async openInstalled(job: InstallJob): Promise<void> {
@@ -2565,26 +2585,10 @@ struct Index {
 
   private async recoverDownloads(): Promise<void> {
     try {
-      const context = getContext(this) as common.UIAbilityContext;
-      const store = await JobStore.open(context);
-      const pending = await store.listPending();
-      let attempted = 0;
-      for (const job of pending) {
-        if (attempted >= 2) break;
-        if (job.stage !== InstallStage.DOWNLOADING &&
-          job.stage !== InstallStage.WAITING_NETWORK) continue;
-        if (job.stage === InstallStage.WAITING_NETWORK &&
-          Date.now() - job.updatedAt < retryDelayMs(job.attempt)) continue;
-        attempted++;
-        try {
-          await JobScheduler.runDownload(context, store, job);
-        } catch (_) {
-          // The persisted task and last error remain visible in Management.
-        }
-        await this.loadJobs();
-      }
+      await InstallCoordinator.recovered(getContext(this) as common.UIAbilityContext);
+      await this.loadJobs();
     } catch (_) {
-      // The normal Management error state reports database initialization issues.
+      // Persisted errors remain available in Management.
     }
   }
 
@@ -2660,17 +2664,14 @@ struct Index {
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const store = await JobStore.open(context);
-      const runner = new JobRunner(store,
-        new NativeJobRuntime(context, store, this.signedIn ? this.account : undefined,
-          new HdcDeviceBridge(context)));
-      const result = await runner.run(job.id);
+      const result = await InstallCoordinator.run(context, job.id);
       if (result.stage === InstallStage.WAITING_DEVICE) {
         this.reconnectMessage = '';
         InstallReconnect.request(job.id);
       } else if (result.stage === InstallStage.WAITING_ACCOUNT) {
         this.jobsError = '请先在「我的」登录华为开发者账号';
       } else if (result.stage === InstallStage.WAITING_CONFIRMATION) {
-        this.confirmDataLoss(result);
+        InstallConfirmation.request(result.id);
       } else if (result.stage === InstallStage.INSTALLED) {
         installed = true;
         this.jobsError = '';
@@ -2691,7 +2692,7 @@ struct Index {
     } finally {
       if (this.activeJobId === job.id) this.activeJobId = '';
       await this.loadJobs();
-      if (installed && !this.queueDraining) this.drainInstallQueue();
+      if (installed) this.drainInstallQueue();
     }
   }
 
@@ -2760,6 +2761,7 @@ struct Index {
       const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
       const job = await store.get(this.resumeJobId);
       if (job && job.stage !== InstallStage.INSTALLED) await this.continueInstall(job);
+      InstallCoordinator.conditionReady(getContext(this) as common.UIAbilityContext, InstallStage.WAITING_DEVICE);
     } catch (error) {
       this.reconnectMessage = errorText(error);
     } finally {
@@ -2804,8 +2806,13 @@ struct Index {
 
   @Builder
   private discoverTopBlur() {
-    // 只模糊状态栏和搜索框背后的窄带，向下淡出；遮罩不参与触摸。
+    // 系统磨砂叠加半透明色温与柔光，整层再淡出，避免只有模糊、缺少玻璃质感。
     Stack() {
+      Column().width('100%').height('100%').backgroundColor(this.colors().glassTint)
+      Column().width('100%').height('100%')
+        .linearGradient({ angle: 115, colors: [
+          [this.colors().glassHighlight, 0], ['#00FFFFFF', 0.58], ['#00FFFFFF', 1]
+        ] })
       Column().width('100%').height('100%')
         .linearGradient({ angle: 180, colors: [
           ['#FFFFFFFF', 0], ['#EFFFFFFF', 0.4], ['#66FFFFFF', 0.76], ['#00FFFFFF', 1]
@@ -2813,7 +2820,7 @@ struct Index {
         .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
     }.width('100%').height(this.statusBarInset + 90)
       .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
-      .backgroundBlurStyle(BlurStyle.COMPONENT_THIN, {
+      .backgroundBlurStyle(BlurStyle.COMPONENT_REGULAR, {
         colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT
       })
       .position({ x: 0, y: -this.statusBarInset })
@@ -2874,18 +2881,42 @@ struct Index {
                 this.discoverTitleHeight = Number(size.height);
               })
             ListItemGroup({ header: this.discoverSearchHeader }) {
-            if (this.needsInstallScan) {
+            if (this.needsInstallScan || this.catalogProbeBusy) {
               ListItem() {
                 Row({ space: 12 }) {
                   Column({ space: 4 }) {
                     Text('识别本机已安装应用').fontSize(14).fontWeight(FontWeight.Medium)
                       .fontColor(this.colors().text)
-                    Text('连接一次无线调试，已有侧载应用会显示打开或更新')
+                    Text(this.catalogProbeBusy ? (this.catalogProbeChecked > 0 ?
+                      '已核对 ' + this.catalogProbeChecked + ' / ' + this.catalogProbeTotal + ' 个应用' :
+                      '正在读取设备应用清单…') :
+                      (this.reconnectBusy || this.wirelessDebugRestoring ? '正在恢复无线调试连接…' :
+                      '连接一次无线调试，已有侧载应用会显示打开或更新'))
                       .fontSize(11).fontColor(this.colors().textSecondary)
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-                  Button('识别').height(44).fontSize(12)
+                  Button({ type: ButtonType.Normal }) {
+                    Column({ space: 5 }) {
+                      if ((this.catalogProbeBusy && this.catalogProbeChecked === 0) ||
+                        this.reconnectBusy || this.wirelessDebugRestoring) {
+                        Row({ space: 5 }) {
+                          LoadingProgress().width(13).height(13).color(this.colors().accent)
+                          Text(this.catalogProbeBusy ? '识别中' : '连接中').fontSize(12)
+                        }.justifyContent(FlexAlign.Center)
+                      } else {
+                        Text(this.catalogProbeBusy ? '识别中' : '识别').fontSize(12)
+                      }
+                      if (this.catalogProbeBusy && this.catalogProbeTotal > 0 && this.catalogProbeChecked > 0) {
+                        Progress({ value: this.catalogProbeChecked, total: this.catalogProbeTotal, type: ProgressType.Linear })
+                          .width(60).height(3).color(this.colors().accent)
+                          .backgroundColor(this.colors().borderStrong)
+                      }
+                    }
+                  }.width(88).height(48)
                     .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
-                    .borderRadius(11).onClick(() => this.openInstallScan())
+                    .borderRadius(11).enabled(!this.catalogProbeBusy && !this.reconnectBusy && !this.wirelessDebugRestoring)
+                    .accessibilityText(this.catalogProbeBusy ? '正在识别，已核对 ' + this.catalogProbeChecked +
+                      ' / ' + this.catalogProbeTotal + ' 个应用' : '识别本机已安装应用')
+                    .onClick(() => this.openInstallScan())
                 }.width('100%').padding(14).backgroundColor(this.colors().surface).borderRadius(16)
               }.width('100%').padding({ left: this.pageInset(), right: this.pageInset(), bottom: 12 })
             }

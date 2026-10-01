@@ -1,4 +1,6 @@
 import { InstallTaskState } from './InstallTaskState';
+import { InstallReconnect } from './InstallReconnect';
+import { InstallConfirmation } from './InstallConfirmation';
 import { common } from '@kit.AbilityKit';
 import { DownloadJobs } from './DownloadJobs';
 import { InstallJob } from './InstallJob';
@@ -17,6 +19,8 @@ import { BackgroundInstallTask } from './BackgroundInstallTask';
  * 页面只负责调用，不再自己充当锁。
  */
 export class JobScheduler {
+  private static serial: Promise<void> = Promise.resolve();
+  private static reserved: Set<string> = new Set<string>();
   private static inFlight: Set<string> = new Set<string>();
   private static queueWakeup: (() => void) | undefined = undefined;
 
@@ -37,6 +41,8 @@ export class JobScheduler {
 
   static async cancel(context: common.UIAbilityContext, store: JobStore, job: InstallJob): Promise<void> {
     const running = JobScheduler.isRunning(job.id);
+    InstallReconnect.clear(job.id);
+    InstallConfirmation.clear(job.id);
     const marking = store.cancel(job);
     const clean = async (): Promise<void> => {
       await marking;
@@ -73,7 +79,7 @@ export class JobScheduler {
   static readonly INSTALL_TIMEOUT_MS: number = 6 * 60 * 1000;
 
   static isRunning(jobId: string): boolean {
-    return JobScheduler.inFlight.has(jobId);
+    return JobScheduler.inFlight.has(jobId) || JobScheduler.reserved.has(jobId);
   }
 
   /**
@@ -94,10 +100,17 @@ export class JobScheduler {
   /** 超时结束界面等待；互斥一直保留到实际执行退出。 */
   static async runExclusive<T>(jobId: string, body: () => Promise<T>,
     timeoutMs: number = JobScheduler.DEFAULT_TIMEOUT_MS): Promise<T> {
-    if (JobScheduler.inFlight.has(jobId)) {
+    if (JobScheduler.reserved.has(jobId) || JobScheduler.inFlight.has(jobId)) {
       throw new Error(JobScheduler.stillFinishing(jobId) ?
         '上一次执行仍在收尾，请稍候再试' : '该安装任务正在执行，未重复启动');
     }
+    const waiting = JobScheduler.inFlight.size > 0 || JobScheduler.reserved.size > 0;
+    JobScheduler.reserved.add(jobId);
+    const previous = JobScheduler.serial;
+    let release: () => void = () => {};
+    JobScheduler.serial = new Promise<void>((resolve: () => void) => { release = resolve; });
+    if (waiting) await previous;
+    JobScheduler.reserved.delete(jobId);
     JobScheduler.inFlight.add(jobId);
     InstallTaskState.setRunning(jobId, true);
     let timer: number = -1;
@@ -120,7 +133,8 @@ export class JobScheduler {
       JobCancellation.clear(jobId);
       InstallTaskState.setRunning(jobId, false);
       // 超时或取消只结束界面等待，保活一直保留到真实执行和残留清理退出。
-      await BackgroundInstallTask.release(jobId);
+      try { await BackgroundInstallTask.release(jobId); }
+      finally { release(); JobScheduler.requestQueue(); }
     });
     const timeout = new Promise<T>((_resolve, reject) => {
       let remaining = timeoutMs;

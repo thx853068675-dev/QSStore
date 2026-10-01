@@ -1,3 +1,5 @@
+import { InstallConfirmation } from '../jobs/InstallConfirmation';
+import { InstallCoordinator } from '../jobs/InstallCoordinator';
 import { InstallReconnect } from '../jobs/InstallReconnect';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
 import { isPending } from '../jobs/RecoveryPlanner';
@@ -9,12 +11,10 @@ import { StoreClient } from '../data/StoreClient';
 import { ReleaseInfo, HapAsset } from '../data/ReleaseInfo';
 import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
 import { JobStore } from '../jobs/JobStore';
-import { JobRunner } from '../jobs/JobRunner';
 import { JobScheduler } from '../jobs/JobScheduler';
 import { errorText } from '../jobs/ErrorText';
 import { LocalBundles } from '../jobs/LocalBundles';
 import { InstalledAppRegistry } from '../jobs/InstalledAppRegistry';
-import { NativeJobRuntime } from '../jobs/NativeJobRuntime';
 import { InstallJob, InstallStage } from '../jobs/InstallJob';
 import { AppReview } from '../data/StoreActions';
 import { AccountSession, DeveloperAccount } from '../data/DeveloperAccount';
@@ -43,6 +43,7 @@ struct Detail {
   @State private installGlowForward: boolean = false;
   @State private installTasks: InstallTaskSnapshot[] = [];
   private installSubscription: number = -1;
+  private confirmationSubscription: number = -1;
   private reconnectSubscription: number = -1;
   private detailAppId: number = 0;
   /**
@@ -81,6 +82,7 @@ struct Detail {
    */
   @State private installedUnknown: boolean = false;
   /** 「检查更新」的进行状态与结果提示。 */
+  private pageVisible: boolean = true;
   @State private refreshBusy: boolean = false;
   @State private refreshMessage: string = '';
   /** 上次真正发起检查的时间，用于客户端侧的静默冷却。 */
@@ -114,6 +116,7 @@ struct Detail {
   }
 
   onPageShow(): void {
+    this.pageVisible = true;
     this.observeReconnect();
     this.observeInstallTasks();
     this.syncInstallTask();
@@ -134,6 +137,9 @@ struct Detail {
   }
 
   aboutToDisappear(): void {
+    this.pageVisible = false;
+    InstallConfirmation.unsubscribe(this.confirmationSubscription);
+    this.confirmationSubscription = -1;
     InstallReconnect.unsubscribe(this.reconnectSubscription);
     this.reconnectSubscription = -1;
     InstallTaskState.unsubscribe(this.installSubscription);
@@ -141,10 +147,25 @@ struct Detail {
   }
 
   onPageHide(): void {
+    this.pageVisible = false;
+    InstallConfirmation.deactivate(this.confirmationSubscription);
     InstallReconnect.deactivate(this.reconnectSubscription);
   }
 
   private observeReconnect(): void {
+    if (this.confirmationSubscription === -1) {
+      this.confirmationSubscription = InstallConfirmation.subscribe((id: string) => {
+        if (!id) return;
+        JobStore.open(getContext(this) as common.UIAbilityContext).then(async (store: JobStore) => {
+          const job = await store.get(id);
+          if (!job || job.stage !== InstallStage.WAITING_CONFIRMATION ||
+            !InstallConfirmation.isOwner(this.confirmationSubscription) || !InstallConfirmation.isRequested(id)) return;
+          InstallConfirmation.clear(id);
+          this.confirmDataLoss(job);
+        }).catch(() => {});
+      });
+    }
+    InstallConfirmation.activate(this.confirmationSubscription);
     if (this.reconnectSubscription === -1) {
       this.reconnectSubscription = InstallReconnect.subscribe((jobId: string) => {
         if (jobId.length > 0) {
@@ -360,7 +381,7 @@ struct Detail {
    * 版本」在界面上会晚一轮出现。点这里让服务端立刻去 GitHub 采一次。
    */
   private async checkForUpdates(): Promise<void> {
-    if (this.refreshBusy || this.app.id <= 0) return;
+    if (this.refreshBusy || this.releaseMoreBusy || this.app.id <= 0) return;
     // 客户端自己也限频：服务端虽然按 IP 限流，但没必要为了连点几次去占一次
     // 请求。冷却期内的点击直接忽略——用户无感，不会弹错也不会转圈。
     const now = Date.now();
@@ -373,8 +394,19 @@ struct Detail {
     try {
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
       // 服务端要现去 GitHub 采一次，给它一个上限：卡住时按钮要能自己恢复
-      await Detail.withDeadline(client.refreshApp(this.app.id), Detail.CHECK_TIMEOUT_MS,
+      let status = await Detail.withDeadline(client.refreshApp(this.app.id), Detail.CHECK_TIMEOUT_MS,
         '检查更新超时，请稍后再试');
+      for (const delay of [2000, 4000, 8000, 16000]) {
+        if (status !== 'pending' && status !== 'running') break;
+        this.refreshMessage = '后台正在检查仓库，可继续浏览';
+        await new Promise<void>((resolve: () => void) => { setTimeout(resolve, delay); });
+        if (!this.pageVisible) return;
+        status = await client.refreshStatus(this.app.id);
+      }
+      if (status === 'pending' || status === 'running') {
+        this.refreshMessage = '检查已安排在后台，稍后查看版本列表';
+        return;
+      }
       const releases = await client.listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE,
         this.showPreviewReleases);
       const before = this.releaseTotal;
@@ -541,14 +573,14 @@ struct Detail {
     this.refreshInstalledVersion();
   }
 
-  private async togglePreviewReleases(): Promise<void> {
-    if (this.releaseMoreBusy || this.app.id <= 0) return;
+  private async selectReleaseChannel(next: boolean): Promise<void> {
+    if (this.releaseMoreBusy || this.refreshBusy || this.app.id <= 0 ||
+      next === this.showPreviewReleases) return;
     const previous = this.showPreviewReleases;
-    const next = !previous;
     const selectedUrl = this.selectedAsset.url;
     const selectedName = this.selectedAsset.name;
     this.releaseMoreBusy = true;
-    this.showPreviewReleases = next;
+    this.animateOverlay(() => { this.showPreviewReleases = next; });
     try {
       const result = await new StoreClient(getContext(this) as common.UIAbilityContext)
         .listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE, next);
@@ -560,7 +592,7 @@ struct Detail {
       this.refreshInstalledVersion();
       this.releaseMessage = '';
     } catch (error) {
-      this.showPreviewReleases = previous;
+      this.animateOverlay(() => { this.showPreviewReleases = previous; });
       this.releaseMessage = '无法读取版本：' + errorText(error);
     } finally {
       this.releaseMoreBusy = false;
@@ -672,10 +704,7 @@ struct Detail {
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const store = await JobStore.open(context);
-      const runner = new JobRunner(store,
-        new NativeJobRuntime(context, store, this.signedIn ? this.account : undefined,
-          new HdcDeviceBridge(context)));
-      const result = await runner.run(id);
+      const result = await InstallCoordinator.run(context, id);
       if (result.stage === InstallStage.INSTALLED) {
         this.downloadPercent = 100;
         this.lastNotice = '';
@@ -687,7 +716,7 @@ struct Detail {
       } else if (result.stage === InstallStage.WAITING_ACCOUNT) {
         this.notify('请先在「我的」登录华为开发者账号');
       } else if (result.stage === InstallStage.WAITING_CONFIRMATION) {
-        this.confirmDataLoss(result);
+        InstallConfirmation.request(result.id);
       } else {
         this.notify(result.lastError.length > 0 ? result.lastError :
           '安装任务已保存，可在「管理」中继续');
@@ -752,6 +781,7 @@ struct Detail {
       const jobId = this.reconnectJobId || this.activeInstallId;
       InstallReconnect.clear(jobId);
       await this.resumeInstall(jobId);
+      InstallCoordinator.conditionReady(getContext(this) as common.UIAbilityContext, InstallStage.WAITING_DEVICE);
     } catch (error) {
       this.reconnectMessage = errorText(error);
     } finally {
@@ -774,13 +804,14 @@ struct Detail {
       const store = await JobStore.open(context);
       const job = await store.enqueue(this.app.id, asset.name, asset.url,
         asset.sha256, asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode);
-      if (job.stage === InstallStage.QUEUED && JobScheduler.requestQueue()) {
+      if (job.stage === InstallStage.INSTALLED) {
+        job.stage = InstallStage.QUEUED; job.stageHistory = []; job.lastError = '';
+        await store.save(job);
+      }
+      if (job.stage === InstallStage.QUEUED) {
+        InstallCoordinator.recovered(context);
         this.notify('已加入安装队列，可继续选择其他安装包');
         return;
-      }
-      if (job.stage === InstallStage.QUEUED || job.stage === InstallStage.DOWNLOADING ||
-        job.stage === InstallStage.WAITING_NETWORK) {
-        await JobScheduler.runDownload(context, store, job);
       }
       await this.resumeInstall(job.id);
     } catch (error) {
@@ -901,6 +932,38 @@ struct Detail {
   }
 
   @Builder
+  private releaseChannelOption(label: string, preview: boolean) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 3 }) {
+        if (this.showPreviewReleases === preview) {
+          SymbolGlyph($r('sys.symbol.checkmark')).fontSize(10)
+            .fontColor([this.colors().accent])
+        }
+        Text(label).fontSize(12)
+          .fontWeight(this.showPreviewReleases === preview ? FontWeight.Bold : FontWeight.Medium)
+          .fontColor(this.showPreviewReleases === preview ? this.colors().accent : this.colors().textSecondary)
+          .maxLines(1)
+      }.justifyContent(FlexAlign.Center)
+    }.layoutWeight(1).height(36).padding({ left: 4, right: 4 })
+      .backgroundColor(this.showPreviewReleases === preview ? this.colors().surface : Color.Transparent)
+      .borderRadius(10)
+      .border({ width: this.showPreviewReleases === preview ? 1 : 0,
+        color: this.colors().borderStrong })
+      .enabled(!this.releaseMoreBusy && !this.refreshBusy).stateEffect(true)
+      .accessibilityText(label + (this.showPreviewReleases === preview ? '，已选中' : '，点击切换'))
+      .onClick(() => this.selectReleaseChannel(preview))
+  }
+
+  @Builder
+  private releaseChannelSelector() {
+    Row({ space: 2 }) {
+      this.releaseChannelOption('正式版', false)
+      this.releaseChannelOption('预览版', true)
+    }.width(138).padding(4).backgroundColor(this.colors().fill).borderRadius(14)
+      .border({ width: 1, color: this.colors().border })
+  }
+
+  @Builder
   private detailHeader() {
     Stack({ alignContent: Alignment.Top }) {
       // 与发现页相同的渐变磨砂；背景随滚动显现，标题和返回键始终保持清晰。
@@ -998,18 +1061,14 @@ struct Detail {
               Row({ space: 8 }) {
                 Text('版本记录').fontSize(18).fontWeight(FontWeight.Bold)
                   .fontColor(this.colors().text).layoutWeight(1)
-                Button(this.showPreviewReleases ? '预览版' : '正式版')
-                  .height(40).fontSize(12).padding({ left: 12, right: 12 })
-                  .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
-                  .borderRadius(14).enabled(!this.releaseMoreBusy && !this.refreshBusy)
-                  .accessibilityText(this.showPreviewReleases ? '切换为正式版' : '显示预览版')
-                  .onClick(() => this.togglePreviewReleases())
+                this.releaseChannelSelector()
                 // 采集器按周期跑，刚发布的版本要等下一轮；这里可以即时重采
                 if (this.refreshBusy) {
                   Row() { LoadingProgress().width(20).height(20) }.width(44).height(44)
                     .justifyContent(FlexAlign.Center)
                 } else {
                   StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '检查更新',
+                    active: !this.releaseMoreBusy,
                     action: () => this.checkForUpdates() })
                 }
               }.width('100%')

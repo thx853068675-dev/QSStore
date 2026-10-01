@@ -3,7 +3,7 @@ import { PackageArchive } from './PackageArchive';
 import { AssetDownload } from './AssetDownload';
 import { FailureKind, InstallJob, InstallStage } from './InstallJob';
 import { JobStore } from './JobStore';
-import { checkCatalogIdentity, inspectPackage, PackageInspectError } from './PackageInspector';
+import { checkCatalogIdentity, inspectPackage, PackageInspectError, PackageIdentity } from './PackageInspector';
 
 export class DownloadJobs {
   /**
@@ -16,19 +16,20 @@ export class DownloadJobs {
     job.lastError = '';
     await store.save(job);
     try {
-      await new AssetDownload(context, store).downloadAndVerify(job, onProgress);
-      job.stage = InstallStage.VERIFIED;
-      await store.save(job);
-      let path = job.cachePath;
-      if (job.sourceUrl.includes('#qingqi-package=')) {
-        const entry = PackageArchive.selectedEntry(job.sourceUrl);
-        try {
+      let identity = undefined as PackageIdentity | undefined;
+      await new AssetDownload(context, store).downloadAndVerify(job, onProgress, async () => {
+        let path = job.cachePath;
+        if (job.sourceUrl.includes('#qingqi-package=')) {
+          const entry = PackageArchive.selectedEntry(job.sourceUrl);
           path = await PackageArchive.extractSelected(path, entry,
             path + '.package' + PackageArchive.extension(entry));
-        } catch (error) { throw new PackageInspectError('无法读取所选压缩包：' + String(error)); }
-      }
-      const identity = path.endsWith('.app') ? await PackageArchive.inspect(path) : inspectPackage(path);
-      checkCatalogIdentity(job.catalogBundleName, job.catalogVersionCode, identity);
+        }
+        identity = path.endsWith('.app') ? await PackageArchive.inspect(path) : inspectPackage(path);
+        checkCatalogIdentity(job.catalogBundleName, job.catalogVersionCode, identity);
+      });
+      if (identity === undefined) throw new PackageInspectError('下载包尚未核对身份');
+      job.stage = InstallStage.VERIFIED;
+      await store.save(job);
       job.bundleName = identity.bundleName;
       job.versionCode = identity.versionCode;
       if ((identity.versionName ?? '').length > 0) job.versionName = identity.versionName;

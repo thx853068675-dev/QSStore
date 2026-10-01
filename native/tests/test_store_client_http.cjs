@@ -41,6 +41,8 @@ const code = ts.transpileModule(`class StoreClient {
 function harness(payload = { ok: true, data: {} }) {
   const calls = [];
   const sandbox = {
+    ServiceFailure: class extends Error { constructor(kind, message) { super(message); this.failureKind = kind; } },
+    FailureKind: { ACCOUNT: 'account', INTERNAL: 'internal', NETWORK: 'network' },
     console,
     JSON,
     Error,
@@ -63,6 +65,8 @@ function harness(payload = { ok: true, data: {} }) {
     clearTimeout
   };
   vm.runInNewContext(code, sandbox);
+  sandbox.StoreClient.responses = new Map();
+  sandbox.StoreClient.remember = () => {};
   return { client: new sandbox.StoreClient(), calls };
 }
 

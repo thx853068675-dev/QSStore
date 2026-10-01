@@ -1,3 +1,5 @@
+import { InstallCoordinator } from '../jobs/InstallCoordinator';
+import { WirelessDebugLifecycle } from '../jobs/WirelessDebugLifecycle';
 import { UIAbility, Want, AbilityConstant, Configuration, ConfigurationConstant } from '@kit.AbilityKit';
 import { window, display } from '@kit.ArkUI';
 import { BackgroundInstallTask } from '../jobs/BackgroundInstallTask';
@@ -63,6 +65,8 @@ export default class EntryAbility extends UIAbility {
 
   onCreate(_want: Want, _launchParam: AbilityConstant.LaunchParam): void {
     BackgroundInstallTask.configure(this.context);
+    InstallCoordinator.configure(this.context);
+    WirelessDebugLifecycle.configure(this.context);
     AppStorage.setOrCreate<string>('qingqiFilesDir', this.context.filesDir);
   }
 
@@ -101,8 +105,13 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     BackgroundInstallTask.onForeground();
+    WirelessDebugLifecycle.onForeground();
     // 从系统设置返回时也同步，覆盖部分设备在后台没有送达主题回调的情况。
     this.applyAppearance();
     this.syncStatusBarInset();
+  }
+
+  onBackground(): void {
+    WirelessDebugLifecycle.onBackground();
   }
 }

@@ -58,7 +58,7 @@ export class DevEcoLogin {
       if (response.responseCode !== 200 || typeof response.result !== 'string') {
         const code = response.responseCode;
         // 5xx / 0 是服务端或网络问题，4xx 才可能是登录态本身有问题
-        const head = (code === 0 || code >= 500) ? TRANSIENT : AUTH_FAILED;
+        const head = (code === 0 || code === 408 || code === 429 || code >= 500) ? TRANSIENT : AUTH_FAILED;
         throw new Error(head + '华为账号服务暂不可用（HTTP ' + code + '）');
       }
       try {

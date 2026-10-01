@@ -987,6 +987,74 @@ fn stage_app_remote(port: u16, input: &Path) -> Result<(String, Vec<String>), St
     Ok((folder, paths))
 }
 
+// Stage every replacement before touching the installed application. Tickets
+// contain generated remote paths only and cannot name arbitrary device files.
+fn staged_ticket(folder: &str, files: &[String]) -> String {
+    serde_json::json!({"folder": folder, "files": files}).to_string()
+}
+
+fn parse_staged_ticket(text: &str) -> Result<(String, Vec<String>), String> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| "invalid staging ticket")?;
+    let folder = value["folder"].as_str().ok_or("missing staging folder")?;
+    let suffix = folder.strip_prefix("/data/local/tmp/qingqi-app-")
+        .or_else(|| folder.strip_prefix("/data/local/tmp/qingqi-install-"))
+        .ok_or("staging folder is outside installation workspace")?;
+    let parts: Vec<_> = suffix.split('-').collect();
+    if parts.len() != 2 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return Err("invalid staging folder".into());
+    }
+    let rows = value["files"].as_array().ok_or("missing staged modules")?;
+    if rows.is_empty() || rows.len() > 32 { return Err("invalid staged module count".into()); }
+    let mut files = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let file = row.as_str().ok_or("invalid staged module")?;
+        if file != format!("{folder}/module-{index}.hap") { return Err("invalid staged module path".into()); }
+        files.push(file.to_owned());
+    }
+    Ok((folder.to_owned(), files))
+}
+
+fn replacement_command(bundle: &str, files: &[String]) -> Result<String, String> {
+    validate_bundle_name(bundle)?;
+    // A single remote shell keeps installation adjacent to successful uninstall.
+    // No package bytes are transferred after the destructive operation starts.
+    if files.is_empty() { return Err("no staged modules".into()); }
+    let checks = files.iter().map(|file| format!("test -s {file}")).collect::<Vec<_>>().join(" && ");
+    Ok(format!("'{checks} && bm uninstall -n {bundle} && bm install -p {}'", files.join(" ")))
+}
+
+fn stage_replacement(port: u16, input: &Path) -> Result<String, String> {
+    if input.extension().and_then(|s| s.to_str()) == Some("app") {
+        let (folder, files) = stage_app_remote(port, input)?;
+        return Ok(staged_ticket(&folder, &files));
+    }
+    verify_installable_hap(input)?;
+    let folder = format!("/data/local/tmp/qingqi-install-{}-{}", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed));
+    let file = format!("{folder}/module-0.hap");
+    remote_command(port, &["shell".into(), "mkdir".into(), "-p".into(), folder.clone()], 15)?;
+    let result = (|| {
+        let output = remote_command(port, &["file".into(), "send".into(), input.to_string_lossy().into(), file.clone()], 300)?;
+        if output.contains("[Fail]") || !output.contains("FileTransfer finish") {
+            return Err(format!("replacement package transfer did not finish: {output}"));
+        }
+        let mut source = fs::File::open(input).map_err(|_| "cannot hash replacement package")?;
+        let mut digest = Sha256::new();
+        let mut block = [0u8; 64 * 1024];
+        loop {
+            let count = source.read(&mut block).map_err(|_| "cannot read replacement package")?;
+            if count == 0 { break; }
+            digest.update(&block[..count]);
+        }
+        let checksum = remote_command(port, &["shell".into(), "sha256sum".into(), file.clone()], 45)?;
+        if !checksum.to_ascii_lowercase().contains(&format!("{:x}", digest.finalize())) {
+            return Err("replacement package transfer checksum differs".into());
+        }
+        Ok(staged_ticket(&folder, &[file]))
+    })();
+    if result.is_err() { let _ = remote_command(port, &["shell".into(), "rm".into(), "-rf".into(), folder], 15); }
+    result
+}
+
 fn install_app_remote(port: u16, input: &Path) -> Result<String, String> {
     let (folder, modules) = stage_app_remote(port, input)?;
     qingqi_hdc_transport::report_install_progress(&input.to_string_lossy(), "installing", 0, 0);
@@ -1058,6 +1126,7 @@ pub extern "C" fn qingqi_hdc_command(
     let result = panic::catch_unwind(|| -> Result<String, String> {
         let root = path(key_root)?;
         let argument = if parameter.is_null() { String::new() } else { path(parameter)? };
+        let operation_argument = argument.clone();
         let args = match operation {
             0 => vec!["list".into(), "targets".into()],
             1 => {
@@ -1107,11 +1176,30 @@ pub extern "C" fn qingqi_hdc_command(
             }
             9 => vec!["shell".into(), "sh".into(), "-c".into(),
                 format!("'nohup sh {SELF_UPDATE_SCRIPT} >{SELF_UPDATE_LOG} 2>&1 </dev/null &'")],
+            10 => {
+                let sandbox = fs::canonicalize(&root).map_err(|e| e.to_string())?;
+                let package = fs::canonicalize(&argument).map_err(|e| e.to_string())?;
+                if !package.starts_with(sandbox) || !(argument.ends_with(".hap") || argument.ends_with(".app")) {
+                    return Err("replacement package is outside application sandbox".into());
+                }
+                Vec::new()
+            }
+            11 | 12 => { parse_staged_ticket(&argument)?; Vec::new() }
             _ => return Err("unsupported HDC operation".into()),
         };
         // start() 返回实际监听端口：首选端口被别的程序占用时它会换一个空闲的
         let actual_port = qingqi_hdc_transport::start(Path::new(&root), port)
             .map_err(|error| format!("HDC server: {error}"))?;
+        if operation == 10 { return stage_replacement(actual_port, Path::new(&operation_argument)); }
+        if operation == 11 || operation == 12 {
+            let (folder, modules) = parse_staged_ticket(&operation_argument)?;
+            if operation == 12 {
+                return remote_command(actual_port, &["shell".into(), "rm".into(), "-rf".into(), folder], 15);
+            }
+            let ticket: serde_json::Value = serde_json::from_str(&operation_argument).map_err(|_| "invalid staging ticket")?;
+            let bundle = ticket["bundleName"].as_str().ok_or("missing replacement bundle")?;
+            return remote_command(actual_port, &["shell".into(), "sh".into(), "-c".into(), replacement_command(bundle, &modules)?], 300);
+        }
         if operation == 4 && args[2].ends_with(".app") {
             return install_app_remote(actual_port, Path::new(&args[2]));
         }
@@ -1544,4 +1632,29 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+    #[test]
+    fn staging_ticket_only_accepts_generated_workspace_paths() {
+        let folder = "/data/local/tmp/qingqi-install-123-1";
+        let files = vec![format!("{folder}/module-0.hap")];
+        let ticket = staged_ticket(folder, &files);
+        assert_eq!(parse_staged_ticket(&ticket).unwrap(), (folder.into(), files.clone()));
+        for bad in ["/data/local/tmp/qingqi-install-../1", "/data/local/tmp/other-123-1", "/data/local/tmp/qingqi-install-123-1;rm"] {
+            assert!(parse_staged_ticket(&staged_ticket(bad, &files)).is_err());
+        }
+        assert!(parse_staged_ticket(&staged_ticket(folder, &["/data/local/tmp/other.hap".into()])).is_err());
+    }
+    #[test]
+    fn replacement_installs_only_after_successful_uninstall() {
+        let cmd = replacement_command("com.example.app", &["/data/local/tmp/qingqi-install-123-1/module-0.hap".into()]).unwrap();
+        assert!(cmd.starts_with("'test -s "));
+        assert!(cmd.contains(" && bm uninstall -n "));
+        assert!(cmd.contains(" && bm install -p "));
+        assert!(!cmd.contains("file send"));
+        assert!(replacement_command("com.example.app;rm", &[]).is_err());
+    }
 }

@@ -566,6 +566,7 @@ test('Detail submits another selected package to the shared FIFO without startin
   const d = pageClass('Detail', ['downloadSelected'], {
     getContext: () => ({}), InstallStage: { QUEUED: 'QUEUED' },
     JobStore: { open: async () => ({ enqueue: async () => ({ id: 'new', stage: 'QUEUED' }) }) },
+    InstallCoordinator: { recovered: () => { queued++; } },
     JobScheduler: { requestQueue: () => { queued++; return true; }, runDownload: () => { downloaded++; } },
     errorText: e => e.message
   });
@@ -573,4 +574,26 @@ test('Detail submits another selected package to the shared FIFO without startin
     currentInstallTask: () => undefined, notify() {}, syncInstallTask() {},
     resumeInstall: () => { throw Error('parallel installation'); } });
   await d.downloadSelected(); assert.equal(queued, 1); assert.equal(downloaded, 0);
+});
+
+test('completed cache eviction journals files, retains install identity, and skips pending jobs', async () => {
+  const f = fixture({ '@kit.CoreFileKit': { fileIo: {
+    accessSync: () => true, statSync: () => ({ size: 10 }) } } });
+  const now = Date.now();
+  const old = { ...f.job, id: 'old', stage: f.InstallStage.INSTALLED,
+    updatedAt: now - 86400001, cachePath: '/sandbox/install-jobs/old.hap', signedPath: '/sandbox/install-jobs/old.signed.hap' };
+  const recent = { ...old, id: 'recent', updatedAt: now,
+    cachePath: '/sandbox/install-jobs/new.hap', signedPath: '/sandbox/install-jobs/new.signed.hap' };
+  const pending = { ...old, id: 'pending', stage: f.InstallStage.DOWNLOADING };
+  const journal = [], saved = [];
+  f.store.listAll = async () => [old, recent, pending];
+  f.store.rememberCancelledFiles = async job => journal.push({ ...job });
+  f.store.save = async job => saved.push({ ...job }); f.store.cleanupCancelled = async () => {};
+  await f.store.pruneCompleted({ filesDir: '/sandbox' });
+  assert.deepEqual(journal.map(j => j.id), ['old']);
+  assert.equal(journal[0].cachePath, '/sandbox/install-jobs/old.hap');
+  assert.equal(saved[0].cachePath, ''); assert.equal(saved[0].stage, f.InstallStage.INSTALLED);
+  assert.equal(saved[0].bundleName, f.job.bundleName);
+  assert.equal(recent.cachePath, '/sandbox/install-jobs/new.hap');
+  assert.equal(pending.cachePath, '/sandbox/install-jobs/old.hap');
 });

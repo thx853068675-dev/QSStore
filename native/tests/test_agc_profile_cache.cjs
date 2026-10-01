@@ -36,6 +36,7 @@ function fixture() {
         mkdirSync: p => f.files.set(p, ''), unlinkSync: p => f.files.delete(p),
         renameSync: (a, b) => { f.files.set(b, f.files.get(a)); f.files.delete(a); } } },
       'libhap_core.so': { readSignedProfile: p => f.files.get(p), profileMatchesCertificate: () => true },
+      '../jobs/InstallJob': { FailureKind: { ACCOUNT: 'account', NETWORK: 'network' } },
       './AgcClient': { AgcClient }, './SigningIdentity': { SigningIdentityRecovery: {
         writeFile: (p, bytes) => f.files.set(p, bytes)
       } }

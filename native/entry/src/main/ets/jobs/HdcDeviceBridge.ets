@@ -13,6 +13,12 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
   private static linked: boolean = false;
 
   private static queue: Promise<void> = Promise.resolve();
+  private static commands: number = 0;
+  private static scans: number = 0;
+  private static connections: number = 0;
+  private static connecting: Promise<void> = Promise.resolve();
+  private static probe: Promise<string> | undefined;
+  private static idleHandler: (() => void) | undefined;
   private context: common.UIAbilityContext;
   private connectFailure: string = '';
   private verifiedUdid: string = '';
@@ -23,6 +29,7 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
 
   private async command(operation: number, parameter: string = '',
     onStart?: () => void): Promise<string> {
+    HdcDeviceBridge.commands++;
     const previous = HdcDeviceBridge.queue;
     let release: () => void = () => {};
     HdcDeviceBridge.queue = new Promise<void>((resolve: () => void) => { release = resolve; });
@@ -37,7 +44,9 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
       HdcDeviceBridge.linked = false;
       throw new Error(String(error));
     } finally {
+      HdcDeviceBridge.commands--;
       release();
+      HdcDeviceBridge.idleHandler?.();
     }
   }
 
@@ -69,6 +78,27 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
    */
   static deviceLinked(): boolean {
     return HdcDeviceBridge.linked;
+  }
+
+  static setIdleHandler(handler: () => void): void { HdcDeviceBridge.idleHandler = handler; }
+
+  static busy(): boolean {
+    return HdcDeviceBridge.commands > 0 || HdcDeviceBridge.scans > 0 ||
+      HdcDeviceBridge.connections > 0 || HdcDeviceBridge.probe !== undefined;
+  }
+
+  static async releaseWhenIdle(allowed: () => boolean): Promise<boolean> {
+    await HdcDeviceBridge.queue;
+    if (HdcDeviceBridge.busy() || !allowed()) return false;
+    return HdcDeviceBridge.releaseDevice();
+  }
+
+  async restoreSavedLink(allowed: () => boolean): Promise<boolean> {
+    const port = await this.savedPort();
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) return false;
+    await HdcDeviceBridge.queue;
+    if (!allowed() || HdcDeviceBridge.busy()) return false;
+    return this.connected();
   }
 
   async savedPort(): Promise<number> {
@@ -104,7 +134,20 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
   }
 
   private async connectedUdid(): Promise<string> {
+    if (!HdcDeviceBridge.probe) {
+      HdcDeviceBridge.probe = this.probeOrReconnect().finally(() => {
+        HdcDeviceBridge.probe = undefined;
+        HdcDeviceBridge.idleHandler?.();
+      });
+    }
+    const udid = await HdcDeviceBridge.probe;
+    this.verifiedUdid = udid;
+    return udid;
+  }
+
+  private async probeOrReconnect(): Promise<string> {
     try {
+      await HdcDeviceBridge.connecting;
       const udid = await this.liveUdid();
       if (udid.length > 0) return udid;
       const port = await this.savedPort();
@@ -119,6 +162,24 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
 
   async connect(port: number, persist: boolean = true,
     retryTrust: boolean = true): Promise<boolean> {
+    HdcDeviceBridge.connections++;
+    const previous = HdcDeviceBridge.connecting;
+    let release: () => void = () => {};
+    HdcDeviceBridge.connecting = new Promise<void>((resolve: () => void) => { release = resolve; });
+    try {
+      await previous;
+      await HdcDeviceBridge.queue;
+      // A manual reconnect may have succeeded while a quiet fallback was waiting.
+      if (!retryTrust && HdcDeviceBridge.linked && (await this.liveUdid()).length > 0) return true;
+      return await this.connectNow(port, persist, retryTrust);
+    } finally {
+      HdcDeviceBridge.connections--;
+      release();
+      HdcDeviceBridge.idleHandler?.();
+    }
+  }
+
+  private async connectNow(port: number, persist: boolean, retryTrust: boolean): Promise<boolean> {
     if (!Number.isInteger(port) || port < 1024 || port > 65535) {
       throw new Error('请输入无线调试页显示的端口号');
     }
@@ -206,10 +267,20 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
       throw new Error('签名包不在应用工作目录中');
     }
     if (!await this.connected()) throw new Error('无线调试已断开');
+    const output = await this.observedCommand(4, signedHapPath, onProgress);
+    if (output.includes('[Fail]') || /\berror\s*:|\bfailed\b|\bcode\s*:\s*[1-9]\d*/i.test(output)) {
+      throw new Error(output.trim().length > 0 ? output.trim() : '设备未确认安装结果');
+    }
+    // The Rust HDC client can report only "AppMod finish". JobRunner queries
+    // the device's installed version after this command; text is never proof.
+  }
+
+  private async observedCommand(operation: number, path: string,
+    onProgress?: (phase: string, sent: number, total: number) => void): Promise<string> {
     let timer = -1;
     const report = (): void => {
       try {
-        const row = JSON.parse(hdcInstallProgress(signedHapPath)) as Record<string, Object>;
+        const row = JSON.parse(hdcInstallProgress(path)) as Record<string, Object>;
         onProgress?.(String(row['phase'] ?? 'waiting'), Number(row['sent'] ?? 0),
           Number(row['total'] ?? 0));
       } catch (_) {
@@ -218,9 +289,9 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     };
     let output = '';
     try {
-      output = await this.command(4, signedHapPath, () => {
+      output = await this.command(operation, path, () => {
         if (onProgress === undefined) return;
-        try { hdcInstallProgress(signedHapPath, true); } catch (_) {}
+        try { hdcInstallProgress(path, true); } catch (_) {}
         report();
         timer = setInterval(report, 150);
       });
@@ -228,11 +299,37 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     } finally {
       if (timer !== -1) clearInterval(timer);
     }
-    if (output.includes('[Fail]') || /\berror\s*:|\bfailed\b|\bcode\s*:\s*[1-9]\d*/i.test(output)) {
-      throw new Error(output.trim().length > 0 ? output.trim() : '设备未确认安装结果');
+    return output;
+  }
+
+  /** Upload and checksum every module before the user-approved uninstall. */
+  async stageInstall(path: string,
+    onProgress?: (phase: string, sent: number, total: number) => void): Promise<string> {
+    if (!path.startsWith(this.context.filesDir + '/') || !fileIo.accessSync(path)) {
+      throw new Error('更新包不在应用工作目录中');
     }
-    // The Rust HDC client can report only "AppMod finish". JobRunner queries
-    // the device's installed version after this command; text is never proof.
+    if (!await this.connected()) throw new Error('无线调试已断开，尚未卸载旧版');
+    return this.observedCommand(10, path, onProgress);
+  }
+
+  async installStaged(ticket: string, bundleName: string,
+    onProgress?: (phase: string, sent: number, total: number) => void): Promise<void> {
+    const descriptor = JSON.parse(ticket) as Record<string, Object>;
+    descriptor['bundleName'] = bundleName;
+    onProgress?.('installing', 0, 0);
+    const output = await this.command(11, JSON.stringify(descriptor));
+    if (output.includes('[Fail]') || /\berror\s*:|\bfailed\b|\bcode\s*:\s*[1-9]\d*/i.test(output)) {
+      throw new Error(output.trim() || '设备未确认重装结果');
+    }
+  }
+
+  async discardStaged(ticket: string): Promise<boolean> {
+    try {
+      // Cleanup never opens a connection prompt; an offline ticket remains in the journal.
+      if (!await this.connected()) return false;
+      const output = await this.command(12, ticket);
+      return !/\[Fail\]|\berror\s*:|\bfailed\b/i.test(output);
+    } catch (_) { return false; }
   }
 
   async uninstall(bundleName: string): Promise<void> {
@@ -279,29 +376,40 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
   }
 
   /** 先取存在性清单，再只查询目录关心的包版本；清单本身不含 versionCode。 */
-  async installedBundleVersions(bundleNames: string[] = []): Promise<Map<string, number> | undefined> {
-    await InstalledAppRegistry.load(this.context);
-    if (!await this.connected()) throw new Error('无线调试已断开');
-    const found = InstalledAppRegistry.parseNames(await this.command(6));
-    if (found === undefined) {
-      console.warn('InstalledApps: unrecognized device list');
-      return undefined;
-    }
-    const unique = new Set<string>(bundleNames);
-    for (const name of unique) {
-      if (!found.has(name)) {
-        InstalledAppRegistry.remember(name, 0);
-        continue;
+  async installedBundleVersions(bundleNames: string[] = [],
+    onProgress?: (checked: number, total: number) => void): Promise<Map<string, number> | undefined> {
+    HdcDeviceBridge.scans++;
+    try {
+      const unique = new Set<string>(bundleNames);
+      let checked = 0;
+      onProgress?.(checked, unique.size);
+      await InstalledAppRegistry.load(this.context);
+      if (!await this.connected()) throw new Error('无线调试已断开');
+      const found = InstalledAppRegistry.parseNames(await this.command(6));
+      if (found === undefined) {
+        console.warn('InstalledApps: unrecognized device list');
+        return undefined;
       }
-      try {
-        // 不把单包失败变成未安装；保留它在存在性清单中的位置。
-        found.set(name, await this.readInstalledVersion(name, false));
-      } catch (error) {
-        console.warn('InstalledApps: version query failed for ' + name + ': ' + String(error));
+      for (const name of unique) {
+        if (!found.has(name)) {
+          InstalledAppRegistry.remember(name, 0);
+          onProgress?.(++checked, unique.size);
+          continue;
+        }
+        try {
+          // 不把单包失败变成未安装；保留它在存在性清单中的位置。
+          found.set(name, await this.readInstalledVersion(name, false));
+        } catch (error) {
+          console.warn('InstalledApps: version query failed for ' + name + ': ' + String(error));
+        }
+        onProgress?.(++checked, unique.size);
       }
+      await InstalledAppRegistry.persist(this.context);
+      return found;
+    } finally {
+      HdcDeviceBridge.scans--;
+      HdcDeviceBridge.idleHandler?.();
     }
-    await InstalledAppRegistry.persist(this.context);
-    return found;
   }
 
   /** Want 必须包含实际入口，外部侧载包不能只用包名启动。 */

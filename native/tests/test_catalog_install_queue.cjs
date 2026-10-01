@@ -7,7 +7,7 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
-const methods = ['queueTime', 'drainInstallQueue', 'installFromCatalog', 'catalogApp'].map(name => {
+const methods = ['drainInstallQueue', 'installFromCatalog', 'catalogApp', 'startUpdate', 'assetForBundle', 'latestAssets'].map(name => {
   const start = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
   assert.notEqual(start, -1, name);
   return source.slice(start, source.indexOf('\n  }', start) + 4);
@@ -30,70 +30,98 @@ async function eventually(check) {
   assert.fail('queue did not advance');
 }
 
-test('multiple Discover clicks enqueue immediately and install strictly in FIFO order', async () => {
-  const jobs = [];
-  const starts = [];
-  let releaseFirst;
-  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
-  let tick = 0;
-  const store = {
-    async enqueue(id, name, url, sha, mirrors, versionName, bundleName, versionCode) {
-      const job = { id: String(id), appId: id, stage: 'QUEUED', stageHistory: [{ at: ++tick }],
-        updatedAt: tick, catalogBundleName: bundleName };
-      jobs.push(job);
-      return job;
-    },
-    async listAll() { return jobs.slice().reverse(); },
-    async get(id) { return jobs.find(job => job.id === id); }
-  };
-  const sandbox = {
-    InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' },
-    LocalBundles: { isSelfBundle: () => false },
-    JobStore: { open: async () => store }, getContext: () => ({}), errorText: String,
-    JobScheduler: { runningJobIds: () => [], runDownload: async (_context, _store, job) => {
-      starts.push(job.appId);
-      if (job.appId === 1) await firstGate;
-      job.stage = 'PACKAGE_INSPECTED';
-    } }
-  };
-  vm.runInNewContext(code, sandbox);
-  const ui = new sandbox.Page();
-  Object.assign(ui, { apps: [app(1), app(2), app(3)], updateCatalogReady: false,
-    enqueuingAppIds: [], queueRecoveryReady: true, queueDraining: false,
-    activeJobId: '', signedIn: true, taskPending: () => false,
-    updateApps() { return this.apps; },
-    installedVersionOf: () => 0, loadJobs: async () => {},
-    async continueInstall(job) { job.stage = 'INSTALLED'; } });
+function coordinator(store, run) {
+  const exports = {};
+  const mocks = { './RecoveryPlanner': { retryDelayMs: () => 0 }, './LocalImport': { LocalImport: { cleanupOldPreviews: () => {} } }, './JobStore': { JobStore: { open: async () => store } },
+    '../data/AccountService': { AccountService: { current: async () => ({ userId: 'u' }) } },
+    './InstallJob': { InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' } },
+    './LocalBundles': { LocalBundles: { isSelfBundle: () => false } },
+    './JobScheduler': { JobScheduler: { isRunning: () => false, setQueueWakeup: () => {}, runningJobIds: () => [] } },
+    './NativeJobRuntime': { NativeJobRuntime: class {} }, './HdcDeviceBridge': { HdcDeviceBridge: class {} },
+    './JobRunner': { JobRunner: class { async run(id) { return run(await store.get(id)); } } } };
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
+    '../entry/src/main/ets/jobs/InstallCoordinator.ets'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+  }).outputText, { exports, require: name => mocks[name] || {} });
+  return exports.InstallCoordinator;
+}
 
-  await ui.installFromCatalog(ui.apps[0]);
-  await eventually(() => starts.length === 1);
-  await ui.installFromCatalog(ui.apps[1]);
-  await ui.installFromCatalog(ui.apps[2]);
-  assert.equal(jobs.length, 3);
-  assert.deepEqual(starts, [1]);
-  assert.equal(jobs[1].stage, 'QUEUED');
-  assert.equal(jobs[2].stage, 'QUEUED');
-  releaseFirst();
-  await eventually(() => jobs.every(job => job.stage === 'INSTALLED'));
-  assert.deepEqual(starts, [1, 2, 3]);
-});
-test('a confirmed local HAP joins FIFO installation without any network download', async () => {
-  const queued = [{ id: 'local:test', appId: 0, sourceUrl: 'local', stage: 'QUEUED',
-    bundleName: 'com.example.local', stageHistory: [{ at: 1 }] },
-  { id: 'online', appId: 1, sourceUrl: 'https://repo/app.hap', stage: 'QUEUED',
-    catalogBundleName: 'com.example.online', stageHistory: [{ at: 2 }] }];
-  const installed = [], downloaded = [];
-  const box = { InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' },
-    LocalBundles: { isSelfBundle: () => false }, getContext: () => ({}), errorText: String,
-    JobStore: { open: async () => ({ listAll: async () => queued,
-      get: async id => queued.find(row => row.id === id) }) },
-    JobScheduler: { runningJobIds: () => [], runDownload: async (_context, _store, row) => downloaded.push(row.id) } };
+test('multiple Discover clicks enqueue immediately; execution belongs to process FIFO', async () => {
+  const jobs = [], starts = [];
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const store = { async enqueue(id, name, url, sha, mirrors, versionName, bundleName) {
+    const job = { id: String(id), appId: id, sourceUrl: url, stage: 'QUEUED',
+      stageHistory: [{ at: jobs.length + 1 }], catalogBundleName: bundleName };
+    jobs.push(job); return job;
+  }, listAll: async () => jobs.slice().reverse(), get: async id => jobs.find(j => j.id === id) };
+  store.pruneCompleted = async () => {};
+  const owner = coordinator(store, async job => {
+    starts.push(job.appId); if (job.appId === 1) await gate;
+    job.stage = 'INSTALLED'; return job;
+  });
+  const box = { InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' }, InstallCoordinator: owner, getContext: () => ({}), errorText: String,
+    LocalBundles: { isSelfBundle: () => false }, JobStore: { open: async () => store } };
   vm.runInNewContext(code, box);
   const ui = new box.Page();
-  Object.assign(ui, { queueRecoveryReady: true, queueDraining: false, activeJobId: '',
-    signedIn: true, loadJobs: async () => {},
-    continueInstall: async row => { installed.push(row.id); row.stage = 'INSTALLED'; } });
-  await ui.drainInstallQueue();
-  assert.deepEqual(installed, ['local:test', 'online']);
-  assert.deepEqual(downloaded, ['online']);
+  Object.assign(ui, { apps: [app(1), app(2), app(3)], updateCatalogReady: false,
+    enqueuingAppIds: [], queueRecoveryReady: true, signedIn: true,
+    taskPending: () => false, updateApps() { return this.apps; },
+    installedVersionOf: () => 0, loadJobs: async () => {} });
+  await ui.installFromCatalog(ui.apps[0]); await eventually(() => starts.length === 1);
+  await ui.installFromCatalog(ui.apps[1]); await ui.installFromCatalog(ui.apps[2]);
+  assert.equal(jobs.length, 3); assert.deepEqual(starts, [1]);
+  // Destroying the page cannot destroy its process-owned executor.
+  ui.queueRecoveryReady = false;
+  release(); await eventually(() => jobs.every(j => j.stage === 'INSTALLED'));
+  assert.deepEqual(starts, [1, 2, 3]);
+});
+
+test('local and online packages share FIFO, while manual duplicate requests coalesce', async () => {
+  const jobs = [{ id: 'local:test', appId: 0, sourceUrl: 'local', stage: 'QUEUED', stageHistory: [{ at: 1 }] },
+    { id: 'online', appId: 1, sourceUrl: 'https://repo/app.hap', stage: 'QUEUED', stageHistory: [{ at: 2 }] }];
+  const starts = [], store = { listAll: async () => jobs, get: async id => jobs.find(j => j.id === id) };
+  store.pruneCompleted = async () => {};
+  const owner = coordinator(store, async job => { starts.push(job.id); job.stage = 'INSTALLED'; return job; });
+  const first = owner.run({}, jobs[0].id), duplicate = owner.run({}, jobs[0].id);
+  assert.equal(first, duplicate); await first; await owner.recovered({});
+  assert.deepEqual(starts, ['local:test', 'online']);
+});
+
+// A repository can publish independent bundles; Management must retain its selected target.
+test('Management updates the secondary bundle even when the primary package is current', async () => {
+  const primary = app(1);
+  const helper = { ...primary.latestAsset, bundleName: 'com.example.helper', name: 'helper.hap',
+    url: 'https://example.com/helper.hap', versionCode: 9 };
+  primary.latestAssets = [primary.latestAsset, helper];
+  const enqueued = [];
+  const box = { InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' }, LocalBundles: { isSelfBundle: () => false, installedVersion: () => 8 },
+    JobStore: { open: async () => ({ enqueue: async (...args) => enqueued.push(args) }) },
+    getContext: () => ({}), errorText: String };
+  vm.runInNewContext(code, box);
+  const ui = new box.Page();
+  Object.assign(ui, { apps: [primary], updateCatalogReady: false,
+    enqueuingAppIds: [], signedIn: true, taskPending: () => false,
+    updateApps() { return this.apps; }, installedVersionOf: () => 100,
+    checkInstalledUpdates: () => {}, drainInstallQueue: () => {}, loadJobs: async () => {} });
+  await ui.startUpdate({ bundleName: helper.bundleName },
+    { appId: primary.id, bundleName: helper.bundleName, assetName: helper.name });
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0][1], helper.name);
+  assert.equal(enqueued[0][6], helper.bundleName);
+});
+
+test('Discover explicit reinstall requeues a completed journal at the tail instead of stalling', async () => {
+  const chosen = app(1), job = { id: 'completed', stage: 'INSTALLED', stageHistory: [{ at: 1 }] };
+  let saved = false;
+  const box = { InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' },
+    LocalBundles: { isSelfBundle: () => false }, getContext: () => ({}), errorText: String,
+    JobStore: { open: async () => ({ enqueue: async () => job, save: async () => { saved = true; } }) } };
+  vm.runInNewContext(code, box);
+  const ui = new box.Page();
+  Object.assign(ui, { apps: [chosen], updateCatalogReady: false, enqueuingAppIds: [],
+    signedIn: true, taskPending: () => false, updateApps() { return this.apps; },
+    installedVersionOf: () => 0, drainInstallQueue: () => {}, loadJobs: async () => {} });
+  await ui.installFromCatalog(chosen);
+  assert.equal(saved, true); assert.equal(job.stage, 'QUEUED'); assert.equal(job.stageHistory.length, 0);
 });

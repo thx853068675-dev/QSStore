@@ -43,6 +43,8 @@ function fixture() {
     exports, AppStorage: { setOrCreate: (key, value) => storage.set(key, value) },
     require: name => name === '../jobs/BackgroundInstallTask' ? {
       BackgroundInstallTask: { configure: () => {}, onForeground: () => {} }
+    } : name === '../jobs/WirelessDebugLifecycle' ? {
+      WirelessDebugLifecycle: { configure() {}, onForeground() {}, onBackground() {} }
     } : name === '@kit.AbilityKit' ? {
       UIAbility: class {}, ConfigurationConstant: { ColorMode: { COLOR_MODE_DARK: 1 } }
     } : {

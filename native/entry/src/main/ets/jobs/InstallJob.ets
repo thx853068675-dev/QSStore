@@ -63,6 +63,8 @@ export class InstallJob {
   approvedInstalledFingerprint: string = '';
   approvedInstalledAppIdentifier: string = '';
   transferTaskId: string = '';
+  /** Generated device workspace retained until confirmed cleanup. */
+  stagedTicket: string = '';
   attempt: number = 0;
   lastError: string = '';
   updatedAt: number = 0;

@@ -428,85 +428,45 @@ def h_submit_confirm(body: dict[str, Any], identity: tuple[str, str]) -> dict[st
 
 def h_refresh_stale_apps(ip: str, limit: int, budget_seconds: float,
                          app_ids: list[int] | None = None) -> dict[str, Any]:
-    """按需重采「已经不新鲜」的应用，供客户端下拉刷新使用。
-
-    为什么需要它：`GET /apps` 读的是缓存目录，里面的 `latest_asset` 要等采集周期
-    （默认 30 分钟）才会更新。所以用户下拉刷新时**看不到刚发布的版本**，必须进详情页
-    点「检查更新」——那条路会调单应用的 `/refresh` 即时重采。这里把同一件事批量化。
-
-    设计约束：
-
-    - **按 IP 限流**，且一次调用只采有限几个应用、总时长有上限。GitHub 采集是慢操作
-      （单个应用实测约 3~5 秒），不能让它把一次 HTTP 请求拖成几十秒。
-    - **只采过期的**（`synced_at` 早于 `max_age`），最近采过的直接跳过，避免连点下拉
-      把配额打满。
-    - 单个应用采集失败**不影响其它应用**，失败信息写在返回里而不是抛错：下拉刷新
-      宁可用旧数据，也不该因为某个仓库暂时不可达就整页报错。
-    """
+    """Compatibility endpoint: queue stale apps, never collect inside HTTP."""
     if not _rate_ok(f"refresh-stale:{ip}", *RATE_REFRESH_STALE):
-        raise ApiError(429, "RATE_LIMITED", "刷新过于频繁，请稍后再试")
-
-    max_age = int(os.environ.get("HAPSTORE_REFRESH_MAX_AGE", "300"))
-    if app_ids:
-        # 客户端点名要查哪几个（通常是「本机已装、且目录里有更新」的那些）。
-        # 这比「把所有过期的都采一遍」准得多：用户关心的是自己装了的应用。
-        wanted = [i for i in app_ids if i > 0][:limit]
-        stale = [a for a in (db.get_app(i) for i in wanted)
-                 if a is not None and a.get("status") == "published"]
-    else:
-        stale = db.stale_published_apps(max_age_seconds=max_age, limit=limit)
-    refreshed: list[dict[str, Any]] = []
-    skipped: list[int] = []
-    failures: list[dict[str, Any]] = []
-    deadline = time.monotonic() + budget_seconds
-    for app in stale:
-        if time.monotonic() >= deadline:
-            skipped.append(int(app["id"]))
+        raise ApiError(429, 'RATE_LIMITED', '刷新过于频繁，请稍后再试')
+    max_age = _int(os.environ.get('HAPSTORE_REFRESH_MAX_AGE'), 300, 0, 86400)
+    rows = ([db.get_app(i) for i in dict.fromkeys(app_ids) if i > 0][:limit] if app_ids else
+            db.stale_published_apps(max_age_seconds=max_age, limit=limit))
+    queued, skipped = [], []
+    for row in rows:
+        if not row or row['status'] != 'published':
             continue
-        repo = str(app.get("repo") or "")
-        if not repo:
-            continue
-        try:
-            info = collector.sync_app(repo, token=GITHUB_TOKEN)
-            refreshed.append({"app_id": int(app["id"]), "repo": repo,
-                              "releases": info.get("releases", 0)})
-        except collector.CollectError as e:
-            failures.append({"app_id": int(app["id"]), "repo": repo, "message": str(e)})
-        except Exception as e:  # noqa: BLE001 - 单个应用的意外不该拖垮整次刷新
-            failures.append({"app_id": int(app["id"]), "repo": repo, "message": str(e)})
-    return {
-        "refreshed": refreshed,
-        "skipped": skipped,
-        "failures": failures,
-        "considered": len(stale),
-        "max_age": max_age,
-    }
+        state = db.enqueue_refresh(row['id'], max_age)
+        if state['queued']:
+            queued.append({'app_id': row['id'], 'repo': row['repo'], 'status': state['status']})
+        else:
+            skipped.append(row['id'])
+    if queued:
+        submissions.wake_worker()
+    return {'queued': queued, 'refreshed': [], 'skipped': skipped, 'failures': [],
+            'considered': len(rows), 'max_age': max_age}
 
 
 def h_refresh_app(app_id: str, ip: str) -> dict[str, Any]:
-    """立刻重采一个应用，把 GitHub 上刚发布的版本拉进来。
+    if not _rate_ok(f'refresh:{ip}', *RATE_REFRESH):
+        raise ApiError(429, 'RATE_LIMITED', '检查过于频繁，请稍后再试')
+    details = db.get_app(int(app_id))
+    if not details or details['status'] != 'published':
+        raise ApiError(404, 'APP_NOT_FOUND', '应用不存在')
+    state = db.enqueue_refresh(int(app_id), 60)
+    if state['queued']:
+        submissions.wake_worker()
+    return dict(state, repo=details['repo'], latest=details.get('latest'),
+                latest_asset=details.get('latest_asset'), releases=details.get('releases_count', 0))
 
-    采集器每 HAPSTORE_SYNC_INTERVAL 才跑一轮，所以「刚发的 Release」在客户端
-    要等下一轮才能看见。这个接口让客户端在用户点「检查更新」时即时重采这一个
-    仓库，代价是一次 GitHub 请求；按 IP 限流，避免被拿来刷配额。
-    """
-    if not _rate_ok(f"refresh:{ip}", *RATE_REFRESH):
-        raise ApiError(429, "RATE_LIMITED", "检查过于频繁，请稍后再试")
-    app = db.get_app(int(app_id))
-    if not app or app["status"] != "published":
-        raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
-    repo = str(app.get("repo") or "")
-    if not repo:
-        raise ApiError(422, "NO_REPO", "该应用没有关联仓库，无法检查更新")
-    try:
-        info = collector.sync_app(repo, token=GITHUB_TOKEN)
-    except collector.CollectError as e:
-        # 采集失败不该让界面报错：旧数据仍然可用，只是没有新版本
-        raise ApiError(502, "COLLECT_FAILED", f"暂时无法检查更新：{e}") from e
-    fresh = db.get_app(int(app_id)) or {}
-    return {"app_id": int(app_id), "repo": repo,
-            "latest": fresh.get("latest"), "latest_asset": fresh.get("latest_asset"),
-            "releases": info.get("releases", 0)}
+
+def h_refresh_status(app_id: str) -> dict[str, Any]:
+    row = db.connect().execute("SELECT status FROM app WHERE id=?", (int(app_id),)).fetchone()
+    if not row or row['status'] != 'published':
+        raise ApiError(404, 'APP_NOT_FOUND', '应用不存在')
+    return db.refresh_status(int(app_id))
 
 
 def h_my_apps(identity: tuple[str, str]) -> dict[str, Any]:
@@ -546,7 +506,7 @@ def h_admin_sync(body: dict[str, Any], ip: str) -> dict[str, Any]:
     if repo:
         return collector.sync_app(repo, token=GITHUB_TOKEN)
     limit = _int(body.get("limit"), 10, 1, 50)
-    return collector.sync_all(token=GITHUB_TOKEN, limit=limit)
+    return submissions.queue_due(limit=limit)
 
 
 def h_admin_channels(q: dict[str, list[str]]) -> dict[str, Any]:
@@ -584,6 +544,7 @@ router.add("POST", r"/api/v1/submit/confirm", "SUBMIT_CONFIRM")
 router.add("POST", r"/api/v1/submit/status", "SUBMIT_STATUS")
 router.add("POST", r"/api/v1/apps/refresh-stale", "APPS_REFRESH_STALE")
 router.add("POST", r"/api/v1/apps/(?P<app_id>\d+)/refresh", "APP_REFRESH")
+router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/refresh", "APP_REFRESH_STATUS")
 router.add("GET", r"/api/v1/me/apps", "MY_APPS")
 router.add("GET", r"/api/v1/categories", lambda q: {"items": SUBMIT_CATEGORIES})
 router.add("POST", r"/api/v1/me/apps/(?P<app_id>\d+)/category", "MY_APP_CONFIGURE")
@@ -613,19 +574,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Cache-Control", "no-store")
+        if 'Cache-Control' not in (extra or {}):
+            self.send_header("Cache-Control", "no-store")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(payload)
 
-    def _json(self, data: Any, status: int = 200) -> None:
+    def _json(self, data: Any, status: int = 200, public: bool = False) -> None:
         body = json.dumps(
             {"ok": True, "data": data, "server_time": _now_iso(), "api_version": API_VERSION},
             ensure_ascii=False,
         ).encode("utf-8")
-        self._send(status, body, "application/json; charset=utf-8")
+        if public and status == 200:
+            etag = '"' + hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24] + '"'
+            headers = {'ETag': etag, 'Cache-Control': 'public, max-age=30, must-revalidate'}
+            if self.headers.get('If-None-Match') == etag:
+                self._send(304, b'', 'application/json; charset=utf-8', headers)
+            else:
+                self._send(status, body, 'application/json; charset=utf-8', headers)
+        else:
+            self._send(status, body, "application/json; charset=utf-8")
 
     def _error(self, status: int, code: str, message: str, hint: str = "",
                retry_after: int = 60) -> None:
@@ -661,8 +631,7 @@ class Handler(BaseHTTPRequestHandler):
         access_token = self.headers.get("X-Huawei-Access-Token", "")
         try:
             identity = auth.verify(token, access_token)
-            db.update_account_display_name(*identity)
-            db.set_account_avatar(identity[0], auth.verified_avatar(token, access_token))
+            db.sync_account_profile(*identity, auth.verified_avatar(token, access_token))
             return identity
         except auth.InvalidIdentity as exc:
             raise ApiError(401, "SIGN_IN_REQUIRED", str(exc)) from None
@@ -677,21 +646,26 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         try:
+            if not _rate_ok(f"api:{ip}", *RATE_DEFAULT):
+                raise ApiError(429, "RATE_LIMITED", "请求过于频繁，请稍后再试")
+
             # Only serve the image extracted from the selected HAP.
             m = re.match(r"^/api/v1/apps/(\d+)/icon$", path)
             if m and method == "GET":
                 app_id = int(m.group(1))
-                app = db.get_app(app_id)
+                app = db.connect().execute('SELECT status FROM app WHERE id=?', (app_id,)).fetchone()
                 if not app or app["status"] != "published":
                     raise ApiError(404, "ICON_NOT_FOUND", "该应用没有图标")
                 icon = db.app_icon(app_id)
                 if icon:
-                    self._send(200, icon[1], icon[0])
+                    etag = '"' + hashlib.sha256(icon[1]).hexdigest()[:16] + '"'
+                    supplied_rev = (query.get('v') or query.get('rev') or [''])[0]
+                    immutable = supplied_rev == etag.strip('"')
+                    headers = {'ETag': etag, 'Cache-Control': 'public, max-age=31536000, immutable' if immutable else 'public, max-age=300, must-revalidate'}
+                    self._send(304 if self.headers.get('If-None-Match') == etag else 200,
+                               b'' if self.headers.get('If-None-Match') == etag else icon[1], icon[0], headers)
                     return
                 raise ApiError(404, "ICON_NOT_FOUND", "该应用没有包内图标")
-
-            if not _rate_ok(f"api:{ip}", *RATE_DEFAULT):
-                raise ApiError(429, "RATE_LIMITED", "请求过于频繁，请稍后再试")
 
             fn, params = router.match(method, path)
             if fn is None:
@@ -715,6 +689,8 @@ class Handler(BaseHTTPRequestHandler):
                                                 REFRESH_STALE_BUDGET_SECONDS, ids))
             elif fn == "APP_REFRESH":
                 self._json(h_refresh_app(params["app_id"], ip))
+            elif fn == "APP_REFRESH_STATUS":
+                self._json(h_refresh_status(params['app_id']))
             elif fn == "MY_APPS":
                 self._json(h_my_apps(self._identity()))
             elif fn == "MY_APP_DELETE":
@@ -739,13 +715,13 @@ class Handler(BaseHTTPRequestHandler):
             elif fn == "ADMIN_FEATURE":
                 self._json(h_admin_feature(params["app_id"], self._read_body()))
             elif "app_id" in params and "tag" in params:
-                self._json(fn(params["app_id"], params["tag"], query))
+                self._json(fn(params["app_id"], params["tag"], query), public=True)
             elif "app_id" in params:
-                self._json(fn(params["app_id"], query))
+                self._json(fn(params["app_id"], query), public=True)
             elif "task_id" in params:
                 self._json(fn(params["task_id"], query))
             else:
-                self._json(fn(query))
+                self._json(fn(query), public=not path.startswith("/api/v1/admin/"))
         except ApiError as e:
             self._error(e.status, e.code, e.message, e.hint, e.retry_after)
         except BrokenPipeError:
@@ -786,7 +762,7 @@ def serve_forever() -> None:
             time.sleep(60)  # 启动后先等一会儿
             while True:
                 try:
-                    result = collector.sync_all(token=GITHUB_TOKEN, limit=20,
+                    result = submissions.queue_due(limit=20,
                                                progress=lambda s: print(s, flush=True))
                     print(f"sync done: {result}", flush=True)
                 except Exception as e:  # noqa: BLE001

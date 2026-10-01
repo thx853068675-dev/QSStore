@@ -62,7 +62,8 @@ export class AssetDownload {
   }
 
   async downloadAndVerify(job: InstallJob,
-    onProgress?: (received: number, total: number) => void): Promise<void> {
+    onProgress?: (received: number, total: number) => void,
+    validate?: () => Promise<void>): Promise<void> {
     if (!/^https:\/\//.test(job.sourceUrl)) {
       throw new Error('下载地址不是 HTTPS');
     }
@@ -70,22 +71,29 @@ export class AssetDownload {
       this.planPaths(job);
       await this.store.save(job);
     }
-    if (await this.verifiedFileExists(job)) return;
+    if (await this.verifiedFileExists(job)) {
+      try { if (validate) await validate(); return; }
+      catch (_) { await this.discardInvalidPackage(job); }
+    }
 
     const candidates = [job.sourceUrl, ...job.mirrorUrls].filter((url: string,
       index: number, urls: string[]) => /^https:\/\//.test(url) && urls.indexOf(url) === index);
-    let lastError = '';
+    let lastError: Error = new Error('没有可用下载地址');
     for (let i = 0; i < candidates.length; i++) {
       JobCancellation.assertActive(job.id);
+      let downloaded = false;
       try {
         await this.downloadCurrentSource(job, (received: number, total: number) => {
           InstallTaskState.downloadProgress(job.id, received, total);
           onProgress?.(received, total);
         });
+        downloaded = true;
+        if (validate) await validate();
         return;
       } catch (error) {
         JobCancellation.assertActive(job.id);
-        lastError = String(error);
+        lastError = error as Error;
+        if (downloaded) await this.discardInvalidPackage(job);
         if (i + 1 >= candidates.length) break;
         // A background task belongs to one URL. Never append its partial file
         // to a different mirror, even when they advertise the same filename.
@@ -97,7 +105,18 @@ export class AssetDownload {
         await this.store.save(job);
       }
     }
-    throw new Error('所有下载地址均失败：' + lastError);
+    throw lastError;
+  }
+
+  private async discardInvalidPackage(job: InstallJob): Promise<void> {
+    await this.discardTransfer(job);
+    for (const suffix of ['', '.part', '.package.hap', '.package.app']) {
+      const path = job.cachePath + suffix;
+      if (fileIo.accessSync(path)) fileIo.unlinkSync(path);
+    }
+    // Actual digest belongs to this response, never to the next mirror.
+    job.expectedSha256 = '';
+    await this.store.save(job);
   }
 
   private async downloadCurrentSource(job: InstallJob,

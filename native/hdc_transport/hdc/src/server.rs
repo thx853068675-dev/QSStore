@@ -2564,6 +2564,7 @@ async fn handle_server_file_send(
         let mut file = tokio::fs::File::open(&local_path).await?;
         let mut buf = vec![0u8; chunk_size];
         let mut offset: u64 = 0;
+        crate::report_observed_file_progress(&local_path, 0, file_size);
         loop {
             let n = file.read(&mut buf).await?;
             if n == 0 {
@@ -2588,6 +2589,7 @@ async fn handle_server_file_send(
             let data = concat_pack(&file_data);
             send_to_session(tcp_map, usb_map, session_id, &data).await?;
             offset += n as u64;
+            crate::report_observed_file_progress(&local_path, offset, file_size);
         }
 
         // Step 4: Send FileFinish and wait for daemon completion
@@ -4796,8 +4798,9 @@ mod tests {
         let names: Vec<_> = haps.iter()
             .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
             .collect();
-        assert!(names.contains(&"entry-default-signed.hap".to_string()));
-        assert!(names.contains(&"Feature.hap".to_string()));
+        assert_eq!(names, ["module-0.hap", "module-1.hap"]);
+        assert_eq!(std::fs::read(&haps[0]).unwrap(), b"fake hap 1");
+        assert_eq!(std::fs::read(&haps[1]).unwrap(), b"fake hap 2");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

@@ -1,0 +1,35 @@
+name: Host regression
+on:
+  pull_request:
+  push:
+    branches: [main, master, 'codex/**']
+permissions:
+  contents: read
+concurrency:
+  group: regression-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev libusb-1.0-0-dev pkg-config
+          python -m pip install -r server/requirements.txt
+          npm install --prefix "$RUNNER_TEMP/qingqi-typescript" --no-save typescript@4.9.5
+      - name: Run regression gate
+        env:
+          QINGQI_TYPESCRIPT: ${{ runner.temp }}/qingqi-typescript/node_modules/typescript/lib/typescript.js
+        run: python tools/check_local.py --output "$RUNNER_TEMP/qingqi-results"

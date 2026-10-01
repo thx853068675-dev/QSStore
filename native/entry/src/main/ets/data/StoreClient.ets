@@ -6,6 +6,9 @@ import { image } from '@kit.ImageKit';
 import { CatalogApp } from './CatalogApp';
 import { ReleaseInfo } from './ReleaseInfo';
 import { DeveloperAccount } from './DeveloperAccount';
+import { AccountService } from './AccountService';
+import { ServiceFailure } from './ServiceFailure';
+import { FailureKind } from '../jobs/InstallJob';
 import { SubmitDraft, AppReview } from './StoreActions';
 
 class PrepareBody { repo_url: string = ''; }
@@ -84,7 +87,30 @@ export class BackedUpIdentity {
 /// The server uses a self-signed certificate. Trusting only the bundled
 /// certificate and pinning its public key preserves the Flutter client's TLS
 /// boundary; network errors never fall back to plain HTTP.
+class PublicResponse {
+  etag: string = '';
+  data: Record<string, Object> = {};
+  bytes: number = 0;
+}
+
 export class StoreClient {
+  private static responses: Map<string, PublicResponse> = new Map();
+  private static remember(path: string, etag: string, data: Record<string, Object>): void {
+    if (!etag) return;
+    const row = new PublicResponse();
+    row.etag = etag; row.data = data; row.bytes = JSON.stringify(data).length * 2;
+    if (row.bytes > 2 * 1024 * 1024) return;
+    StoreClient.responses.delete(path);
+    StoreClient.responses.set(path, row);
+    let bytes = 0;
+    StoreClient.responses.forEach((entry: PublicResponse) => { bytes += entry.bytes; });
+    while (StoreClient.responses.size > 64 || bytes > 8 * 1024 * 1024) {
+      const first = Array.from(StoreClient.responses.keys())[0];
+      bytes -= StoreClient.responses.get(first)?.bytes ?? 0;
+      StoreClient.responses.delete(first);
+    }
+  }
+
   private static readonly BASE_URL = 'https://47.98.250.230';
   private static readonly PUBLIC_KEY_SHA256 = '1z7Q/bXjcnfeell5HUKRCLRP1E8u1rJHMJYRN3PI3Lo=';
   private caData: string;
@@ -97,13 +123,15 @@ export class StoreClient {
   }
 
   private async requestData(path: string, method: http.RequestMethod,
-    account?: DeveloperAccount, body?: Object): Promise<Record<string, Object>> {
+    account?: DeveloperAccount, body?: Object, retried: boolean = false): Promise<Record<string, Object>> {
     const request = http.createHttp();
     try {
       const headers: Record<string, string> = {};
+      const cached = !account && method === http.RequestMethod.GET ? StoreClient.responses.get(path) : undefined;
+      if (cached) headers['If-None-Match'] = cached.etag;
       if (account) {
         if (account.jwtToken.length === 0 || account.accessToken.length === 0) {
-          throw new Error('请先登录华为开发者账号');
+          throw new ServiceFailure(FailureKind.ACCOUNT, '请先登录华为开发者账号', 401);
         }
         headers['Authorization'] = 'Bearer ' + account.jwtToken;
         headers['X-Huawei-Access-Token'] = account.accessToken;
@@ -126,19 +154,33 @@ export class StoreClient {
       };
       if (body) options.extraData = JSON.stringify(body);
       const response = await request.request(StoreClient.BASE_URL + path, options);
+      if (response.responseCode === 304 && cached) return cached.data;
+      if (response.responseCode === 401 && account && !retried) {
+        AccountService.configure(this.context);
+        await AccountService.refresh(account, true);
+        return this.requestData(path, method, account, body, true);
+      }
       if (typeof response.result !== 'string') {
         throw new Error('商店服务响应格式无效');
       }
       const envelope = JSON.parse(response.result) as Record<string, Object>;
       if (envelope['ok'] !== true) {
         const error = envelope['error'] as Record<string, Object> | undefined;
-        throw new Error(String(error?.['message'] ?? '商店服务暂不可用') +
-          (error?.['hint'] ? ' · ' + String(error['hint']) : ''));
+        throw new ServiceFailure(response.responseCode === 401 ? FailureKind.ACCOUNT :
+          response.responseCode === 403 ? FailureKind.INTERNAL : FailureKind.NETWORK,
+          String(error?.['message'] ?? '商店服务暂不可用') +
+          (error?.['hint'] ? ' · ' + String(error['hint']) : ''), response.responseCode);
       }
       if (response.responseCode < 200 || response.responseCode >= 300) {
         throw new Error('商店服务返回 ' + response.responseCode);
       }
-      return envelope['data'] as Record<string, Object>;
+      const data = envelope['data'] as Record<string, Object>;
+      if (!account && method === http.RequestMethod.GET) {
+        const responseHeaders = response.header as Record<string, Object>;
+        const etag = String(responseHeaders?.['etag'] ?? responseHeaders?.['ETag'] ?? '');
+        StoreClient.remember(path, etag, data);
+      }
+      return data;
     } finally {
       request.destroy();
     }
@@ -222,19 +264,20 @@ export class StoreClient {
     }
   }
 
-  /**
-   * 让服务端立刻重采这个应用，把 GitHub 上刚发布的版本拉进来。
-   *
-   * 采集器按固定周期跑（默认 30 分钟），所以「刚发的 Release」在客户端要等
-   * 下一轮才看得见。用户点「检查更新」时调这个接口即时重采一次。
-   * 服务端按 IP 限流；失败只代表这次没查到新版本，不影响已有数据。
-   */
-  async refreshApp(appId: number): Promise<void> {
+  /** Enqueue a bounded server refresh; heavy collection runs in the worker. */
+  async refreshApp(appId: number): Promise<string> {
     if (appId <= 0) throw new Error('应用编号无效');
-    // 带一个空 JSON 对象：http.request 的 extraData 传空字符串会直接抛
-    // 401 Parameter error，服务端对空 body 本身是容忍的。
-    await this.requestData('/api/v1/apps/' + appId + '/refresh',
+    const data = await this.requestData('/api/v1/apps/' + appId + '/refresh',
       http.RequestMethod.POST, undefined, new EmptyBody());
+    return String(data['status'] ?? 'done');
+  }
+
+  async refreshStatus(appId: number): Promise<string> {
+    const data = await this.getData('/api/v1/apps/' + appId + '/refresh');
+    const status = String(data['status'] ?? 'done');
+    if (status === 'done') StoreClient.responses.clear();
+    if (status === 'failed') throw new Error(String(data['last_error'] ?? '仓库检查失败'));
+    return status;
   }
 
   /**

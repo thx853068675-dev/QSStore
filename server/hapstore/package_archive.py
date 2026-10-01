@@ -7,7 +7,7 @@ import re
 import tempfile
 import zipfile
 from urllib.parse import quote, unquote, urldefrag
-from . import collector
+from . import collector, artifact_cache
 
 MAX_TOTAL = 2 * 1024 * 1024 * 1024
 MAX_PACKAGES = 32
@@ -51,10 +51,7 @@ def extract(archive, item, path):
 
 def inspect_hap(path):
     with zipfile.ZipFile(path) as archive:
-        for entry in ('module.json', 'pack.info'):
-            matches = [i for i in archive.infolist() if i.filename == entry]
-            if len(matches) > 1 or (matches and matches[0].file_size > 4 * 1024 * 1024):
-                raise collector.CollectError('安装包清单重复或超限')
+        collector.validate_hap_manifests(archive)
         if 'module.json' not in archive.namelist():
             raise collector.CollectError('安装包缺少 module.json')
         module = json.loads(archive.read('module.json'))
@@ -88,10 +85,30 @@ def inspect_app(path):
         return primary
 
 
+def _present_metadata(asset, url, selected, rows):
+    result = []
+    for metadata in rows:
+        entry = metadata.get('archive_entry', '')
+        if selected and entry != selected:
+            continue
+        if entry:
+            result.append(dict(asset, **{k: v for k, v in metadata.items() if k not in ('name', 'download_url', 'size', 'sha256')}, name=asset['name'] if selected else asset['name'] + ' / ' + entry,
+                download_url=url + '#' + SELECTOR + quote(entry, safe='')))
+        else:
+            result.append(dict(asset, **metadata))
+    if not result:
+        raise collector.CollectError('ZIP 中已不存在所选安装包，请重新检查')
+    return result
+
+
 def scan_asset(asset, token=''):
     """Return validated virtual attachments; all retain the upstream ZIP digest."""
     url, fragment = urldefrag(asset['download_url'])
     selected = unquote(fragment[len(SELECTOR):]) if fragment.startswith(SELECTOR) else ''
+    kind = 'zip' if url.lower().endswith('.zip') or selected else 'app'
+    cached = artifact_cache.get(asset.get('sha256', ''), kind)
+    if cached is not None:
+        return _present_metadata(asset, url, selected, cached)
     source = collector._download_to_temp(url, token=token)
     if not source:
         raise collector.CollectError('安装包暂时无法下载，后台检查将重试')
@@ -104,13 +121,12 @@ def scan_asset(asset, token=''):
         is_zip = url.lower().endswith('.zip') or bool(selected)
         if not is_zip:
             meta = inspect_app(source) if asset['name'].lower().endswith('.app') else inspect_hap(source)
+            artifact_cache.put(digest, kind, [meta])
             return [dict(asset, **meta)]
         result = []
         with tempfile.TemporaryDirectory(prefix='hapstore-zip-') as temp, zipfile.ZipFile(source) as archive:
             entries = package_entries(archive)
             for index, item in enumerate(entries):
-                if selected and item.filename != selected:
-                    continue
                 staged = os.path.join(temp, f'package-{index}')
                 extract(archive, item, staged)
                 try:
@@ -123,7 +139,8 @@ def scan_asset(asset, token=''):
                     archive_entry=item.filename))
         if not result:
             raise collector.CollectError('ZIP 内没有可安装的 APP 或 HAP（已检查清单）')
-        return result
+        artifact_cache.put(digest, kind, result)
+        return _present_metadata(asset, url, selected, result)
     except (zipfile.BadZipFile, RuntimeError, ValueError, KeyError) as error:
         raise collector.CollectError(f'无法解析安装包：{error}') from error
     finally:

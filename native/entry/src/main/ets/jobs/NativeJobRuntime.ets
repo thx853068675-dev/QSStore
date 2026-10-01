@@ -1,3 +1,5 @@
+import { ClassifiedFailure } from '../data/ServiceFailure';
+import { StorageBudget } from './StorageBudget';
 import { PackageArchive } from './PackageArchive';
 import { LocalBundles } from './LocalBundles';
 import { common } from '@kit.AbilityKit';
@@ -26,6 +28,10 @@ export interface NativeDeviceBridge {
   install(signedHapPath: string,
     onProgress?: (phase: string, sent: number, total: number) => void): Promise<void>;
   uninstall(bundleName: string): Promise<void>;
+  stageInstall(path: string, onProgress?: (phase: string, sent: number, total: number) => void): Promise<string>;
+  installStaged(ticket: string, bundleName: string,
+    onProgress?: (phase: string, sent: number, total: number) => void): Promise<void>;
+  discardStaged(ticket: string): Promise<boolean>;
   installSelfAfterUninstall(signedHapPath: string): Promise<void>;
 }
 
@@ -115,7 +121,7 @@ export class NativeJobRuntime implements JobRuntime {
         evidence.validProfile = currentHash === job.profileSha256 &&
           AgcProfile.valid(job.profilePath, job.bundleName, job.deviceUdid,
             identity.certificatePath,
-            AgcProfile.effectiveAcls(requestedPermissions(await this.packagePath(job))));
+            AgcProfile.effectiveAcls(await PackageArchive.permissions(await this.packagePath(job))));
         if (evidence.validProfile && LocalBundles.isSelfBundle(job.bundleName)) {
           evidence.validProfile = await this.profileMatchesInstalledInstaller(job.profilePath);
         }
@@ -127,6 +133,7 @@ export class NativeJobRuntime implements JobRuntime {
       try {
         await verifyHap(job.signedPath);
         const signed = await this.packageIdentity(job.signedPath);
+        PackageArchive.release(job.signedPath);
         evidence.verifiedSignature = signed.bundleName === job.bundleName &&
           signed.versionCode === job.versionCode;
       } catch (_) {}
@@ -153,7 +160,16 @@ export class NativeJobRuntime implements JobRuntime {
       this.rememberVerifiedCache(job);
       return;
     }
-    await new AssetDownload(this.context, this.store).downloadAndVerify(job);
+    try {
+      await new AssetDownload(this.context, this.store).downloadAndVerify(job, undefined, async () => {
+        this.selectedPackagePath = '';
+        const identity = await this.packageIdentity(await this.packagePath(job));
+        checkCatalogIdentity(job.catalogBundleName, job.catalogVersionCode, identity);
+      });
+    } catch (error) {
+      throw new JobFailure(error instanceof PackageInspectError ? FailureKind.INVALID_PACKAGE :
+        (error as ClassifiedFailure).failureKind ?? FailureKind.NETWORK, String(error));
+    }
     this.rememberVerifiedCache(job);
   }
 
@@ -172,7 +188,7 @@ export class NativeJobRuntime implements JobRuntime {
       if (error instanceof PackageInspectError) {
         throw new JobFailure(FailureKind.INVALID_PACKAGE, error.message);
       }
-      throw new JobFailure(FailureKind.INVALID_PACKAGE, String(error));
+      throw new JobFailure((error as ClassifiedFailure).failureKind ?? FailureKind.INVALID_PACKAGE, String(error));
     }
   }
 
@@ -240,14 +256,14 @@ export class NativeJobRuntime implements JobRuntime {
         if (matched) selected = matched;
       } catch (error) {
         // AGC 列表或下载失败是“未知”，不能当成找不到匹配证书。
-        throw new JobFailure(FailureKind.ACCOUNT,
+        throw new JobFailure((error as ClassifiedFailure).failureKind ?? FailureKind.ACCOUNT,
           '暂时无法核实可复用证书，已暂停更新以保护应用数据：' + String(error));
       }
     }
     selected = await SigningIdentityRecovery.pinForJob(this.context, selected);
     job.signingCertId = selected.certId;
     job.profilePath = await AgcProfile.ensure(this.context, this.account, selected,
-      job.bundleName, udid, requestedPermissions(await this.packagePath(job)));
+      job.bundleName, udid, await PackageArchive.permissions(await this.packagePath(job)));
     job.deviceUdid = udid;
     job.profileSha256 = (await hash.hash(job.profilePath, 'sha256')).toLowerCase();
     await this.store.save(job);
@@ -292,8 +308,11 @@ export class NativeJobRuntime implements JobRuntime {
       (await hash.hash(job.profilePath, 'sha256')).toLowerCase() !== job.profileSha256) {
       throw new JobFailure(FailureKind.ACCOUNT, '签名材料已改变，请重新准备设备授权');
     }
-    await signHap(await this.packagePath(job), job.signedPath, identity.privateKeyPath,
-      identity.certificatePath, job.profilePath);
+    const path = await this.packagePath(job);
+    await StorageBudget.require(this.context.filesDir, PackageArchive.workingBytes(path));
+    try {
+      await signHap(path, job.signedPath, identity.privateKeyPath, identity.certificatePath, job.profilePath);
+    } finally { PackageArchive.release(path); }
     // The native signer verifies the complete pending HAP before atomically
     // moving it to signedPath. Repeating verifyHap immediately is another full
     // package read; recovery in a later invocation still verifies normally.
@@ -313,6 +332,7 @@ export class NativeJobRuntime implements JobRuntime {
       await verifyHap(job.signedPath);
     }
     const signed = await this.packageIdentity(job.signedPath);
+    PackageArchive.release(job.signedPath);
     if (signed.bundleName !== job.bundleName || signed.versionCode !== job.versionCode ||
       job.signedProfileSha256 !== job.profileSha256) {
       throw new JobFailure(FailureKind.INVALID_PACKAGE, '签名包与原始 HAP 或设备授权不一致');
@@ -369,7 +389,15 @@ export class NativeJobRuntime implements JobRuntime {
 
   async install(job: InstallJob): Promise<void> {
     JobCancellation.assertActive(job.id);
+    if ((job.stagedTicket ?? '').length > 0) {
+      if (!await this.device.discardStaged(job.stagedTicket)) {
+        throw new JobFailure(FailureKind.DEVICE, '请连接无线调试，清理上次传输后继续安装');
+      }
+      job.stagedTicket = '';
+      await this.store.save(job);
+    }
     let replacing = false;
+    let staged = '';
     const path = this.usesOriginalInstaller(job) ? job.cachePath : job.signedPath;
     if (job.allowDataLoss) {
       const installed = await this.device.installedSigningIdentity(job.bundleName);
@@ -417,18 +445,45 @@ export class NativeJobRuntime implements JobRuntime {
       }
       if (await this.device.installedVersion(job.bundleName) > 0) {
         JobCancellation.assertActive(job.id);
-        // 卸载已经开始后，完成这一对操作，避免取消把用户留在无应用的状态。
-        replacing = true;
-        await this.device.uninstall(job.bundleName);
-        if (await this.device.installedVersion(job.bundleName) > 0) {
-          throw new JobFailure(FailureKind.DEVICE, '旧版卸载结果尚未确认，已停止安装');
+        InstallTaskState.installProgress(job.id, 'transfer', 0, 0);
+        try {
+          staged = await this.device.stageInstall(path, (phase: string, sent: number, total: number): void =>
+            InstallTaskState.installProgress(job.id, phase, sent, total));
+        } catch (error) {
+          if (!await this.device.connected()) throw new JobFailure(FailureKind.DEVICE,
+            '预传包时无线调试已断开，旧应用仍保留，重连后继续');
+          throw error as Error;
+        }
+        job.stagedTicket = staged;
+        try {
+          await this.store.save(job);
+          JobCancellation.assertActive(job.id);
+          // Large transfers can take minutes; consent must still refer to the same installed app.
+          const current = await this.device.installedSigningIdentity(job.bundleName);
+          if (!current || current.versionCode !== job.approvedInstalledVersion ||
+            current.fingerprint !== job.approvedInstalledFingerprint ||
+            current.appIdentifier !== job.approvedInstalledAppIdentifier) {
+            job.allowDataLoss = false;
+            await this.store.save(job);
+            throw new JobFailure(FailureKind.CONFIRMATION,
+              '传输期间已安装应用发生变化，请重新确认是否清除数据');
+          }
+          replacing = true;
+        } catch (error) {
+          if (await this.device.discardStaged(staged)) {
+            job.stagedTicket = '';
+            try { await this.store.save(job); } catch (_) {}
+          }
+          throw error as Error;
         }
       }
     }
     if (!replacing) JobCancellation.assertActive(job.id);
     try {
-      await this.device.install(path, (phase: string, sent: number, total: number) =>
-        InstallTaskState.installProgress(job.id, phase, sent, total));
+      const progress = (phase: string, sent: number, total: number): void =>
+        InstallTaskState.installProgress(job.id, phase, sent, total);
+      if (replacing) await this.device.installStaged(staged, job.bundleName, progress);
+      else await this.device.install(path, progress);
       InstallTaskState.installProgress(job.id, 'verifying', 0, 0);
     }
     catch (error) {
@@ -446,6 +501,11 @@ export class NativeJobRuntime implements JobRuntime {
           '无线调试已断开，安装结果尚未确认：' + String(error));
       }
       throw new Error(String(error));
+    } finally {
+      if (staged.length > 0 && await this.device.discardStaged(staged)) {
+        job.stagedTicket = '';
+        try { await this.store.save(job); } catch (_) {}
+      }
     }
   }
 

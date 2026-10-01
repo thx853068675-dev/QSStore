@@ -1,3 +1,4 @@
+import { StorageBudget } from './StorageBudget';
 import { common } from '@kit.AbilityKit';
 import { fileIo, hash, picker } from '@kit.CoreFileKit';
 import { InstallJob, InstallStage } from './InstallJob';
@@ -9,6 +10,17 @@ import { listPackageEntries } from 'libhap_core.so';
 // The source is never modified and the working file is promoted only after
 // integrity calculation and bounded HAP manifest inspection.
 export class LocalImport {
+  static cleanupOldPreviews(context: common.UIAbilityContext): void {
+    const dir = context.cacheDir + '/local-hap-previews';
+    if (!fileIo.accessSync(dir)) return;
+    for (const name of fileIo.listFileSync(dir)) {
+      const match = /^local-(\d+)-\d+(?:-\d+)?\.(?:hap|app|part)(?:\.module-\d+\.hap)?$/.exec(name);
+      if (match && Date.now() - Number(match[1]) > 86400000) {
+        try { fileIo.unlinkSync(dir + '/' + name); } catch (_) {}
+      }
+    }
+  }
+
   /** Selection copies and inspects the HAP, but never creates an install task. */
   static async pickPreviews(context: common.UIAbilityContext): Promise<InstallJob[]> {
     const chooser = new picker.DocumentViewPicker(context);
@@ -26,7 +38,12 @@ export class LocalImport {
     const staged: string[] = [];
     try {
       const source = fileIo.openSync(selection[0], fileIo.OpenMode.READ_ONLY);
-      try { await fileIo.copyFile(source.fd, temporary); }
+      try {
+        const size = fileIo.statSync(source.fd).size;
+        if (size <= 0 || size > 2 * 1024 * 1024 * 1024) throw new Error('安装文件大小无效（上限 2 GB）');
+        await StorageBudget.require(context.cacheDir, size * 2);
+        await fileIo.copyFile(source.fd, temporary);
+      }
       finally { fileIo.closeSync(source); }
       const size = fileIo.statSync(temporary).size;
       if (size <= 0 || size > 2 * 1024 * 1024 * 1024) throw new Error('安装文件大小无效（上限 2 GB）');
@@ -58,6 +75,7 @@ export class LocalImport {
       return previews;
     } catch (error) {
       for (const path of staged) {
+        PackageArchive.release(path);
         if (fileIo.accessSync(path)) fileIo.unlinkSync(path);
       }
       throw new Error(String(error));
@@ -91,6 +109,7 @@ export class LocalImport {
 
   static discardPreview(context: common.UIAbilityContext, preview: InstallJob): void {
     const prefix = context.cacheDir + '/local-hap-previews/local-';
+    PackageArchive.release(preview.cachePath);
     if (preview.cachePath.startsWith(prefix) && !preview.cachePath.includes('/../') &&
       /\.(hap|app)$/.test(preview.cachePath) && fileIo.accessSync(preview.cachePath)) {
       fileIo.unlinkSync(preview.cachePath);
@@ -111,6 +130,7 @@ export class LocalImport {
     const extension = PackageArchive.extension(preview.cachePath);
     const cachePath = dir + '/local-' + sha256 + extension;
     const signedPath = dir + '/local-' + sha256 + '.signed' + extension;
+    await StorageBudget.require(context.filesDir, fileIo.statSync(preview.cachePath).size * 2);
     const temporary = cachePath + '.' + Date.now() + '.part';
     try {
       const valid = fileIo.accessSync(cachePath) &&

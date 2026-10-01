@@ -1,3 +1,4 @@
+import { HdcDeviceBridge } from './HdcDeviceBridge';
 import { InstallTaskState } from './InstallTaskState';
 import { common } from '@kit.AbilityKit';
 import { relationalStore } from '@kit.ArkData';
@@ -37,6 +38,7 @@ const JOB_SCHEMA = `CREATE TABLE IF NOT EXISTS install_jobs (
   approved_installed_fingerprint TEXT NOT NULL DEFAULT '',
   approved_installed_app_identifier TEXT NOT NULL DEFAULT '',
   transfer_task_id TEXT NOT NULL,
+  staged_ticket TEXT NOT NULL DEFAULT '',
   attempt INTEGER NOT NULL,
   last_error TEXT NOT NULL,
   updated_at INTEGER NOT NULL
@@ -45,6 +47,7 @@ const JOB_SCHEMA = `CREATE TABLE IF NOT EXISTS install_jobs (
 export class JobStore {
   private static opening: Promise<JobStore> | undefined;
   private db: relationalStore.RdbStore;
+  private context: common.UIAbilityContext | undefined;
 
   private constructor(db: relationalStore.RdbStore) {
     this.db = db;
@@ -69,6 +72,7 @@ export class JobStore {
     await db.executeSql('CREATE TABLE IF NOT EXISTS cancelled_job_cleanup (id TEXT PRIMARY KEY, payload TEXT NOT NULL)');
     const columns = await db.querySql('PRAGMA table_info(install_jobs)');
     let hasTransferId = false;
+    let hasStagedTicket = false;
     let hasMirrorUrls = false;
     let hasModuleName = false;
     let hasMainAbility = false;
@@ -89,6 +93,7 @@ export class JobStore {
     try {
       while (columns.goToNextRow()) {
         const name = columns.getString(columns.getColumnIndex('name'));
+        if (name === 'staged_ticket') hasStagedTicket = true;
         if (name === 'transfer_task_id') {
           hasTransferId = true;
         }
@@ -112,6 +117,9 @@ export class JobStore {
       }
     } finally {
       columns.close();
+    }
+    if (!hasStagedTicket) {
+      await db.executeSql("ALTER TABLE install_jobs ADD COLUMN staged_ticket TEXT NOT NULL DEFAULT ''");
     }
     if (!hasTransferId) {
       await db.executeSql("ALTER TABLE install_jobs ADD COLUMN transfer_task_id TEXT NOT NULL DEFAULT ''");
@@ -169,7 +177,9 @@ export class JobStore {
       await db.executeSql("ALTER TABLE install_jobs ADD COLUMN approved_installed_app_identifier TEXT NOT NULL DEFAULT ''");
     }
     const store = new JobStore(db);
+    store.context = context;
     // 应用退出时仍未完成的清理，在下次启动继续。
+    await store.pruneCompleted(context);
     await store.cleanupCancelled(context);
     return store;
   }
@@ -206,8 +216,8 @@ export class JobStore {
        device_udid, profile_sha256, signed_profile_sha256, transfer_task_id,
        signing_cert_id, reinstall_required, allow_data_loss, approved_installed_version,
        approved_installed_fingerprint, approved_installed_app_identifier,
-       attempt, last_error, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       attempt, last_error, updated_at, staged_ticket)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [job.id, job.appId, job.assetName, job.sourceUrl, JSON.stringify(job.mirrorUrls),
        job.expectedSha256, job.catalogBundleName, job.catalogVersionCode,
        job.bundleName, job.versionCode, job.versionName, JSON.stringify(job.stageHistory),
@@ -217,7 +227,7 @@ export class JobStore {
        job.transferTaskId, job.signingCertId, job.reinstallRequired ? 1 : 0, job.allowDataLoss ? 1 : 0,
        job.approvedInstalledVersion, job.approvedInstalledFingerprint,
        job.approvedInstalledAppIdentifier,
-       job.attempt, job.lastError, job.updatedAt]
+       job.attempt, job.lastError, job.updatedAt, job.stagedTicket ?? '']
     );
     if (JobCancellation.isCancelled(job.id)) {
       await this.rememberCancelledFiles(job);
@@ -345,17 +355,22 @@ export class JobStore {
     return this.query('SELECT * FROM install_jobs ORDER BY updated_at DESC', []);
   }
 
-  async forget(id: string): Promise<void> {
+  async forget(id: string, clean: boolean = true): Promise<void> {
     if (id.length === 0) throw new Error('安装记录编号为空');
+    if (this.context !== undefined) {
+      const job = await this.get(id);
+      if (job) await this.rememberCancelledFiles(job);
+    }
     await this.db.executeSql('DELETE FROM install_jobs WHERE id = ?', [id]);
     InstallTaskState.remove(id);
+    if (clean && this.context !== undefined) await this.cleanupCancelled(this.context, id);
   }
 
   async cancel(job: InstallJob): Promise<void> {
     JobCancellation.cancel(job.id);
     try {
       await this.rememberCancelledFiles(job);
-      await this.forget(job.id);
+      await this.forget(job.id, false);
     } catch (error) {
       JobCancellation.clear(job.id);
       throw new Error(String(error));
@@ -394,6 +409,10 @@ export class JobStore {
       if (!await this.stopTransfer(context, job)) continue;
       const retained = await this.listAll();
       let clean = true;
+      if ((job.stagedTicket ?? '').length > 0) {
+        clean = HdcDeviceBridge.deviceLinked() &&
+          await new HdcDeviceBridge(context).discardStaged(job.stagedTicket);
+      }
       const paths = [job.cachePath, job.signedPath, job.cachePath + '.part',
         job.cachePath + '.package.hap', job.cachePath + '.package.app',
         job.cachePath + '.package.hap.part', job.cachePath + '.package.app.part'];
@@ -421,12 +440,35 @@ export class JobStore {
       for (const path of paths) {
         // 只删本任务工作目录中的文件；证书、授权与用户原始文件不在此范围。
         if (!path.startsWith(prefix) || path.includes('/../') ||
-          retained.some((other: InstallJob) => other.cachePath === path ||
-            other.signedPath === path || other.cachePath + '.part' === path)) continue;
+          retained.some((other: InstallJob) => (other.cachePath.length > 0 &&
+            (other.cachePath === path || path.startsWith(other.cachePath + '.'))) || other.signedPath === path)) continue;
         try { if (fileIo.accessSync(path)) fileIo.unlinkSync(path); } catch (_) { clean = false; }
       }
       if (clean) await this.db.executeSql('DELETE FROM cancelled_job_cleanup WHERE id = ?', [job.id]);
     }
+  }
+
+  /** Keep install history; evict completed package bytes after 24h or over 512 MB. */
+  async pruneCompleted(context: common.UIAbilityContext): Promise<void> {
+    const jobs = (await this.listAll()).filter((job: InstallJob) =>
+      job.stage === InstallStage.INSTALLED && job.cachePath.length > 0)
+      .sort((a: InstallJob, b: InstallJob) => b.updatedAt - a.updatedAt);
+    let retainedBytes = 0;
+    const prefix = context.filesDir + '/install-jobs/';
+    for (const job of jobs) {
+      let bytes = 0;
+      for (const path of [job.cachePath, job.signedPath]) {
+        try { if (path.startsWith(prefix) && fileIo.accessSync(path)) bytes += fileIo.statSync(path).size; } catch (_) {}
+      }
+      if (Date.now() - job.updatedAt < 86400000 && retainedBytes + bytes <= 512 * 1024 * 1024) {
+        retainedBytes += bytes; continue;
+      }
+      // Journal before clearing references, so interrupted eviction resumes next startup.
+      await this.rememberCancelledFiles(job);
+      job.cachePath = ''; job.signedPath = ''; job.transferTaskId = '';
+      await this.save(job);
+    }
+    await this.cleanupCancelled(context);
   }
 
   private async query(sql: string, args: Array<relationalStore.ValueType>): Promise<InstallJob[]> {
@@ -481,6 +523,7 @@ export class JobStore {
         job.approvedInstalledFingerprint = result.getString(result.getColumnIndex('approved_installed_fingerprint'));
         job.approvedInstalledAppIdentifier = result.getString(result.getColumnIndex('approved_installed_app_identifier'));
         job.transferTaskId = result.getString(result.getColumnIndex('transfer_task_id'));
+        job.stagedTicket = result.getString(result.getColumnIndex('staged_ticket'));
         job.attempt = result.getLong(result.getColumnIndex('attempt'));
         job.lastError = result.getString(result.getColumnIndex('last_error'));
         job.updatedAt = result.getLong(result.getColumnIndex('updated_at'));

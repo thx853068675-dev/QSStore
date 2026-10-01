@@ -38,6 +38,18 @@ pub fn report_install_progress(path: &str, phase: &'static str, sent: u64, total
     }
 }
 
+pub fn report_observed_file_progress(path: &str, sent: u64, total: u64) {
+    if let Ok(mut row) = INSTALL_PROGRESS.lock() {
+        if let Some((current, phase, received, size)) = row.as_mut() {
+            if current == path {
+                *phase = "transfer";
+                *received = sent.min(total);
+                *size = total;
+            }
+        }
+    }
+}
+
 pub fn install_progress(path: &str) -> (&'static str, u64, u64) {
     if let Ok(row) = INSTALL_PROGRESS.lock() {
         if let Some((current, phase, sent, total)) = row.as_ref() {
@@ -56,6 +68,10 @@ mod progress_tests {
         super::report_install_progress("/sandbox/one.hap", "transfer", 40, 100);
         assert_eq!(super::install_progress("/sandbox/one.hap"), ("transfer", 40, 100));
         assert_eq!(super::install_progress("/sandbox/other.hap"), ("waiting", 0, 0));
+        super::report_observed_file_progress("/sandbox/other.hap", 99, 100);
+        assert_eq!(super::install_progress("/sandbox/one.hap"), ("transfer", 40, 100));
+        super::report_observed_file_progress("/sandbox/one.hap", 50, 100);
+        assert_eq!(super::install_progress("/sandbox/one.hap"), ("transfer", 50, 100));
         super::report_install_progress("/sandbox/one.hap", "installing", 110, 100);
         assert_eq!(super::install_progress("/sandbox/one.hap"), ("installing", 100, 100));
     }

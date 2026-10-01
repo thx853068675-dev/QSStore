@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from server.hapstore import submissions
 from server.hapstore import app, auth, collector, db, transfer
 
 
@@ -156,8 +157,10 @@ class StoreFeaturesTest(unittest.TestCase):
 
         with patch.object(app.collector, "sync_app", side_effect=sync):
             out = app.h_refresh_stale_apps("10.0.0.1", 4, 12.0)
+            self.assertEqual(collected, [])
+            submissions.process_refresh_one()
         self.assertEqual(collected, ["owner/stale"])
-        self.assertEqual([r["app_id"] for r in out["refreshed"]], [stale])
+        self.assertEqual([r["app_id"] for r in out["queued"]], [stale])
         del fresh
 
     def test_batch_refresh_survives_one_broken_repo(self):
@@ -172,8 +175,11 @@ class StoreFeaturesTest(unittest.TestCase):
 
         with patch.object(app.collector, "sync_app", side_effect=sync):
             out = app.h_refresh_stale_apps("10.0.0.2", 4, 12.0)
-        self.assertEqual([r["repo"] for r in out["refreshed"]], ["owner/ok"])
-        self.assertEqual([f["repo"] for f in out["failures"]], ["owner/broken"])
+            self.assertEqual(len(out['queued']), 2)
+            submissions.process_refresh_one()
+            submissions.process_refresh_one()
+        tasks = db.connect().execute('SELECT a.repo_full_name,t.status FROM refresh_task t JOIN app a ON a.id=t.app_id').fetchall()
+        self.assertEqual(dict((r[0],r[1]) for r in tasks), {'owner/ok': 'done', 'owner/broken': 'pending'})
 
     def test_stale_published_apps_exposes_the_same_fields_as_get_app(self):
         """字段名必须与 `get_app` 一致。
@@ -200,6 +206,8 @@ class StoreFeaturesTest(unittest.TestCase):
 
         with patch.object(app.collector, "sync_app", side_effect=sync):
             app.h_refresh_stale_apps("10.0.0.9", 4, 12.0)
+            self.assertEqual(collected, [])
+            submissions.process_refresh_one()
         self.assertEqual(collected, ["owner/e2e"])
 
     def test_batch_refresh_is_rate_limited(self):

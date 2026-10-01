@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const ts = require('/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+const ts = require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const root = path.join(__dirname, '../entry/src/main/ets');
 function sourceMethods(file, names, globals = {}) {
   const source = fs.readFileSync(path.join(root, 'pages', file + '.ets'), 'utf8');
@@ -27,11 +27,12 @@ function load(file, mocks = {}) {
 }
 function fixture() {
   const { InstallReconnect } = load('jobs/InstallReconnect');
+  const { InstallConfirmation } = load('jobs/InstallConfirmation');
   const make = file => {
     const page = sourceMethods(file, ['animateOverlay', 'observeReconnect', 'onPageHide'], {
-      InstallReconnect, Curve: { EaseOut: 'ease-out' }
+      InstallReconnect, InstallConfirmation, Curve: { EaseOut: 'ease-out' }
     });
-    Object.assign(page, { reconnectSubscription: -1, resumeJobId: '', reconnectJobId: '',
+    Object.assign(page, { reconnectSubscription: -1, confirmationSubscription: -1, resumeJobId: '', reconnectJobId: '',
       reconnectMessage: '', showReconnect: false,
       getUIContext: () => ({ animateTo: (_options, change) => change() }) });
     return page;

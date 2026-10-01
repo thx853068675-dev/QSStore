@@ -188,6 +188,21 @@ CREATE INDEX IF NOT EXISTS idx_event_app ON event_download(app_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_review_app ON review(app_id, updated_at DESC);
 """
 
+SCHEMA += """
+CREATE TABLE IF NOT EXISTS artifact_inspection (
+ cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, checked_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS refresh_task (
+ app_id INTEGER PRIMARY KEY REFERENCES app(id) ON DELETE CASCADE,
+ status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+ next_attempt INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+ last_error TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS github_http_cache (
+ cache_key TEXT PRIMARY KEY, etag TEXT NOT NULL, payload BLOB NOT NULL, updated_at INTEGER NOT NULL
+);
+"""
+
 _local = threading.local()
 _init_lock = threading.Lock()
 _initialized = False
@@ -264,8 +279,9 @@ def init_db() -> None:
 # ────────────────────────────── 查询 ──────────────────────────────
 
 
-def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True) -> dict[str, Any]:
-    icon = connect().execute("SELECT digest FROM app_icon WHERE app_id=?", (row['id'],)).fetchone()
+def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True, related: dict | None = None) -> dict[str, Any]:
+    icon = (related['icons'].get(row['id']) if related is not None else
+            connect().execute("SELECT digest FROM app_icon WHERE app_id=?", (row['id'],)).fetchone())
     app = {
         "id": row["id"],
         "repo": row["repo_full_name"],
@@ -288,11 +304,16 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True) -> dict[str, Any]
         "synced_at": row["synced_at"],
         "sync_error": row["sync_error"],
     }
-    publisher = connect().execute(
+    publisher = (related['publishers'].get(row['id']) if related is not None else connect().execute(
         "SELECT display_name FROM publisher WHERE app_id=?", (row["id"],)
-    ).fetchone()
+    ).fetchone())
     app["publisher_name"] = publisher["display_name"] if publisher else ""
-    if with_counts:
+    if with_counts and related is not None:
+        app['releases_count'] = related['counts'].get(row['id'], 0)
+        app['latest'] = related['latest'].get(row['id'])
+        app['latest_assets'] = related['assets'].get(row['id'], [])
+        app['latest_asset'] = app['latest_assets'][0] if app['latest_assets'] else None
+    elif with_counts:
         c = connect()
         n = c.execute(
             "SELECT COUNT(*) AS n FROM release WHERE app_id=? AND prerelease=0", (row["id"],)
@@ -307,6 +328,31 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True) -> dict[str, Any]
         app["latest_assets"] = latest_assets(c, row["id"])
         app["latest_asset"] = app["latest_assets"][0] if app["latest_assets"] else None
     return app
+
+
+def _app_related(rows) -> dict:
+    out = {name: {} for name in ('icons', 'publishers', 'counts', 'latest', 'assets')}
+    ids = [row['id'] for row in rows]
+    if not ids:
+        return out
+    c, marks = connect(), ','.join('?' for _ in ids)
+    out['icons'] = {r['app_id']: dict(r) for r in c.execute(f'SELECT app_id,digest FROM app_icon WHERE app_id IN ({marks})', ids)}
+    out['publishers'] = {r['app_id']: dict(r) for r in c.execute(f'SELECT app_id,display_name FROM publisher WHERE app_id IN ({marks})', ids)}
+    out['counts'] = {r['app_id']: r['n'] for r in c.execute(f'SELECT app_id,count(*) AS n FROM release WHERE app_id IN ({marks}) AND prerelease=0 GROUP BY app_id', ids)}
+    for row in c.execute(f"""WITH ranked AS (
+        SELECT app_id,tag,name,published_at,prerelease,
+        row_number() OVER (PARTITION BY app_id ORDER BY published_at DESC) AS rank
+        FROM release WHERE app_id IN ({marks}) AND prerelease=0)
+        SELECT * FROM ranked WHERE rank=1""", ids):
+        out['latest'][row['app_id']] = {name: row[name] for name in ('tag','name','published_at','prerelease')}
+    for row in c.execute(f"""WITH ranked AS (
+        SELECT r.app_id,r.id,row_number() OVER (PARTITION BY r.app_id ORDER BY r.published_at DESC,a.size DESC) AS rank
+        FROM release r JOIN asset a ON a.release_id=r.id
+        WHERE r.app_id IN ({marks}) AND r.prerelease=0 AND a.bundle_name<>'')
+        SELECT a.*,r.app_id FROM asset a JOIN ranked r ON r.id=a.release_id
+        WHERE r.rank=1 AND a.bundle_name<>'' ORDER BY a.size DESC,a.name""", ids):
+        out['assets'].setdefault(row['app_id'], []).append(_row_to_asset(row))
+    return out
 
 
 def latest_assets(c: sqlite3.Connection, app_id: int) -> list[dict[str, Any]]:
@@ -366,8 +412,9 @@ def list_apps(
         f"SELECT * FROM app WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",
         params + [page_size, offset],
     ).fetchall()
+    related = _app_related(rows)
     return {
-        "items": [_row_to_app(r) for r in rows],
+        "items": [_row_to_app(r, related=related) for r in rows],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -392,7 +439,8 @@ def list_published_by_account(account_id: str) -> list[dict[str, Any]]:
            WHERE publisher.account_id=? AND app.status='published'
            ORDER BY app.updated_at DESC, app.id DESC""", (account_id,)
     ).fetchall()
-    return [_row_to_app(row) for row in rows]
+    related = _app_related(rows)
+    return [_row_to_app(row, related=related) for row in rows]
 
 
 def hide_published_app(app_id: int, account_id: str) -> bool:
@@ -595,7 +643,8 @@ def set_account_avatar(account_id: str, avatar_url: str) -> None:
     c = connect()
     c.execute("""INSERT INTO account_avatar(account_id,avatar_url,updated_at)
                  VALUES (?,?,?) ON CONFLICT(account_id) DO UPDATE SET
-                 avatar_url=excluded.avatar_url, updated_at=excluded.updated_at""",
+                 avatar_url=excluded.avatar_url, updated_at=excluded.updated_at
+                 WHERE account_avatar.avatar_url<>excluded.avatar_url""",
               (account_id, avatar_url, int(time.time())))
     c.commit()
 
@@ -607,10 +656,10 @@ def update_account_display_name(account_id: str, display_name: str) -> None:
     if not display_name or display_name == account_id:
         return
     c = connect()
-    c.execute("UPDATE publisher SET display_name=? WHERE account_id=?",
-              (display_name[:100], account_id))
-    c.execute("UPDATE review SET display_name=? WHERE account_id=?",
-              (display_name[:100], account_id))
+    c.execute("UPDATE publisher SET display_name=? WHERE account_id=? AND display_name<>?",
+              (display_name[:100], account_id, display_name[:100]))
+    c.execute("UPDATE review SET display_name=? WHERE account_id=? AND display_name<>?",
+              (display_name[:100], account_id, display_name[:100]))
     c.commit()
 
 
@@ -888,7 +937,7 @@ def claim_catalog_task() -> dict[str, Any] | None:
     return task
 
 
-def fail_catalog_task(app_id: int, generation: int, error: str) -> None:
+def fail_catalog_task(app_id: int, generation: int, error: str, retry_after: int = 0) -> None:
     c = connect()
     with c:
         row = c.execute("""SELECT attempts FROM catalog_task
@@ -900,7 +949,7 @@ def fail_catalog_task(app_id: int, generation: int, error: str) -> None:
         c.execute("""UPDATE catalog_task SET status=?,next_attempt=?,last_error=?,
             updated_at=? WHERE app_id=? AND generation=?""",
             ("pending" if row["attempts"] < 4 else "failed",
-             now + min(300, 15 * 2 ** (row["attempts"] - 1)), error[:500], now,
+             now + max(retry_after, min(300, 15 * 2 ** (row["attempts"] - 1))), error[:500], now,
              app_id, generation))
         c.execute("UPDATE app SET sync_error=? WHERE id=?", (error[:500], app_id))
 
@@ -1154,3 +1203,84 @@ def finish_archive_inspection(token: str, prepared: dict[str, Any] | None, error
     else:
         c.execute("UPDATE submit_draft SET inspection_state='error',inspection_error=? WHERE token=?", (error[:300], token))
     c.commit()
+
+
+def enqueue_refresh(app_id: int, max_age_seconds: int = 60) -> dict[str, Any]:
+    """Short transaction: deduplicate all callers against one durable app task."""
+    c, now = connect(), int(time.time())
+    with c:
+        c.execute('BEGIN IMMEDIATE')
+        row = c.execute("SELECT status,synced_at FROM app WHERE id=?", (app_id,)).fetchone()
+        if not row or row['status'] != 'published':
+            raise ValueError('APP_NOT_FOUND')
+        task = c.execute('SELECT * FROM refresh_task WHERE app_id=?', (app_id,)).fetchone()
+        if task and task['status'] in ('pending', 'running'):
+            return dict(app_id=app_id, status=task['status'], queued=False)
+        if row['synced_at'] >= now - max_age_seconds:
+            return dict(app_id=app_id, status='fresh', queued=False)
+        if task and task['status'] == 'failed' and task['next_attempt'] > now:
+            return dict(app_id=app_id, status='failed', queued=False, message=task['last_error'])
+        c.execute("""INSERT INTO refresh_task(app_id,updated_at) VALUES (?,?)
+          ON CONFLICT(app_id) DO UPDATE SET status='pending',attempts=0,
+          next_attempt=0,last_error='',updated_at=excluded.updated_at""", (app_id, now))
+    return dict(app_id=app_id, status='pending', queued=True)
+
+
+def refresh_status(app_id: int) -> dict[str, Any]:
+    row = connect().execute('SELECT status,last_error,updated_at FROM refresh_task WHERE app_id=?', (app_id,)).fetchone()
+    return dict(row) if row else {'status': 'fresh', 'last_error': ''}
+
+
+def claim_refresh() -> dict[str, Any] | None:
+    c, now = connect(), int(time.time())
+    with c:
+        c.execute('BEGIN IMMEDIATE')
+        c.execute("UPDATE refresh_task SET status='cancelled' WHERE status='pending' AND app_id IN (SELECT id FROM app WHERE status<>'published')")
+        row = c.execute("""SELECT t.*,a.repo_full_name FROM refresh_task t JOIN app a ON a.id=t.app_id
+          WHERE t.status='pending' AND t.next_attempt<=? AND a.status='published'
+          AND NOT EXISTS (SELECT 1 FROM catalog_task ct WHERE ct.app_id=t.app_id AND ct.status IN ('pending','running'))
+          ORDER BY t.updated_at,t.app_id LIMIT 1""", (now,)).fetchone()
+        if row:
+            c.execute("UPDATE refresh_task SET status='running',attempts=attempts+1 WHERE app_id=?", (row['app_id'],))
+    return dict(row) if row else None
+
+
+def finish_refresh(app_id: int, error: str = '', retry_after: int = 0) -> None:
+    c, now = connect(), int(time.time())
+    with c:
+        row = c.execute('SELECT attempts FROM refresh_task WHERE app_id=?', (app_id,)).fetchone()
+        if not row:
+            return
+        wait = max(retry_after, min(300, 15 * 2 ** min(row['attempts'], 5)))
+        state = 'done' if not error else ('pending' if row['attempts'] < 4 else 'failed')
+        c.execute('UPDATE refresh_task SET status=?,last_error=?,updated_at=?,next_attempt=? WHERE app_id=?',
+                  (state, error[:500], now, now + wait if error else 0, app_id))
+
+
+_profile_lock = threading.Lock()
+_profile_sync: dict[tuple[str, str], tuple[str, str, float]] = {}
+
+def sync_account_profile(account_id: str, display_name: str, avatar_url: str) -> None:
+    """Verified profile values are unchanged for most polls: avoid all SQL for 5 minutes."""
+    key, now = (DB_PATH, account_id), time.time()
+    with _profile_lock:
+        previous = _profile_sync.get(key)
+        if previous and previous[:2] == (display_name, avatar_url) and previous[2] > now:
+            return
+        c = connect()
+        # Only changed values need a transaction; preserve the last public nickname/avatar on fallback.
+        rename = display_name and display_name != account_id and c.execute(
+            'SELECT 1 FROM publisher WHERE account_id=? AND display_name<>? UNION ALL SELECT 1 FROM review WHERE account_id=? AND display_name<>? LIMIT 1',
+            (account_id, display_name[:100], account_id, display_name[:100])).fetchone()
+        avatar = c.execute('SELECT avatar_url FROM account_avatar WHERE account_id=?', (account_id,)).fetchone() if avatar_url else None
+        update_avatar = bool(avatar_url and (not avatar or avatar['avatar_url'] != avatar_url))
+        if rename or update_avatar:
+            with c:
+                if rename:
+                    c.execute('UPDATE publisher SET display_name=? WHERE account_id=? AND display_name<>?', (display_name[:100], account_id, display_name[:100]))
+                    c.execute('UPDATE review SET display_name=? WHERE account_id=? AND display_name<>?', (display_name[:100], account_id, display_name[:100]))
+                if update_avatar:
+                    c.execute('INSERT OR REPLACE INTO account_avatar(account_id,avatar_url,updated_at) VALUES (?,?,?)', (account_id, avatar_url, int(now)))
+        if len(_profile_sync) >= 1024:
+            _profile_sync.clear()
+        _profile_sync[key] = (display_name, avatar_url, now + 300)

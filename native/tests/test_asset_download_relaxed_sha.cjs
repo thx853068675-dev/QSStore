@@ -187,3 +187,34 @@ test('an actually stalled connection still fails after a full resumed stall budg
   assert.equal(f.evidence().removed, 1);
   assert.ok(f.evidence().polls >= 60);
 });
+
+test('an HTTP 200 invalid package is discarded and the next mirror is validated', async () => {
+  const files = new Set(), started = [], validated = [];
+  const Download = loadAssetDownload({
+    '@kit.CoreFileKit': { fileIo: { accessSync: path => files.has(path),
+      unlinkSync: path => files.delete(path) } }
+  });
+  const job = { id: 'mirror', cachePath: '/sandbox/pkg.hap', sourceUrl: 'https://first/pkg.hap',
+    mirrorUrls: ['https://second/pkg.hap'], transferTaskId: '', expectedSha256: '' };
+  const downloader = new Download({}, { save: async () => {} });
+  downloader.downloadCurrentSource = async () => { started.push(job.sourceUrl); files.add(job.cachePath); job.expectedSha256 = 'a'.repeat(64); };
+  downloader.discardTransfer = async () => {};
+  await downloader.downloadAndVerify(job, undefined, async () => {
+    validated.push(job.sourceUrl);
+    if (job.sourceUrl.includes('first')) throw new Error('错误应用身份');
+  });
+  assert.deepEqual(started, ['https://first/pkg.hap', 'https://second/pkg.hap']);
+  assert.deepEqual(validated, started); assert.equal(files.has(job.cachePath), true);
+});
+test('final network interruption retains the partial transfer for restart', async () => {
+  const files = new Set(['/sandbox/pkg.hap.part']);
+  const Download = loadAssetDownload({ '@kit.CoreFileKit': { fileIo: {
+    accessSync: p => files.has(p), unlinkSync: p => files.delete(p) } } });
+  const job = { id: 'network', cachePath: '/sandbox/pkg.hap', sourceUrl: 'https://first/pkg.hap',
+    mirrorUrls: [], transferTaskId: 'live-agent', expectedSha256: '' };
+  const downloader = new Download({}, { save: async () => {} });
+  downloader.downloadCurrentSource = async () => { throw new Error('网络中断'); };
+  downloader.discardTransfer = async () => { job.transferTaskId = ''; };
+  await assert.rejects(downloader.downloadAndVerify(job), /网络中断/);
+  assert.equal(files.has(job.cachePath + '.part'), true); assert.equal(job.transferTaskId, 'live-agent');
+});

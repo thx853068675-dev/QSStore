@@ -22,7 +22,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
   alternateCertificate = false, backupFails = false) {
   const calls = { hapHashes: 0, profileHashes: 0, nativeSigns: 0,
     nativeVerifies: 0, installedPath: '', uninstalls: 0, selfStaged: '',
-    selectedCertId: '', identityBackups: 0 };
+    selectedCertId: '', identityBackups: 0, identityPrepares: 0 };
   let deviceVersion = installedVersion;
   const job = {
     sourceUrl: 'local', assetName: 'installer-signed.hap',
@@ -75,6 +75,13 @@ function fixture(installedVersion = 0, selfUpdate = false,
       }
     },
     '../data/SigningIdentity': { SigningIdentityRecovery: {
+      ensureForInstall: async () => {
+        calls.identityPrepares++;
+        if (calls.enrollmentError) throw new Error(calls.enrollmentError);
+        if (calls.cancelAfterPrepare) calls.cancelled = true;
+        return { certId: calls.missingIdentity ? '3' : '1',
+          privateKeyPath: '/private/key', certificatePath: '/private/cert' };
+      },
       load: async () => ({ certId: '1', privateKeyPath: '/private/key', certificatePath: '/private/cert' }),
       restore: async () => ({ certId: '1', privateKeyPath: '/private/key', certificatePath: '/private/cert' }),
       forJob: async () => ({ certId: '1', privateKeyPath: '/private/key', certificatePath: '/private/cert' }),
@@ -133,6 +140,47 @@ test('a stored matching certificate is selected before creating the update profi
   await runtime.ensureProfile(job);
   assert.equal(calls.selectedCertId, '2');
   assert.equal(job.signingCertId, '2');
+});
+
+test('local and online installation automatically prepare a missing signing identity before the Profile', async () => {
+  for (const source of ['local', 'https://github.com/example/app/releases/download/v1/app.hap']) {
+    const { job, calls, runtime } = fixture();
+    job.sourceUrl = source; calls.missingIdentity = true;
+    await runtime.ensureProfile(job);
+    assert.equal(calls.identityPrepares, 1);
+    assert.equal(calls.selectedCertId, '3');
+    assert.equal(job.signingCertId, '3');
+    assert.equal(job.profilePath, '/private/profile.p7b');
+    await runtime.sign(job);
+    assert.equal(calls.nativeSigns, 1);
+  }
+});
+
+test('unsigned installer update automatically prepares an identity and retains data-loss confirmation', async () => {
+  const { job, calls, runtime } = fixture(1, true, false);
+  job.assetName = 'installer-unsigned.hap'; calls.missingIdentity = true;
+  await assert.rejects(() => runtime.ensureProfile(job), /卸载旧版再安装/);
+  assert.equal(calls.identityPrepares, 1);
+  assert.equal(calls.selectedCertId, '3');
+  assert.equal(calls.uninstalls, 0);
+});
+
+test('failed automatic enrollment never advances to Profile creation or signing', async () => {
+  const { job, calls, runtime } = fixture(); calls.enrollmentError = 'AGC offline';
+  await assert.rejects(() => runtime.ensureProfile(job), /AGC offline/);
+  assert.equal(calls.selectedCertId, ''); assert.equal(calls.nativeSigns, 0);
+});
+
+test('cancellation after automatic enrollment prevents further device authorization', async () => {
+  const { job, calls, runtime } = fixture(); calls.cancelAfterPrepare = true;
+  await assert.rejects(() => runtime.ensureProfile(job), /已取消/);
+  assert.equal(calls.selectedCertId, '');
+});
+
+test('an already cancelled task does not start automatic certificate preparation', async () => {
+  const { job, calls, runtime } = fixture(); calls.cancelled = true;
+  await assert.rejects(() => runtime.ensureProfile(job), /已取消/);
+  assert.equal(calls.identityPrepares, 0); assert.equal(calls.selectedCertId, '');
 });
 test('unsigned installer update signs with the current installed certificate', async () => {
   const { job, calls, runtime } = fixture(1, true, true);

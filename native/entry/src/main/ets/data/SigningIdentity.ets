@@ -42,7 +42,7 @@ export class EnrollmentOptions {
   renewBeforeSeconds: number = 0;
 }
 
-// Login restores existing material. Only explicit enrollment may issue a certificate.
+// Login only restores material; an installation or manual enrollment can prepare a certificate.
 export class SigningIdentityRecovery {
   private static deletingCert: string = '';
   private static materialDir(context: common.UIAbilityContext): string {
@@ -411,15 +411,32 @@ export class SigningIdentityRecovery {
    */
   static async enroll(context: common.UIAbilityContext, account: DeveloperAccount,
     options: EnrollmentOptions = new EnrollmentOptions()): Promise<EnrollmentResult> {
-    if (SigningIdentityRecovery.enrolling) {
-      throw new Error('签名身份正在准备中，请稍候');
+    const scope = JSON.stringify([context.filesDir, account.userId, account.teamId,
+      options.allowLastSlot, options.renewBeforeSeconds]);
+    const pending = SigningIdentityRecovery.enrollment;
+    if (pending !== undefined) {
+      if (SigningIdentityRecovery.enrollmentScope === scope) return await pending;
+      // 手动续期与安装的策略可能不同，先等材料写完，再按各自策略核验。
+      try { await pending; } catch (_) {}
+      return SigningIdentityRecovery.enroll(context, account, options);
     }
-    SigningIdentityRecovery.enrolling = true;
+    const preparing = SigningIdentityRecovery.enrollLocked(context, account, options);
+    SigningIdentityRecovery.enrollment = preparing;
+    SigningIdentityRecovery.enrollmentScope = scope;
     try {
-      return await SigningIdentityRecovery.enrollLocked(context, account, options);
+      return await preparing;
     } finally {
-      SigningIdentityRecovery.enrolling = false;
+      SigningIdentityRecovery.enrollment = undefined;
+      SigningIdentityRecovery.enrollmentScope = '';
     }
+  }
+
+  /** 用户点击安装即准备签名身份；复用优先，确实没有才申请，不要求额外确认槽位。 */
+  static async ensureForInstall(context: common.UIAbilityContext,
+    account: DeveloperAccount): Promise<LocalSigningIdentity> {
+    const options = new EnrollmentOptions();
+    options.allowLastSlot = true;
+    return (await SigningIdentityRecovery.enroll(context, account, options)).identity;
   }
 
   private static async enrollLocked(context: common.UIAbilityContext,
@@ -538,12 +555,11 @@ export class SigningIdentityRecovery {
   private static readonly DEBUG_SLOT_LIMIT: number = 3;
 
   /**
-   * 同一时刻只允许一次「首次签名」编排。
-   *
-   * 两个入口同时进来时会各自以为私钥不存在、各自生成一把、各自申请一张证书：
-   * 既多占槽位，两把密钥还会互相覆盖。这里在进程内直接挡住第二次。
+   * 同一时刻只准备一份材料；相同请求共享结果，其他策略等待后再核验。
+   * 避免首次安装和手动申请同时生成私钥、重复占用证书槽位。
    */
-  private static enrolling: boolean = false;
+  private static enrollment: Promise<EnrollmentResult> | undefined = undefined;
+  private static enrollmentScope: string = '';
 
   /// 把 AGC 的 expireTime 统一成 epoch 秒；0 表示未提供。
   static expirySeconds(raw: Object | undefined): number {

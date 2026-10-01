@@ -25,6 +25,7 @@ import { ColorTint } from '../theme/ColorTint';
 @Component
 struct Detail {
   @StorageProp('darkMode') @Watch('syncPalette') darkMode: boolean = false;
+  @StorageProp('statusBarInset') statusBarInset: number = 0;
   @State private app: CatalogApp = new CatalogApp();
   @State private appIcon: image.PixelMap | null = null;
   /** 头部卡片底色：由图标主色调推导，取不到时用主题默认值。 */
@@ -932,7 +933,7 @@ struct Detail {
           .onClick(() => router.back())
         Text('应用详情').fontSize(16).fontWeight(FontWeight.Bold)
           .fontColor(this.colors().text)
-      }.width('100%').padding({ left: 18, right: 20, top: 6, bottom: 12 })
+      }.width('100%').padding({ left: 18, right: 20, top: 6 + this.statusBarInset, bottom: 12 })
       if (this.error.length > 0) {
         Text('无法读取应用详情').fontSize(15).fontColor(this.colors().textSecondary)
           .margin({ top: 28 })
@@ -1241,6 +1242,6 @@ struct Detail {
         .height('100%').width('100%').justifyContent(FlexAlign.Center)
         .backgroundColor(this.colors().scrim)
     }
-    }
+    }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
 }

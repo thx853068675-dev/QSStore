@@ -161,6 +161,7 @@ export class NativeJobRuntime implements JobRuntime {
   }
 
   async ensureProfile(job: InstallJob): Promise<void> {
+    JobCancellation.assertActive(job.id);
     if (LocalBundles.isSelfBundle(job.bundleName)) {
       await this.verifyOriginalInstaller(job);
       const installed = LocalBundles.selfSigningFingerprint();
@@ -169,7 +170,9 @@ export class NativeJobRuntime implements JobRuntime {
         throw new JobFailure(FailureKind.ACCOUNT, '无法读取当前安装器的签名身份，已暂停更新以避免覆盖失败');
       }
       const identity = this.account ?
-        await SigningIdentityRecovery.restore(this.context, this.account) : undefined;
+        job.allowDataLoss || this.unsignedInstallerAsset(job) ?
+          await SigningIdentityRecovery.ensureForInstall(this.context, this.account) :
+          await SigningIdentityRecovery.restore(this.context, this.account) : undefined;
       if (identity) {
         try {
           await this.ensureAccountProfile(job, identity);
@@ -193,15 +196,14 @@ export class NativeJobRuntime implements JobRuntime {
       return;
     }
     if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, '请先登录华为开发者账号');
-    const identity = await SigningIdentityRecovery.restore(this.context, this.account);
-    if (!identity) {
-      throw new JobFailure(FailureKind.ACCOUNT, '账号没有可复用的调试证书');
-    }
+    const identity = await SigningIdentityRecovery.ensureForInstall(this.context, this.account);
+    JobCancellation.assertActive(job.id);
     await this.ensureAccountProfile(job, identity);
   }
 
   private async ensureAccountProfile(job: InstallJob, identity: LocalSigningIdentity): Promise<void> {
     if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, '请先登录华为开发者账号');
+    JobCancellation.assertActive(job.id);
     let udid = '';
     try { udid = await this.device.udid(); }
     catch (_) { throw new JobFailure(FailureKind.DEVICE, '请重新连接无线调试后继续'); }

@@ -2,7 +2,7 @@ import { InstallReconnect } from '../jobs/InstallReconnect';
 import { LocalInstallTimeline, LocalTimelineView, LocalTimelineStep } from '../jobs/LocalInstallTimeline';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
 import { router, SymbolGlyphModifier } from '@kit.ArkUI';
-import { HdsTabs, hdsMaterial } from '@kit.UIDesignKit';
+import { HdsTabs, HdsNavigation, HdsNavigationTitleMode, ScrollEffectType, hdsMaterial } from '@kit.UIDesignKit';
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
@@ -144,6 +144,7 @@ struct FeaturedCardStars {
 struct Index {
   // 每个颜色使用点通过 colors() 读取此状态，主题变化会更新对应组件。
   @StorageProp('darkMode') darkMode: boolean = false;
+  @StorageProp('statusBarInset') statusBarInset: number = 0;
   @State private currentTab: number = 0;
   @State private pendingJobs: InstallJob[] = [];
   @State private installedJobs: InstallJob[] = [];
@@ -437,7 +438,7 @@ struct Index {
         // 复用成功是正常状态，不需要一行说明文字；这个字段继续用于报错与
         // 需要用户动作的提示（未配对、重置失败等）。
         this.identityMessage = identity ? '' :
-          '账号下还没有与本机配对的调试证书，可点「获取调试证书」申请一张';
+          '安装时会自动准备调试证书，也可在此提前获取';
         if (identity !== undefined) {
           await this.loadCertificateDetail(identity);
           await this.syncIdentityToCloud(getContext(this) as common.UIAbilityContext, identity);
@@ -2691,26 +2692,46 @@ struct Index {
   @Builder
   private discoverSearchHeader() {
     Stack({ alignContent: Alignment.Top }) {
-      // 只保留悬浮搜索框，不为整条吸顶区域绘制背景或阴影。
-      Row({ space: 8 }) {
-        SymbolGlyph($r('sys.symbol.magnifyingglass')).fontSize(17)
-          .fontColor([this.colors().textSecondary])
-        TextInput({ placeholder: '搜索应用名或仓库', text: this.searchText })
-          .layoutWeight(1).height(44).fontSize(14)
-          .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
-          .backgroundColor('#00000000').caretColor(this.colors().accent)
-          .padding({ left: 0, right: 0 })
-          .onChange((value: string) => this.onSearchInput(value))
-          .onSubmit(() => this.applySearch())
-        if (this.searchText.length > 0) {
-          Text('✕').fontSize(14).fontColor(this.colors().textSecondary)
-            .width(30).height(44).textAlign(TextAlign.Center)
-            .onClick(() => this.clearSearch())
-        }
-      }.width('calc(100% - 48vp)').height(46).padding({ left: 13, right: 7 })
-        .backgroundColor(this.colors().surface)
-        .border({ width: 0.5, color: this.colors().border }).borderRadius(15)
-        .margin({ top: 8 })
+      // 6.1 的 HDS 原生材质只开放在系统容器上，用无交互的标题栏承载背景。
+      // 材质仅覆盖搜索框，不给整条吸顶区域加遮罩，也不拦截输入和下拉手势。
+      Stack() {
+        HdsNavigation() {}
+          .titleMode(HdsNavigationTitleMode.MINI).hideBackButton(true).hideToolBar(true)
+          .mode(NavigationMode.Stack)
+          .titleBar({
+            content: { title: { mainTitle: '' } },
+            style: {
+              scrollEffectOpts: { enableScrollEffect: false,
+                scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR },
+              originalStyle: { backgroundStyle: { backgroundColor: this.darkMode ? '#80202D43' : '#80FFFFFF', maskExtraHeight: 0,
+                blurRadius: 24 } },
+              systemMaterialEffect: {
+                materialType: hdsMaterial.MaterialType.IMMERSIVE,
+                materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+              }
+            }
+          })
+          .width('100%').height(46).backgroundColor('#00000000')
+          .borderRadius(15).clip(true).hitTestBehavior(HitTestMode.None)
+          .accessibilityLevel('no-hide-descendants')
+        Row({ space: 8 }) {
+          SymbolGlyph($r('sys.symbol.magnifyingglass')).fontSize(17)
+            .fontColor([this.colors().textSecondary])
+          TextInput({ placeholder: '搜索应用名或仓库', text: this.searchText })
+            .layoutWeight(1).height(44).fontSize(14)
+            .fontColor(this.colors().text).placeholderColor(this.colors().textSecondary)
+            .backgroundColor('#00000000').caretColor(this.colors().accent)
+            .padding({ left: 0, right: 0 })
+            .onChange((value: string) => this.onSearchInput(value))
+            .onSubmit(() => this.applySearch())
+          if (this.searchText.length > 0) {
+            Text('✕').fontSize(14).fontColor(this.colors().textSecondary)
+              .width(30).height(44).textAlign(TextAlign.Center)
+              .onClick(() => this.clearSearch())
+          }
+        }.width('100%').height(46).padding({ left: 13, right: 7 })
+          .backgroundColor(this.darkMode ? '#A6202D43' : '#B3FFFFFF').borderRadius(15)
+      }.width('calc(100% - 48vp)').height(46).margin({ top: 8 })
     }.width('100%').height(70)
   }
 
@@ -3704,11 +3725,14 @@ struct Index {
       if (leavingLocal && !this.localPreviewReady) this.resetLocalTimeline();
       if (index === 2) { this.loadJobs(); this.loadMyApps(); this.loadUpdateCatalog(); }
       if (index === 3) {
+        // 安装流程可能刚自动准备了证书，进入「我的」后同步显示并备份。
+        this.recoverSigningIdentity();
         // 设备状态探完再扫「商店已安装」——扫描依赖 connected 与 installedVersion
         this.checkDevice().then(() => this.refreshCatalogInstallState());
       }
     })
     .width('100%').height('100%')
+    .padding({ top: this.statusBarInset })
     if (this.showAppConfig) {
       Column() {
         Scroll() { this.appConfigSheet() }
@@ -3742,6 +3766,6 @@ struct Index {
     } else if (!this.signedIn) {
       this.loginGate()
     }
-    }
+    }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
 }

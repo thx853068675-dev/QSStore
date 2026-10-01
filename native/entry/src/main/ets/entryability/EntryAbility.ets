@@ -1,19 +1,15 @@
 import { UIAbility, Want, AbilityConstant, Configuration, ConfigurationConstant } from '@kit.AbilityKit';
-import { window } from '@kit.ArkUI';
+import { window, display } from '@kit.ArkUI';
 
-/**
- * 浅色 / 深色两套系统栏配色，与 theme/Palette.ets 保持一致。
- * 之前这里是写死的浅色，系统切到深色后状态栏和导航栏仍是白底，
- * 页面与系统栏对不上，底部看起来像"多出一条"。
- */
+// 背景交给页面连续绘制，系统栏仅按主题切换文字颜色。
 const BARS_LIGHT: window.SystemBarProperties = {
-  statusBarColor: '#F9FAFD',
+  statusBarColor: '#00000000',
   statusBarContentColor: '#17213A',
   navigationBarColor: '#F9FAFD',
   navigationBarContentColor: '#17213A'
 };
 const BARS_DARK: window.SystemBarProperties = {
-  statusBarColor: '#0B1220',
+  statusBarColor: '#00000000',
   statusBarContentColor: '#EAF0F7',
   navigationBarColor: '#0B1220',
   navigationBarContentColor: '#EAF0F7'
@@ -21,6 +17,25 @@ const BARS_DARK: window.SystemBarProperties = {
 
 export default class EntryAbility extends UIAbility {
   private mainWindow?: window.Window;
+  private onAvoidAreaChange = (options: window.AvoidAreaOptions): void => {
+    if (options.type === window.AvoidAreaType.TYPE_SYSTEM ||
+      options.type === window.AvoidAreaType.TYPE_CUTOUT) this.syncStatusBarInset();
+  };
+
+  private syncStatusBarInset(): void {
+    const mainWindow = this.mainWindow;
+    if (!mainWindow) return;
+    try {
+      const system = mainWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+      const cutout = mainWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
+      const top = Math.max(system.topRect.height, cutout.topRect.height);
+      // onForeground / 避让回调可早于 loadContent，不能提前取得 UIContext。
+      const screen = display.getDisplayByIdSync(mainWindow.getWindowProperties().displayId);
+      AppStorage.setOrCreate<number>('statusBarInset', top / screen.densityPixels);
+    } catch (_) {
+      // 窗口切换或销毁中的暂态保留上一次安全区，下一次前台/避让回调重新读取。
+    }
+  }
 
   private isDark(): boolean {
     return this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
@@ -41,8 +56,7 @@ export default class EntryAbility extends UIAbility {
   onWindowStageCreate(windowStage: window.WindowStage): void {
     const mainWindow = windowStage.getMainWindowSync();
     this.mainWindow = mainWindow;
-    // 不启用 setWindowLayoutFullScreen：那会让页面钻到状态栏下面，
-    // 标题被压掉一截。
+    mainWindow.on('avoidAreaChange', this.onAvoidAreaChange);
     // 去掉系统导航栏与手势指示条：页面底部已经有自己的 HdsTabs 导航，
     // 系统那一条与应用风格不搭，而且在深色下会留一条浅色横条。
     // 注意 setWindowSystemBarEnable(['status']) 在部分设备上不生效，
@@ -50,7 +64,16 @@ export default class EntryAbility extends UIAbility {
     mainWindow.setSpecificSystemBarEnabled('navigation', false).catch(() => {});
     mainWindow.setSpecificSystemBarEnabled('navigationIndicator', false).catch(() => {});
     this.applyAppearance();
-    windowStage.loadContent('pages/Index');
+    // 页面底色延伸到系统栏下；内容按实际安全区避让，不写死状态栏高度。
+    mainWindow.setWindowLayoutFullScreen(true).catch(() => {}).then(() => {
+      this.syncStatusBarInset();
+      windowStage.loadContent('pages/Index');
+    });
+  }
+
+  onWindowStageDestroy(): void {
+    this.mainWindow?.off('avoidAreaChange', this.onAvoidAreaChange);
+    this.mainWindow = undefined;
   }
 
   onConfigurationUpdate(config: Configuration): void {
@@ -62,5 +85,6 @@ export default class EntryAbility extends UIAbility {
   onForeground(): void {
     // 从系统设置返回时也同步，覆盖部分设备在后台没有送达主题回调的情况。
     this.applyAppearance();
+    this.syncStatusBarInset();
   }
 }

@@ -59,7 +59,11 @@ async function fixture({ expiry = 1, backup = true, key = true,
     async certificates() { return state.rows; }
     async certificateUrl(id) { return id; }
     async download(id) { if (state.downloadError) throw Error('offline'); return id; }
-    async createCertificate() { state.creates++; return { id: '102', certObjectId: 'cert102', expireTime: 4102444800 }; }
+    async createCertificate() {
+      state.creates++;
+      const created = { id: '102', certType: 1, certObjectId: 'cert102', expireTime: 4102444800 };
+      state.rows.push(created); return created;
+    }
   }
   const { SigningIdentityRecovery: R, EnrollmentOptions } = load('data/SigningIdentity.ets', {
     '@kit.ArkData': { preferences: prefs }, '@kit.CoreFileKit': { fileIo: io },
@@ -185,6 +189,60 @@ test('expiry: enrollment renews with retained key when no replacement exists', a
   const result = await f.R.enroll(f.context, f.account);
   assert.equal(result.identity.certId, '102'); assert.equal(f.state.creates, 1);
   assert.equal(f.files.get(f.keyPath), KEY);
+});
+
+async function firstInstallFixture(slotsUsed = 0) {
+  const f = await fixture({ backup: false, key: false, allowGeneration: true });
+  f.state.rows = Array.from({ length: slotsUsed }, (_, i) => ({ id: String(200 + i),
+    certType: 1, certObjectId: 'unrelated', expireTime: 4102444800 }));
+  return f;
+}
+test('first installation automatically creates one identity and subsequent applications reuse it', async () => {
+  const f = await firstInstallFixture();
+  const first = await f.R.ensureForInstall(f.context, f.account);
+  const second = await f.R.ensureForInstall(f.context, f.account);
+  assert.equal(first.certId, '102'); assert.equal(second.certId, '102');
+  assert.equal(f.state.generated, 1); assert.equal(f.state.creates, 1);
+  assert.equal(f.files.get(f.keyPath), KEY);
+});
+test('automatic preparation can use the final free slot without an extra user confirmation', async () => {
+  const f = await firstInstallFixture(2);
+  const identity = await f.R.ensureForInstall(f.context, f.account);
+  assert.equal(identity.certId, '102'); assert.equal(f.state.creates, 1);
+  assert.equal(f.state.rows.length, 3);
+});
+test('a full account is reported without deleting unrelated certificates or issuing another one', async () => {
+  const f = await firstInstallFixture(3); const before = JSON.stringify(f.state.rows);
+  await assert.rejects(() => f.R.ensureForInstall(f.context, f.account), /槽位已满/);
+  assert.equal(f.state.creates, 0); assert.equal(JSON.stringify(f.state.rows), before);
+});
+test('concurrent automatic preparation shares one generated key and one certificate', async () => {
+  const f = await firstInstallFixture();
+  const identities = await Promise.all([f.R.ensureForInstall(f.context, f.account),
+    f.R.ensureForInstall(f.context, f.account)]);
+  assert.equal(identities[0].certId, identities[1].certId);
+  assert.equal(f.state.creates, 1); assert.equal(f.state.generated, 1);
+});
+test('installation waits for manual preparation and reuses its completed identity', async () => {
+  const f = await firstInstallFixture();
+  const [manual, automatic] = await Promise.all([f.R.enroll(f.context, f.account),
+    f.R.ensureForInstall(f.context, f.account)]);
+  assert.equal(manual.identity.certId, automatic.certId);
+  assert.equal(f.state.creates, 1); assert.equal(f.state.generated, 1);
+});
+test('uncertain backup availability during automatic preparation never consumes a certificate slot', async () => {
+  const f = await firstInstallFixture(); f.state.cloudError = true;
+  await assert.rejects(() => f.R.ensureForInstall(f.context, f.account), /暂时无法核实/);
+  assert.equal(f.state.creates, 0); assert.equal(f.state.generated, 0);
+});
+test('retry after a newly issued certificate download fails recovers that certificate without issuing twice', async () => {
+  const f = await firstInstallFixture(); f.state.downloadError = true;
+  await assert.rejects(() => f.R.ensureForInstall(f.context, f.account), /offline/);
+  assert.equal(f.state.creates, 1); assert.equal(f.state.generated, 1);
+  f.state.downloadError = false;
+  const identity = await f.R.ensureForInstall(f.context, f.account);
+  assert.equal(identity.certId, '102'); assert.equal(f.state.creates, 1);
+  assert.equal(f.state.generated, 1);
 });
 test('renewal before expiry skips the expiring certificate', async () => {
   const expiry = Math.floor(Date.now() / 1000) + 3600;

@@ -33,8 +33,9 @@ function deferred() {
 }
 function fixture() {
   const f = { snapshot: false, snapshots: 0, probes: [], reconciles: [] };
-  const ui = page('Index', ['updateInstallScanPrompt', 'openInstallScan',
+  const ui = page('Index', ['animateOverlay', 'updateInstallScanPrompt', 'openInstallScan',
     'confirmCatalogVersionsViaDevice', 'reconcileCatalogInstallState'], {
+    Curve: { EaseOut: 'ease-out' },
     getContext: () => ({}),
     InstalledAppRegistry: {
       hasCatalogSnapshot: () => f.snapshot,
@@ -48,6 +49,7 @@ function fixture() {
     }
   });
   Object.assign(ui, { apps: [{ id: 1, latestAsset: { bundleName: 'com.example.one' } }],
+    getUIContext: () => ({ animateTo: (_options, change) => change() }),
     installedJobs: [], forgetInstalledVersions() {}, installedVersions: new Map(), catalogProbeNames: [], catalogProbeBusy: false, catalogProbePending: [],
     updateCatalogReady: true, accountChecked: true, signedIn: true,
     initialScanDismissed: false, showReconnect: false, showSubmit: false, showAppConfig: false,

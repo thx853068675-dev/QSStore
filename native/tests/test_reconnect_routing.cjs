@@ -28,9 +28,12 @@ function load(file, mocks = {}) {
 function fixture() {
   const { InstallReconnect } = load('jobs/InstallReconnect');
   const make = file => {
-    const page = sourceMethods(file, ['observeReconnect', 'onPageHide'], { InstallReconnect });
+    const page = sourceMethods(file, ['animateOverlay', 'observeReconnect', 'onPageHide'], {
+      InstallReconnect, Curve: { EaseOut: 'ease-out' }
+    });
     Object.assign(page, { reconnectSubscription: -1, resumeJobId: '', reconnectJobId: '',
-      reconnectMessage: '', showReconnect: false });
+      reconnectMessage: '', showReconnect: false,
+      getUIContext: () => ({ animateTo: (_options, change) => change() }) });
     return page;
   };
   return { state: InstallReconnect, index: make('Index'), detail: make('Detail') };

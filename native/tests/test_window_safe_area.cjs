@@ -8,7 +8,8 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
 
 function fixture() {
   const storage = new Map(), handlers = new Map(), state = {
-    top: 144, cutout: 100, density: 3, unavailable: false, loaded: false, uiReads: 0
+    top: 144, cutout: 100, density: 3, unavailable: false, loaded: false, uiReads: 0,
+    events: [], failFullscreen: false, enabledBars: {}
   };
   const win = {
     on: (name, callback) => handlers.set(name, callback),
@@ -19,12 +20,18 @@ function fixture() {
     },
     getWindowProperties: () => ({ displayId: 7 }),
     getUIContext: () => { state.uiReads++; throw Error('UI content not loaded'); },
-    setSpecificSystemBarEnabled: async () => {},
-    setWindowSystemBarProperties: async bars => { state.bars = bars; },
+    setSpecificSystemBarEnabled: async (name, enabled) => { state.enabledBars[name] = enabled; },
+    setWindowBackgroundColor: color => { state.backgroundColor = color; },
+    setWindowSystemBarProperties: async bars => { state.events.push('bars'); state.bars = bars; },
     setWindowLayoutFullScreen: async enabled => {
       state.fullscreen = enabled;
       // The native callback can fire before the page has a UIContext.
       handlers.get('avoidAreaChange')({ type: 0 });
+      await Promise.resolve();
+      if (state.failFullscreen) throw Error('fullscreen rejected');
+      // A native layout transition may reset window defaults after an earlier bar update.
+      state.bars = { statusBarColor: '#FFFFFFFF' };
+      state.events.push('fullscreen-complete');
     }
   };
   const exports = {};
@@ -44,7 +51,13 @@ function fixture() {
   const ability = new exports.default();
   ability.context = { config: { colorMode: 0 }, filesDir: '/sandbox' };
   const stage = { getMainWindowSync: () => win,
-    loadContent: page => { assert.equal(page, 'pages/Index'); state.loaded = true; } };
+    loadContent: (page, callback) => {
+      assert.equal(page, 'pages/Index'); state.loaded = true;
+      state.events.push('load');
+      // Loading the content can restore component defaults too.
+      state.bars = { statusBarColor: '#FFFFFFFF' };
+      callback({ code: 0 });
+    } };
   return { ability, stage, state, storage, handlers };
 }
 
@@ -59,6 +72,27 @@ test('edge-to-edge startup reads real insets before UI content without obtaining
   assert.equal(f.storage.get('statusBarInset'), 48);
   assert.equal(f.state.bars.statusBarColor, '#00000000');
   assert.equal(f.state.bars.navigationBarColor, '#00000000');
+  assert.equal(f.state.backgroundColor, '#00000000');
+  const transition = f.state.events.indexOf('fullscreen-complete');
+  const load = f.state.events.indexOf('load');
+  assert.ok(f.state.events.slice(transition + 1, load).includes('bars'));
+  assert.ok(f.state.events.slice(load + 1).includes('bars'));
+});
+
+test('a rejected full-screen transition still loads the page with transparent bars', async () => {
+  const f = fixture(); f.state.failFullscreen = true;
+  f.ability.onWindowStageCreate(f.stage);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.state.loaded, true);
+  assert.equal(f.state.bars.statusBarColor, '#00000000');
+});
+
+test('a destroyed stage does not load content after its full-screen transition settles', async () => {
+  const f = fixture();
+  f.ability.onWindowStageCreate(f.stage);
+  f.ability.onWindowStageDestroy();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.state.loaded, false);
 });
 
 test('cutout and density changes update the inset; unavailable windows retain the last value', async () => {
@@ -85,4 +119,18 @@ test('theme changes keep the status bar transparent while switching text contras
   assert.equal(f.state.bars.statusBarColor, '#00000000');
   assert.equal(f.state.bars.navigationBarColor, '#00000000');
   assert.notEqual(f.state.bars.statusBarContentColor, lightText);
+});
+
+test('returning from settings restores transparent bars and hides restored navigation chrome', async () => {
+  const f = fixture();
+  f.ability.onWindowStageCreate(f.stage);
+  await new Promise(resolve => setImmediate(resolve));
+  f.state.enabledBars.navigation = true;
+  f.state.enabledBars.navigationIndicator = true;
+  f.state.bars = { statusBarColor: '#FFFFFFFF' };
+  f.ability.onForeground();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.state.bars.statusBarColor, '#00000000');
+  assert.equal(f.state.enabledBars.navigation, false);
+  assert.equal(f.state.enabledBars.navigationIndicator, false);
 });

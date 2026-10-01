@@ -41,12 +41,23 @@ export default class EntryAbility extends UIAbility {
     return this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
   }
 
-  private applyAppearance(): void {
+  private applyAppearance(): Promise<void> {
     const dark = this.isDark();
     // 页面据此切换调色板（theme/Palette.ets）。
     AppStorage.setOrCreate<boolean>('darkMode', dark);
-    this.mainWindow?.setWindowSystemBarProperties(dark ? BARS_DARK : BARS_LIGHT)
-      .catch(() => {});
+    const mainWindow = this.mainWindow;
+    if (!mainWindow) return Promise.resolve();
+    try {
+      mainWindow.setWindowBackgroundColor('#00000000');
+    } catch (error) {
+      console.warn('Unable to clear window background: ' + JSON.stringify(error));
+    }
+    return mainWindow.setWindowSystemBarProperties(dark ? BARS_DARK : BARS_LIGHT)
+      .catch((error: Error) => {
+        console.warn('Unable to apply transparent system bars: ' + JSON.stringify(error));
+      }).then(() => mainWindow.setSpecificSystemBarEnabled('navigation', false).catch(() => {}))
+      // 从设置/输入法回到前台时，系统可能恢复指示条；跟随外观一起重新同步。
+      .then(() => mainWindow.setSpecificSystemBarEnabled('navigationIndicator', false).catch(() => {}));
   }
 
   onCreate(_want: Want, _launchParam: AbilityConstant.LaunchParam): void {
@@ -57,17 +68,21 @@ export default class EntryAbility extends UIAbility {
     const mainWindow = windowStage.getMainWindowSync();
     this.mainWindow = mainWindow;
     mainWindow.on('avoidAreaChange', this.onAvoidAreaChange);
-    // 去掉系统导航栏与手势指示条：页面底部已经有自己的 HdsTabs 导航，
-    // 系统那一条与应用风格不搭，而且在深色下会留一条浅色横条。
-    // 注意 setWindowSystemBarEnable(['status']) 在部分设备上不生效，
-    // 要用 setSpecificSystemBarEnabled 逐个关。
-    mainWindow.setSpecificSystemBarEnabled('navigation', false).catch(() => {});
-    mainWindow.setSpecificSystemBarEnabled('navigationIndicator', false).catch(() => {});
-    this.applyAppearance();
-    // 页面底色延伸到系统栏下；内容按实际安全区避让，不写死状态栏高度。
-    mainWindow.setWindowLayoutFullScreen(true).catch(() => {}).then(() => {
+    // 先完成全屏，再设置透明系统栏，避免全屏切换覆盖之前的颜色。
+    mainWindow.setWindowLayoutFullScreen(true).catch((error: Error) => {
+      console.warn('Unable to enable full-screen layout: ' + JSON.stringify(error));
+    }).then(() => this.applyAppearance()).then(() => {
+      if (this.mainWindow !== mainWindow) return;
       this.syncStatusBarInset();
-      windowStage.loadContent('pages/Index');
+      windowStage.loadContent('pages/Index', (error) => {
+        if (error.code) {
+          console.warn('Unable to load home page: ' + JSON.stringify(error));
+          return;
+        }
+        // 页面加载后再同步，覆盖组件初始化和系统主题切换的窗口默认值。
+        this.applyAppearance();
+        this.syncStatusBarInset();
+      });
     });
   }
 

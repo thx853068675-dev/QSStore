@@ -28,7 +28,7 @@ export class Palette {
   private pick(light: string, dark: string): string { return this.dark ? dark : light; }
 
   /** 页面底色 */
-  get bg(): string { return this.pick('#F9FAFD', '#0B1220'); }
+  get bg(): string { return this.pick('#F7F9FC', '#0B1220'); }
   /** 卡片 / 浮层底色 */
   get surface(): string { return this.pick('#FFFFFF', '#161F2E'); }
   /** 卡片内部的次级填充（条目底、输入框底） */
@@ -43,9 +43,9 @@ export class Palette {
   /** 正文 */
   get textBody(): string { return this.pick('#465977', '#C3CEDD'); }
   /** 次要说明 */
-  get textSecondary(): string { return this.pick('#66758D', '#9FB0C7'); }
+  get textSecondary(): string { return this.pick('#5F6E85', '#A6B5CB'); }
   /** 最弱：占位、脚注 */
-  get textTertiary(): string { return this.pick('#98A3B5', '#71829A'); }
+  get textTertiary(): string { return this.pick('#64728A', '#8D9DB5'); }
 
   /** 主色 */
   get accent(): string { return this.pick('#2463E9', '#6FA0FF'); }
@@ -73,7 +73,7 @@ export class Palette {
   get success(): string { return this.pick('#257B65', '#5DD3AE'); }
   get successSoft(): string { return this.pick('#E7F5EF', '#14322A'); }
   /** 评分星 / 提示 */
-  get star(): string { return this.pick('#FFB431', '#FFC65C'); }
+  get star(): string { return this.pick('#A5690F', '#FFC65C'); }
 
   /** 浮层遮罩 */
   get scrim(): string { return this.pick('#660B1530', '#99060B14'); }

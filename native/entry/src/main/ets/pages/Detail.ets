@@ -1,7 +1,7 @@
 import { InstallReconnect } from '../jobs/InstallReconnect';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
 import { isPending } from '../jobs/RecoveryPlanner';
-import { promptAction, router, SymbolGlyphModifier } from '@kit.ArkUI';
+import { promptAction, router, SymbolGlyphModifier, LengthMetrics } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { CatalogApp } from '../data/CatalogApp';
@@ -19,6 +19,7 @@ import { InstallJob, InstallStage } from '../jobs/InstallJob';
 import { AppReview } from '../data/StoreActions';
 import { AccountSession, DeveloperAccount } from '../data/DeveloperAccount';
 import { Palette } from '../theme/Palette';
+import { StoreIconButton, StoreLayout } from '../theme/StoreDesign';
 import { ColorTint } from '../theme/ColorTint';
 
 @Entry
@@ -147,9 +148,9 @@ struct Detail {
         if (jobId.length > 0) {
           this.reconnectJobId = jobId;
           this.reconnectMessage = '';
-          this.showReconnect = true;
+          this.animateOverlay(() => { this.showReconnect = true; });
         } else if (this.reconnectJobId.length > 0) {
-          this.showReconnect = false;
+          this.animateOverlay(() => { this.showReconnect = false; });
         }
       });
     }
@@ -737,7 +738,7 @@ struct Detail {
         this.reconnectMessage = bridge.connectionFailureMessage();
         return;
       }
-      this.showReconnect = false;
+      this.animateOverlay(() => { this.showReconnect = false; });
       this.reconnectMessage = '';
       const jobId = this.reconnectJobId || this.activeInstallId;
       InstallReconnect.clear(jobId);
@@ -783,11 +784,12 @@ struct Detail {
       Row() {
         Text('连接无线调试').fontSize(22).fontWeight(FontWeight.Bold)
           .fontColor(this.colors().text).layoutWeight(1)
-        Text('×').fontSize(26).fontColor(this.colors().textSecondary)
-          .onClick(() => { if (!this.reconnectBusy) { InstallReconnect.clear(this.reconnectJobId); this.showReconnect = false; } })
+        StoreIconButton({ active: !this.reconnectBusy, action: () => {
+          InstallReconnect.clear(this.reconnectJobId); this.animateOverlay(() => { this.showReconnect = false; });
+        } })
       }.width('100%')
       Text('前往系统设置，开启无线调试').fontSize(12).padding({ top: 3, bottom: 3 })
-        .fontColor(this.colors().accent).width('100%')
+        .fontColor(this.colors().accent).width('100%').height(44)
         .decoration({ type: TextDecorationType.Underline, color: this.colors().accent })
         .onClick(() => new HdcDeviceBridge(getContext(this) as common.UIAbilityContext)
           .openWirelessSettings())
@@ -798,7 +800,15 @@ struct Detail {
         .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
         .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
         .onChange((value: string) => { this.reconnectPort = value; })
-      Button(this.reconnectBusy ? '正在连接…' : '连接并继续安装')
+      Button({ type: ButtonType.Capsule }) {
+        Row({ space: 8 }) {
+          if (this.reconnectBusy) {
+            LoadingProgress().width(18).height(18).color(this.colors().onAccent)
+          }
+          Text(this.reconnectBusy ? '正在连接…' : '连接并继续安装')
+            .fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.colors().onAccent)
+        }.justifyContent(FlexAlign.Center)
+      }
         .width('100%').height(48).enabled(!this.reconnectBusy)
         .backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
         .onClick(() => this.reconnect())
@@ -806,7 +816,9 @@ struct Detail {
         Text(this.reconnectMessage).fontSize(12).fontColor(this.colors().textSecondary)
           .width('100%').maxLines(3)
       }
-    }.padding(21).width('90%').backgroundColor(this.colors().surface).borderRadius(23)
+    }.padding(24).width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth })
+      .backgroundColor(this.colors().surface).borderRadius(28)
+      .transition(TransitionEffect.translate({ y: 16 }))
   }
 
   /**
@@ -871,15 +883,20 @@ struct Detail {
     return '安装包 ' + Math.ceil(size) + ' B';
   }
 
+  private animateOverlay(change: () => void): void {
+    this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, change);
+  }
+
   build() {
     Stack({ alignContent: Alignment.Center }) {
     Column() {
       Row() {
-        Text('‹').fontSize(30).fontColor(this.colors().text).width(38)
-          .onClick(() => router.back())
+        StoreIconButton({ symbol: $r('sys.symbol.chevron_left'), label: '返回',
+          action: () => router.back() })
         Text('应用详情').fontSize(16).fontWeight(FontWeight.Bold)
           .fontColor(this.colors().text)
-      }.width('100%').padding({ left: 18, right: 20, top: 6 + this.statusBarInset, bottom: 12 })
+      }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + 40 })
+        .padding({ left: 16, right: 20, top: 6 + this.statusBarInset, bottom: 8 })
       if (this.error.length > 0) {
         Text('无法读取应用详情').fontSize(15).fontColor(this.colors().textSecondary)
           .margin({ top: 28 })
@@ -901,8 +918,8 @@ struct Detail {
                   }
                   Column({ space: 7 }) {
                     Text(this.app.displayName).fontSize(25).fontWeight(FontWeight.Bold)
-                      .fontColor(this.colors().text).maxLines(1)
-                    Row({ space: 6 }) {
+                      .fontColor(this.colors().text).maxLines(2)
+                    Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(6) } }) {
                       Text('版本 ' + this.selectedVersionLabel()).fontSize(11).fontWeight(FontWeight.Medium)
                         .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
                         .backgroundColor(this.colors().surface).borderRadius(8).maxLines(1)
@@ -912,8 +929,8 @@ struct Detail {
                     }.width('100%')
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                 }.width('100%')
-                Text(this.app.summary).fontSize(13).fontColor(this.colors().textBody)
-                  .lineHeight(20).maxLines(3).width('100%')
+                Text(this.app.summary).fontSize(14).fontColor(this.colors().textBody)
+                  .lineHeight(22).maxLines(3).width('100%')
                 Row({ space: 8 }) {
                   Text('由 ' + this.app.publisherName + ' 上架').fontSize(11)
                     .fontColor(this.colors().textSecondary).maxLines(1)
@@ -936,29 +953,31 @@ struct Detail {
                     .backgroundColor(this.colors().accentSoft).borderRadius(7)
                   Text('来源仓库').fontSize(11).fontColor(this.colors().textTertiary)
                     .layoutWeight(1).maxLines(1)
+                  SymbolGlyph($r('sys.symbol.arrow_up_right')).fontSize(15)
+                    .fontColor([this.colors().textSecondary])
                 }.width('100%')
                 Text(this.repoPath()).fontSize(14).fontWeight(FontWeight.Medium)
                   .fontColor(this.colors().text).maxLines(1)
               }.alignItems(HorizontalAlign.Start).width('100%').padding(16)
                 .backgroundColor(this.colors().surface).borderRadius(17)
+                .accessibilityText('来源仓库 ' + this.repoPath() + '，在浏览器打开')
                 .onClick(() => this.openRepo())
               Row({ space: 8 }) {
                 Text('版本记录').fontSize(18).fontWeight(FontWeight.Bold)
                   .fontColor(this.colors().text).layoutWeight(1)
-                Text(String(this.releaseTotal) + ' 个版本').fontSize(11)
-                  .fontColor(this.colors().textTertiary)
-                Button(this.showPreviewReleases ? '预览版 ⇄' : '正式版 ⇄')
-                  .height(28).fontSize(11).padding({ left: 10, right: 10 })
+                Button(this.showPreviewReleases ? '预览版' : '正式版')
+                  .height(40).fontSize(12).padding({ left: 12, right: 12 })
                   .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
-                  .borderRadius(9).enabled(!this.releaseMoreBusy && !this.refreshBusy)
+                  .borderRadius(14).enabled(!this.releaseMoreBusy && !this.refreshBusy)
+                  .accessibilityText(this.showPreviewReleases ? '切换为正式版' : '显示预览版')
                   .onClick(() => this.togglePreviewReleases())
                 // 采集器按周期跑，刚发布的版本要等下一轮；这里可以即时重采
                 if (this.refreshBusy) {
-                  LoadingProgress().width(16).height(16).margin({ left: 10 })
+                  Row() { LoadingProgress().width(20).height(20) }.width(44).height(44)
+                    .justifyContent(FlexAlign.Center)
                 } else {
-                  Text('检查更新').fontSize(11).fontColor(this.colors().accent)
-                    .margin({ left: 10 })
-                    .onClick(() => this.checkForUpdates())
+                  StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '检查更新',
+                    action: () => this.checkForUpdates() })
                 }
               }.width('100%')
               if (this.currentRelease()) {
@@ -979,12 +998,12 @@ struct Detail {
                     .optionBgColor(this.colors().surface)
                     .menuBackgroundColor(this.colors().surface).menuBackgroundBlurStyle(BlurStyle.NONE)
                     .backgroundColor(this.colors().fill)
-                    .width('100%')
+                    .width('100%').height(44)
                     .onSelect((index: number) => this.selectRelease(index))
                   if (this.currentRelease()!.notes.length > 0) {
                     Text(this.displayNotes(this.currentRelease()!.notes, this.currentRelease()!.name))
-                      .fontSize(10).fontColor(this.colors().textBody)
-                      .lineHeight(17)
+                      .fontSize(11).fontColor(this.colors().textBody)
+                      .lineHeight(18)
                       .maxLines(this.expandedReleaseTag === this.currentRelease()!.tag ? 80 : 3)
                       .width('100%')
                     if (this.displayNotes(this.currentRelease()!.notes,
@@ -1061,39 +1080,47 @@ struct Detail {
               // 发布区默认收起：收起时只有一行入口，点 ✎ 展开
               Column({ space: 9 }) {
                 if (!this.reviewComposeOpen) {
-                  Row({ space: 9 }) {
-                    Text('写下你的使用感受…').fontSize(12)
-                      .fontColor(this.colors().textTertiary).layoutWeight(1).maxLines(1)
-                    Text('✎ 写评价').fontSize(12).fontColor(this.colors().accent)
-                  }.width('100%').padding({ left: 13, right: 13, top: 12, bottom: 12 })
-                    .backgroundColor(this.colors().fill).borderRadius(11)
+                  Button({ type: ButtonType.Normal }) {
+                    Row({ space: 9 }) {
+                      Text('写下你的使用感受…').fontSize(12)
+                        .fontColor(this.colors().textTertiary).layoutWeight(1).maxLines(1)
+                      Text('✎ 写评价').fontSize(12).fontColor(this.colors().accent)
+                    }.width('100%').height(44).padding({ left: 13, right: 13 })
+                  }.width('100%').height(44).padding(0)
+                    .backgroundColor(this.colors().fill).borderRadius(11).stateEffect(true)
+                    .accessibilityText('写评价')
                     .onClick(() => { this.reviewComposeOpen = true; })
                 } else {
-                Row({ space: 3 }) {
-                  ForEach([1, 2, 3, 4, 5], (star: number) => {
-                    Text(star <= this.reviewStars ? '★' : '☆')
-                      .fontSize(20).fontColor(this.colors().star)
-                      .onClick(() => { this.reviewStars = star; })
-                  }, (star: number) => String(star))
-                  Blank()
+                  Row({ space: 3 }) {
+                    ForEach([1, 2, 3, 4, 5], (star: number) => {
+                      Button({ type: ButtonType.Circle }) {
+                        Text(star <= this.reviewStars ? '★' : '☆').fontSize(26).fontColor(this.colors().star)
+                    }.width(44).height(44).padding(0).backgroundColor('#00000000')
+                      .enabled(!this.reviewBusy)
+                        .accessibilityText('评 ' + star + ' 星')
+                        .onClick(() => { this.reviewStars = star; })
+                    }, (star: number) => String(star))
+                  }.width('100%')
+                  TextArea({ placeholder: this.signedIn ? '写下你的使用感受' : '登录开发者账号后可评价',
+                    text: this.reviewText })
+                    .height(100).fontSize(14).backgroundColor(this.colors().fill).borderRadius(14)
+                    .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
+                    .caretColor(this.colors().accent)
+                    .enabled(!this.reviewBusy)
+                    .onChange((value: string) => { this.reviewText = value; })
                   Button(this.reviewBusy ? '提交中…' : '发布评价')
-                    .height(30).fontSize(11).borderRadius(10)
+                    .height(44).width('100%').fontSize(13).borderRadius(14)
                     .backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
                     .enabled(!this.reviewBusy)
                     .onClick(() => this.sendReview())
-                }.width('100%')
-                TextArea({ placeholder: this.signedIn ? '写下你的使用感受' : '登录开发者账号后可评价',
-                  text: this.reviewText })
-                  .height(58).fontSize(12).backgroundColor(this.colors().fill).borderRadius(11)
-                  .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
-                  .caretColor(this.colors().accent)
-                  .onChange((value: string) => { this.reviewText = value; })
-                if (this.reviewMessage.length > 0) {
-                  Text(this.reviewMessage).fontSize(11).fontColor(this.colors().textSecondary)
-                    .width('100%').maxLines(3)
-                }
-                Text('收起').fontSize(11).fontColor(this.colors().textTertiary)
-                  .onClick(() => { this.reviewComposeOpen = false; })
+                  if (this.reviewMessage.length > 0) {
+                    Text(this.reviewMessage).fontSize(11).fontColor(this.colors().textSecondary)
+                      .width('100%').maxLines(3)
+                  }
+                  Button('收起').height(44).fontSize(12).fontColor(this.colors().textSecondary)
+                    .backgroundColor(this.colors().fill).borderRadius(14)
+                    .enabled(!this.reviewBusy)
+                    .onClick(() => { this.reviewComposeOpen = false; })
                 }
               }.alignItems(HorizontalAlign.Start).width('100%').padding(14)
                 .backgroundColor(this.colors().surface).borderRadius(17)
@@ -1103,11 +1130,11 @@ struct Detail {
                     Column({ space: 7 }) {
                       Row({ space: 9 }) {
                         if (review.avatarUrl.length > 0) {
-                          Image(review.avatarUrl).width(30).height(30).borderRadius(15)
+                          Image(review.avatarUrl).width(36).height(36).borderRadius(18)
                         } else {
                           Text(review.displayName.length > 0 ? review.displayName.substring(0, 1) : '华')
-                            .fontSize(13).fontColor(this.colors().accent).width(30).height(30)
-                            .textAlign(TextAlign.Center).backgroundColor(this.colors().accentSoft).borderRadius(15)
+                            .fontSize(14).fontColor(this.colors().accent).width(36).height(36)
+                            .textAlign(TextAlign.Center).backgroundColor(this.colors().accentSoft).borderRadius(18)
                         }
                         Column({ space: 2 }) {
                           Text(review.displayName).fontSize(13).fontWeight(FontWeight.Medium)
@@ -1117,8 +1144,8 @@ struct Detail {
                         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                         Text('★'.repeat(review.stars)).fontSize(11).fontColor(this.colors().star)
                       }.width('100%')
-                      Text(review.body).fontSize(12).fontColor(this.colors().textBody)
-                        .lineHeight(17).width('100%')
+                      Text(review.body).fontSize(13).fontColor(this.colors().textBody)
+                        .lineHeight(21).width('100%')
                       Divider().color(this.colors().border).strokeWidth(0.5)
                     }.alignItems(HorizontalAlign.Start).width('100%')
                       .padding({ top: 11, bottom: 9 })
@@ -1147,39 +1174,44 @@ struct Detail {
                 }.width('100%').padding({ left: 14, right: 14, top: 2, bottom: 6 })
                   .backgroundColor(this.colors().surface).borderRadius(17)
               }
-            }.width('100%').padding({ left: 20, right: 20, top: 10, bottom: 115 })
-          }.width('100%').height('100%')
+            }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + 40 })
+              .padding({ left: 20, right: 20, top: 10, bottom: 115 })
+          }.width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Off)
           Column({ space: 7 }) {
             // 有计数时用原生平滑填充，其余阶段只在底边显示细流光，主体与文案保持稳定。
-            Stack({ alignContent: Alignment.Center }) {
-              if (this.downloadBusy && this.installProgressDeterminate()) {
-                Progress({ value: this.downloadPercent, total: 100, type: ProgressType.Capsule })
-                  .width('100%').height(52)
-                  .color('#30FFFFFF').backgroundColor('#00000000')
-                  .style({ borderWidth: 0, borderColor: '#00000000',
-                    showDefaultPercentage: false, enableScanEffect: false, enableSmoothEffect: true })
-                  .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+            Button({ type: ButtonType.Normal }) {
+              Stack({ alignContent: Alignment.Center }) {
+                if (this.downloadBusy && this.installProgressDeterminate()) {
+                  Progress({ value: this.downloadPercent, total: 100, type: ProgressType.Capsule })
+                    .width('100%').height(52)
+                    .color('#30FFFFFF').backgroundColor('#00000000')
+                    .style({ borderWidth: 0, borderColor: '#00000000',
+                      showDefaultPercentage: false, enableScanEffect: false, enableSmoothEffect: true })
+                    .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+                }
+                if (this.downloadBusy && !this.installProgressDeterminate()) {
+                  Stack({ alignContent: Alignment.Start }) {
+                    Row().width('100%').height(2).backgroundColor('#10FFFFFF')
+                    Row().width(80).height(2)
+                      .linearGradient({ angle: 90,
+                        colors: [['#00FFFFFF', 0], ['#80FFFFFF', 0.5], ['#00FFFFFF', 1]] })
+                      .translate({ x: this.installGlowForward ? Math.max(0, this.installButtonWidth - 112) : 0 })
+                      .animation({ duration: 1800, curve: Curve.EaseInOut,
+                        iterations: -1, playMode: PlayMode.Alternate })
+                      .onAppear(() => { this.installGlowForward = true; })
+                      .onDisAppear(() => { this.installGlowForward = false; })
+                  }.width('calc(100% - 32vp)').height(2).borderRadius(1).clip(true)
+                    .position({ left: 16, bottom: 6 })
+                    .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+                }
+                Text(this.installButtonLabel())
+                  .fontSize(17).fontWeight(FontWeight.Medium)
+                  .fontColor(this.colors().onAccent)
               }
-              if (this.downloadBusy && !this.installProgressDeterminate()) {
-                Stack({ alignContent: Alignment.Start }) {
-                  Row().width('100%').height(2).backgroundColor('#10FFFFFF')
-                  Row().width(80).height(2)
-                    .linearGradient({ angle: 90,
-                      colors: [['#00FFFFFF', 0], ['#80FFFFFF', 0.5], ['#00FFFFFF', 1]] })
-                    .translate({ x: this.installGlowForward ? Math.max(0, this.installButtonWidth - 112) : 0 })
-                    .animation({ duration: 1800, curve: Curve.EaseInOut,
-                      iterations: -1, playMode: PlayMode.Alternate })
-                    .onAppear(() => { this.installGlowForward = true; })
-                    .onDisAppear(() => { this.installGlowForward = false; })
-                }.width('calc(100% - 32vp)').height(2).borderRadius(1).clip(true)
-                  .position({ left: 16, bottom: 6 })
-                  .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
-              }
-              Text(this.installButtonLabel())
-                .fontSize(17).fontWeight(FontWeight.Medium)
-                .fontColor(this.colors().onAccent)
+              .width('100%').height(52)
             }
-            .width('100%').height(52)
+            .width('100%').height(52).padding(0)
+            .stateEffect(true).accessibilityText(this.installButtonLabel())
             .backgroundColor(this.colors().accent)
             .borderRadius(18).clip(true)
             .onSizeChange((_old: SizeOptions, size: SizeOptions) => {
@@ -1198,7 +1230,7 @@ struct Detail {
               if (installed !== undefined && !this.updateAvailable()) this.openInstalled(installed);
               else this.downloadSelected();
             })
-          }.width('86%').margin({ bottom: 20 })
+          }.width('calc(100% - 48vp)').constraintSize({ maxWidth: 560 }).margin({ bottom: 20 })
             .backgroundColor('#00000000')
         }.layoutWeight(1).width('100%')
       }
@@ -1207,7 +1239,10 @@ struct Detail {
       Column() { this.reconnectSheet() }
         .height('100%').width('100%').justifyContent(FlexAlign.Center)
         .backgroundColor(this.colors().scrim)
+        .transition(TransitionEffect.opacity(0))
     }
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
   }
 }

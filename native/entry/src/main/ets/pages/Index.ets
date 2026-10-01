@@ -2652,15 +2652,19 @@ struct Index {
   @Builder
   private discoverSearchHeader() {
     Stack({ alignContent: Alignment.Top }) {
-      // 离屏 alpha 蒙版让背景模糊与色调一起向下消退，不模糊搜索文字。
+      // 顶部用不透明页面底色遮住滚动内容，下半段连同模糊逐渐消退。
       Stack() {
         Column().width('100%').height(82)
-          .backgroundColor(this.darkMode ? '#D90B1220' : '#DCF9FAFD')
+          .backgroundColor(this.colors().bg)
           .backgroundBlurStyle(BlurStyle.Thick, { colorMode: ThemeColorMode.SYSTEM })
         Column().width('100%').height(82)
-          .linearGradient({ angle: 180, colors: [['#FFFFFFFF', 0],
-            ['#FFFFFFFF', 0.56], ['#AFFFFFFF', 0.74], ['#00FFFFFF', 1]] })
+          .linearGradient({ direction: GradientDirection.Bottom, colors: [['#FFFFFFFF', 0],
+            ['#FFFFFFFF', 0.56], ['#80FFFFFF', 0.78], ['#00FFFFFF', 1]] })
           .blendMode(BlendMode.DST_IN)
+        // 原生磨砂材质自身有透明度，再叠实色渐变保证顶部完全遮挡。
+        Column().width('100%').height(82)
+          .linearGradient({ direction: GradientDirection.Bottom,
+            colors: [[this.colors().bg, 0], [this.colors().bg, 0.56], ['#00000000', 1]] })
       }.width('100%').height(82)
         .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
         .opacity(this.discoverHeaderPinned ? 1 : 0)
@@ -2774,11 +2778,13 @@ struct Index {
                     Row({ space: 14 }) {
                       if (this.iconFor(app.id)) {
                         Image(this.iconFor(app.id)).width(62).height(62).borderRadius(17)
+                          .onClick(() => this.openDetail(app.id))
                       } else {
                         Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : '应')
                           .fontSize(23).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                           .width(62).height(62).textAlign(TextAlign.Center)
                           .backgroundColor(this.colors().surface).borderRadius(17)
+                          .onClick(() => this.openDetail(app.id))
                       }
                       Column({ space: 5 }) {
                         Text(app.displayName).fontSize(17).fontWeight(FontWeight.Bold)
@@ -2818,11 +2824,13 @@ struct Index {
                       Row({ space: 14 }) {
                         if (this.iconFor(app.id)) {
                           Image(this.iconFor(app.id)).width(62).height(62).borderRadius(17)
+                            .onClick(() => this.openDetail(app.id))
                         } else {
                           Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : '应')
                             .fontSize(23).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                             .width(62).height(62).textAlign(TextAlign.Center)
                             .backgroundColor(this.colors().accentSoft).borderRadius(17)
+                            .onClick(() => this.openDetail(app.id))
                         }
                         Column({ space: 5 }) {
                           Text(app.displayName).fontSize(17).fontWeight(FontWeight.Bold)

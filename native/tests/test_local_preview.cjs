@@ -118,3 +118,14 @@ test('the Install action queues the selected local HAP even when another job is 
   await ui.installLocalPreview();
   assert.equal(saved, 'queued'); assert.equal(drains, 1); assert.equal(ui.localPreviewReady, false);
 });
+test('an old installed record must be queued for live verification rather than treated as this installation being complete', async () => {
+  const job = { id: 'local:older', stage: 'installed' }; let saved;
+  const ui = page(['installLocalPreview'], { getContext: () => ({}), InstallStage: jobs.InstallStage,
+    errorText: String, JobStore: { open: async () => ({ save: async row => saved = row.stage }) },
+    LocalImport: { commitPreview: async () => job } });
+  Object.assign(ui, { localBusy: false, localPreviewReady: true, localJobId: job.id,
+    localInfoJob: job, jobRunning: () => false, loadJobs: async () => {},
+    refreshLocalTimeline: () => {}, drainInstallQueue: () => {} });
+  await ui.installLocalPreview();
+  assert.equal(saved, 'queued');
+});

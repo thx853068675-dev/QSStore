@@ -2509,10 +2509,9 @@ struct Index {
       const job = await LocalImport.commitPreview(context, store, this.localInfoJob);
       this.localPreviewReady = false;
       this.localInfoJob = job;
-      if (job.stage !== InstallStage.INSTALLED) {
-        job.stage = InstallStage.QUEUED;
-        await store.save(job);
-      }
+      // 历史上装过同一文件不代表设备现在仍是该版本，交给运行器核对。
+      job.stage = InstallStage.QUEUED;
+      await store.save(job);
       await this.loadJobs();
       this.refreshLocalTimeline();
       this.drainInstallQueue();

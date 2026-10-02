@@ -10,16 +10,20 @@ function method(name) {
   assert(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
 }
 function fixture() {
-  const f = { viewed: [], icons: [], scans: 0 };
-  const box = { StoreClient: class { static consumeViewedApps() { const rows = f.viewed; f.viewed = []; return rows; } },
-    getContext: () => ({}) };
+  const f = { viewed: [], icons: [], scans: 0, myAppsCalls: 0, myAppsFetch: async () => [] };
+  const box = { StoreClient: class {
+    static consumeViewedApps() { const rows = f.viewed; f.viewed = []; return rows; }
+    myApps() { f.myAppsCalls++; return f.myAppsFetch(); }
+  }, getContext: () => ({}), errorText: error => error.message };
   vm.runInNewContext(ts.transpileModule(`class Index { static TAB_MANAGE = 2;
-    ${['onPageShow', 'onPageHide', 'syncViewedCatalog'].map(method).join('\n')} }; globalThis.Page = Index;`, {
+    ${['onPageShow', 'onPageHide', 'syncViewedCatalog', 'loadMyApps'].map(method).join('\n')} }; globalThis.Page = Index;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
   box.InstallConfirmation = { deactivate() {} }; box.InstallReconnect = { deactivate() {} };
   const ui = new box.Page(); Object.assign(ui, { pageVisible: false, topActionEpoch: 3,
-    currentTab: 0, apps: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
+    currentTab: 0, signedIn: true, account: {}, myApps: [{ id: 1, category: '工具' }],
+    myAppsLoaded: true, myAppsBusy: false, myAppsRefreshing: false, myAppsMessage: '',
+    apps: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
     updateCatalog: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
     appIcons: [{ id: 1, rev: 'old', pixels: 'original pixels' }], catalogPage: 4,
     discoverShowTop: true, scrollOffset: 1234, activeQuery: 'saved search',
@@ -47,4 +51,31 @@ test('return to Management merges only viewed changes, leaving other rows and ol
   assert.equal(ui.appIcons[0].pixels, 'original pixels'); assert.equal(ui.catalogPage, 4);
   const apps = ui.apps; f.viewed = [{ ...ui.apps[0] }]; ui.onPageShow();
   assert.equal(ui.apps, apps, 'unchanged detail data must not replace list state');
+});
+test('automatic refresh retains published rows throughout a delayed request and does not replace identical data', async () => {
+  const f = fixture(), ui = f.ui, before = ui.myApps;
+  let resolve; f.myAppsFetch = () => new Promise(done => { resolve = done; });
+  const refresh = ui.loadMyApps();
+  assert.equal(ui.myApps, before); assert.equal(ui.myAppsBusy, true);
+  assert.equal(ui.myAppsRefreshing, false, 'background checks must not display transient loading UI');
+  resolve(JSON.parse(JSON.stringify(before))); await refresh;
+  assert.equal(ui.myApps, before); assert.equal(ui.myAppsBusy, false);
+});
+test('manual refresh joins a background request and clears its fixed-position progress when that request finishes', async () => {
+  const f = fixture(), ui = f.ui;
+  let resolve; f.myAppsFetch = () => new Promise(done => { resolve = done; });
+  const background = ui.loadMyApps(); await ui.loadMyApps(true);
+  assert.equal(f.myAppsCalls, 1); assert.equal(ui.myAppsRefreshing, true);
+  resolve([{ id: 2 }]); await background;
+  assert.equal(ui.myApps[0].id, 2); assert.equal(ui.myAppsRefreshing, false);
+});
+test('empty publication is confirmed only after successful loading; a failed refresh keeps previous rows and remains retryable', async () => {
+  const f = fixture(), ui = f.ui, before = ui.myApps;
+  ui.myAppsLoaded = false; f.myAppsFetch = async () => { throw Error('network unavailable'); };
+  await ui.loadMyApps(true);
+  assert.equal(ui.myApps, before); assert.equal(ui.myAppsLoaded, false);
+  assert.equal(ui.myAppsMessage, 'network unavailable'); assert.equal(ui.myAppsBusy, false);
+  assert.equal(ui.myAppsRefreshing, false);
+  f.myAppsFetch = async () => []; await ui.loadMyApps();
+  assert.equal(ui.myApps.length, 0); assert.equal(ui.myAppsLoaded, true); assert.equal(ui.myAppsMessage, '');
 });

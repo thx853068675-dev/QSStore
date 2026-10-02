@@ -163,6 +163,14 @@ test('a nonadvancing page terminates with an error instead of looping', async ()
   await f.ui.loadUpdateCatalog(); assert.equal(f.requests.length, 1);
   assert.match(f.ui.updateCatalogError, /分页/); assert.equal(f.ui.updateCatalogReady, false);
 });
+test('an unchanged background update check keeps the existing catalog objects', async () => {
+  const f = fixture(); const previous = [app()];
+  f.ui.updateCatalog = previous; f.ui.updateCatalogReady = true;
+  f.fetch = async () => ({ items: [app()], total: 1, pageSize: 100 });
+  await f.ui.loadUpdateCatalog();
+  assert.equal(f.ui.updateCatalog, previous); assert.equal(f.ui.updateCatalog[0], previous[0]);
+  assert.equal(f.ui.updateCatalogBusy, false); assert.equal(f.ui.updateCatalogError, '');
+});
 test('a linked local row opens its online detail and update enqueues the catalog asset', async () => {
   const f = fixture(); const { ui } = f; ui.updateCatalog = [app()]; ui.updateCatalogReady = true;
   ui.openJobDetails(ui.installedJobs[0]); assert.equal(f.routes[0].params.id, 7);

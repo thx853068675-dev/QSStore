@@ -216,8 +216,10 @@ struct Index {
   @State private syncMessage: string = '';
   @State private localBusy: boolean = false;
   @State private localMessage: string = '';
-  /** 「我上架的应用」列表是否正在刷新。 */
-  @State private myAppsBusy: boolean = false;
+  /** 自动刷新只持有请求锁，不改变管理列表布局。 */
+  private myAppsBusy: boolean = false;
+  @State private myAppsRefreshing: boolean = false;
+  @State private myAppsLoaded: boolean = false;
   /** 「设备连接」卡片里的一次性提示（如「已释放调试链路」）。 */
   @State private deviceMessage: string = '';
   /** 本地页时间轴要展示的任务 id。 */
@@ -294,7 +296,7 @@ struct Index {
   /** 更新目录独立于发现页的搜索和分页，整轮获取成功才替换。 */
   @State private updateCatalog: CatalogApp[] = [];
   @State private updateCatalogReady: boolean = false;
-  @State private updateCatalogBusy: boolean = false;
+  private updateCatalogBusy: boolean = false;
   @State private updateCatalogError: string = '';
   @State private deviceConnected: boolean = false;
   @State private deviceBusy: boolean = false;
@@ -517,6 +519,9 @@ struct Index {
     this.loginMessage = '';
     this.identityMessage = '';
     this.myApps = [];
+    this.myAppsLoaded = false;
+    this.myAppsMessage = '';
+    this.myAppsRefreshing = false;
   }
 
   /** 退出的二次确认：图标按钮容易误触，而退出会清掉登录态。 */
@@ -1414,17 +1419,23 @@ struct Index {
     return name.length > 0 ? name : job.bundleName;
   }
 
-  private async loadMyApps(): Promise<void> {
-    if (!this.signedIn || this.myAppsBusy) return;
+  private async loadMyApps(showProgress: boolean = false): Promise<void> {
+    if (!this.signedIn) return;
+    // 手动刷新复用正在进行的请求，进度始终占用标题右侧原有的固定位置。
+    if (showProgress) this.myAppsRefreshing = true;
+    if (this.myAppsBusy) return;
     this.myAppsBusy = true;
     try {
-      this.myApps = await new StoreClient(getContext(this) as common.UIAbilityContext)
+      const apps = await new StoreClient(getContext(this) as common.UIAbilityContext)
         .myApps(this.account);
+      if (JSON.stringify(apps) !== JSON.stringify(this.myApps)) this.myApps = apps;
+      this.myAppsLoaded = true;
       this.myAppsMessage = '';
     } catch (error) {
       this.myAppsMessage = errorText(error);
     } finally {
       this.myAppsBusy = false;
+      this.myAppsRefreshing = false;
     }
   }
 
@@ -2631,7 +2642,7 @@ struct Index {
         if (collected.length === before) throw new Error('应用目录分页未完成，请重试');
         pageNumber++;
       }
-      this.updateCatalog = collected;
+      if (JSON.stringify(collected) !== JSON.stringify(this.updateCatalog)) this.updateCatalog = collected;
       this.updateCatalogReady = true;
       this.updateCatalogError = '';
       ReleaseChannelRegistry.refreshTargets(getContext(this) as common.UIAbilityContext, collected);
@@ -3499,9 +3510,10 @@ struct Index {
     Column() {
       List({ space: 11, scroller: this.managementScroller }) {
         ListItem() { Row().width('100%').height(12) }
-        if (this.updateCatalogBusy || this.updateCatalogError.length > 0) {
+        // 检查期间保留原列表，只有真实失败才增加提示行。
+        if (this.updateCatalogError.length > 0) {
           ListItem() {
-            Text(this.updateCatalogBusy ? '正在检查应用更新…' : this.updateCatalogError + ' · 点此重试')
+            Text(this.updateCatalogError + ' · 点此重试')
               .fontSize(12).fontColor(this.colors().textSecondary).width('100%').padding(10)
               .onClick(() => this.loadUpdateCatalog())
           }
@@ -3577,12 +3589,12 @@ struct Index {
               Text('我上架的应用').fontSize(19).fontWeight(FontWeight.Bold)
                 .fontColor(this.colors().text).layoutWeight(1)
               // 与「已安装」那里同一个刷新图标：转圈时不给再点
-              if (this.myAppsBusy) {
+              if (this.myAppsRefreshing) {
                 Row() { LoadingProgress().width(20).height(20) }
                   .width(44).height(44).justifyContent(FlexAlign.Center)
               } else {
                 StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '刷新上架应用',
-                  action: () => this.loadMyApps() })
+                  action: () => this.loadMyApps(true) })
               }
             }.width('100%').padding({ top: 3, bottom: 6 })
           }
@@ -3608,7 +3620,7 @@ struct Index {
               Text(this.myAppsMessage).fontSize(12).fontColor(this.colors().danger)
             }
           }
-          if (this.myApps.length === 0 && this.myAppsMessage.length === 0) {
+          if (this.myAppsLoaded && this.myApps.length === 0 && this.myAppsMessage.length === 0) {
             ListItem() {
               Text('还没有上架应用 · 点上面的「上架新应用」添加')
                 .fontSize(12).fontColor(this.colors().textTertiary)

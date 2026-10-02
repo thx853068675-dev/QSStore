@@ -1,4 +1,5 @@
 import { DiscoverHeader, DiscoverMotion, DiscoverRefreshIndicator } from '../components/DiscoverHeader';
+import { DiscoverTopAction } from '../components/DiscoverTopAction';
 import { ReleaseChannelRegistry } from '../data/ReleaseChannelRegistry';
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
 import { ClassifiedFailure } from '../data/ServiceFailure';
@@ -151,6 +152,7 @@ struct Index {
   @State private discoverCanRefresh: boolean = true;
   @State private discoverShowTop: boolean = false;
   private discoverScroller: Scroller = new Scroller();
+  private managementScroller: Scroller = new Scroller();
   @State private viewportWidth: number = 0;
   @State private featuredHeights: Map<number, number> = new Map();
   @State private currentTab: number = 0;
@@ -3020,12 +3022,16 @@ struct Index {
   }
 
   private discoverTitleBarStyle(): TitleBarStyleOptions {
+    return this.scrollTitleBarStyle(this.discoverTitleHeight);
+  }
+
+  private scrollTitleBarStyle(titleHeight: number): TitleBarStyleOptions {
     return {
       scrollEffectOpts: {
         enableScrollEffect: true,
         scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR,
-        blurEffectiveStartOffset: LengthMetrics.vp(Math.max(0, this.discoverTitleHeight - this.statusBarInset - 24)),
-        blurEffectiveEndOffset: LengthMetrics.vp(Math.max(24, this.discoverTitleHeight - this.statusBarInset))
+        blurEffectiveStartOffset: LengthMetrics.vp(Math.max(0, titleHeight - this.statusBarInset - 24)),
+        blurEffectiveEndOffset: LengthMetrics.vp(Math.max(24, titleHeight - this.statusBarInset))
       },
       originalStyle: { backgroundStyle: { backgroundColor: Color.Transparent } },
       scrollEffectStyle: { backgroundStyle: {
@@ -3077,11 +3083,10 @@ struct Index {
           }
         }, searchContent: (): void => this.discoverSearchInput() })
       if (this.discoverShowTop) {
-        StoreIconButton({ symbol: $r('sys.symbol.arrow_up'), label: '回到顶部',
+        DiscoverTopAction({ darkMode: this.darkMode, inset: this.pageInset(),
+          active: this.pageVisible && this.currentTab === Index.TAB_DISCOVER,
           action: () => this.backToDiscoverTop() })
-          .backgroundColor(this.colors().surface).borderRadius(22)
-          .border({ width: 1, color: this.colors().border, radius: 22 })
-          .position({ right: this.pageInset(), bottom: 116 })
+          .position({ left: 0, bottom: 116 })
       }
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
@@ -3390,9 +3395,31 @@ struct Index {
 
   @Builder
   private managePage() {
+    HdsNavigation() {
+      this.managementList()
+    }.titleBar({ style: this.scrollTitleBarStyle(56), avoidLayoutSafeArea: true,
+      content: { stackBuilder: () => this.managementTitleBar(), divider: { showType: DividerShowType.OFF } }
+    }).titleMode(HdsNavigationTitleMode.MINI).mode(NavigationMode.Stack).hideBackButton(true)
+      .systemBarStyle({ statusBarContentColor: this.colors().text }, { statusBarContentColor: this.colors().text })
+      .bindToScrollable([this.managementScroller])
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
+      .width('100%').height('100%').backgroundColor(this.colors().bg)
+  }
+
+  @Builder
+  private managementTitleBar() {
+    Row() {
+      Text('管理').fontSize(30).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+    }.width('100%').height('100%').padding({ left: this.pageInset(), right: this.pageInset() })
+      .alignItems(VerticalAlign.Center).hitTestBehavior(HitTestMode.None)
+  }
+
+  @Builder
+  private managementList() {
     Column() {
-      List({ space: 11 }) {
-        ListItem() { this.heading('管理', '', 0) }
+      List({ space: 11, scroller: this.managementScroller }) {
+        ListItem() { Row().width('100%').height(12) }
         if (this.updateCatalogBusy || this.updateCatalogError.length > 0) {
           ListItem() {
             Text(this.updateCatalogBusy ? '正在检查应用更新…' : this.updateCatalogError + ' · 点此重试')
@@ -3633,6 +3660,7 @@ struct Index {
         ListItem() { Row().height(110).width('100%') }
       }.padding({ left: this.pageInset(), right: this.pageInset() })
         .width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + this.pageInset() * 2 }).height('100%')
+        .contentStartOffset(this.statusBarInset + 56)
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }

@@ -30,6 +30,7 @@
     "requestPermissions": [
       { "name": "ohos.permission.INTERNET" },
       { "name": "ohos.permission.KEEP_BACKGROUND_RUNNING" },
+      { "name": "ohos.permission.DETECT_GESTURE" },
       {
         // 查询本机已安装版本。SDK 声明（@ohos.bundle.bundleManager.d.ts:1389）：
         //   @permission ohos.permission.GET_BUNDLE_INFO_PRIVILEGED

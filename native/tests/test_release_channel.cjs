@@ -10,8 +10,9 @@ function fixture() {
   const start = source.indexOf('  private async selectReleaseChannel(');
   assert.ok(start >= 0);
   const method = source.slice(start, source.indexOf('\n  }', start) + 4);
-  const f = { requests: [], reconciled: [], probes: 0 };
+  const f = { requests: [], reconciled: [], saved: [], probes: 0 };
   const sandbox = { getContext: () => ({}), errorText: error => error.message,
+    ReleaseChannelPreference: { save: async (_context, id, preview) => f.saved.push([id, preview]) },
     StoreClient: class {
       listReleases(...args) {
         const work = {};
@@ -41,10 +42,12 @@ test('channel change coalesces taps and preserves the selected package during a 
   await f.ui.selectReleaseChannel(false);
   assert.equal(f.requests.length, 1);
   assert.deepEqual(f.requests[0].args, [1, 1, 20, true]);
-  f.requests[0].resolve({ items: ['preview', 'stable'], page: 1, total: 2 }); await work;
+  assert.deepEqual(f.saved, [], 'in-flight selection is not persisted');
+  f.requests[0].resolve({ items: ['preview'], page: 1, total: 1 }); await work;
   assert.equal(f.ui.showPreviewReleases, true); assert.equal(f.ui.releaseMoreBusy, false);
   assert.deepEqual(f.reconciled, [['https://example.com/stable.hap', 'stable.hap']]);
   assert.equal(f.probes, 1);
+  assert.deepEqual(f.saved, [[1, true]]);
 });
 test('a failed channel request restores the previous selection and release data', async () => {
   const f = fixture(); const work = f.ui.selectReleaseChannel(true);
@@ -52,9 +55,38 @@ test('a failed channel request restores the previous selection and release data'
   assert.equal(f.ui.showPreviewReleases, false); assert.equal(f.ui.releaseMoreBusy, false);
   assert.deepEqual(f.ui.releases, ['stable']); assert.equal(f.reconciled.length, 0);
   assert.match(f.ui.releaseMessage, /offline/);
+  assert.deepEqual(f.saved, [], 'failed request keeps the previous preference');
 });
 test('checking updates prevents a conflicting release-channel request', async () => {
   const f = fixture(); f.ui.refreshBusy = true;
   await f.ui.selectReleaseChannel(true);
   assert.equal(f.requests.length, 0); assert.equal(f.ui.showPreviewReleases, false);
+});
+test('restoring the app preference happens before the first release request', async () => {
+  const start = source.indexOf('  private async loadApp(');
+  const method = source.slice(start, source.indexOf('\n  }', start) + 4);
+  const calls = [], sandbox = { getContext: () => ({}), errorText: error => error.message,
+    router: { getParams: () => ({ id: 42 }) },
+    ReleaseChannelPreference: { load: async (_context, id) => { calls.push(['load', id]); return true; } },
+    StoreClient: class {
+      async appDetail(id) { return { id }; }
+      async appIcon() { return null; }
+      async listReleases(...args) { calls.push(['releases', ...args]);
+        return { items: ['preview'], page: 1, total: 1 }; }
+    } };
+  vm.runInNewContext(ts.transpileModule(`class Detail { static RELEASES_PER_PAGE = 20;
+    ${method} }; globalThis.Page = Detail;`, { compilerOptions: {
+    target: ts.ScriptTarget.ES2020 } }).outputText, sandbox);
+  const page = new sandbox.Page();
+  Object.assign(page, { showPreviewReleases: false, refreshHeroColor() {}, async loadReviews() {},
+    reconcileSelectedAsset() {}, refreshInstalledVersion() {}, syncInstallTask() {} });
+  await page.loadApp();
+  assert.deepEqual(calls, [['load', 42], ['releases', 42, 1, 20, true]]);
+  assert.equal(page.loaded, true); assert.equal(page.showPreviewReleases, true);
+});
+test('an empty preview channel remains selected and is persisted without mixing stable releases', async () => {
+  const f = fixture(), work = f.ui.selectReleaseChannel(true);
+  f.requests[0].resolve({ items: [], page: 1, total: 0 }); await work;
+  assert.equal(f.ui.showPreviewReleases, true); assert.equal(f.ui.releases.length, 0);
+  assert.deepEqual(f.saved, [[1, true]]);
 });

@@ -110,8 +110,27 @@ class StoreFeaturesTest(unittest.TestCase):
         self.assertEqual(catalog["releases_count"], 1)
         self.assertEqual(app.h_app_releases(str(app_id), {})["total"], 1)
         manual = app.h_app_releases(str(app_id), {"prerelease": ["1"]})
-        self.assertEqual(manual["total"], 2)
-        self.assertTrue(any(row["prerelease"] for row in manual["items"]))
+        self.assertEqual(manual["total"], 1)
+        self.assertTrue(all(row["prerelease"] for row in manual["items"]))
+
+    def test_preview_channel_filters_before_pagination_and_has_an_empty_state(self):
+        app_id = db.upsert_app("owner/repo")
+        releases = [self._release("v" + str(i)) for i in range(7)]
+        for i, release in enumerate(releases):
+            release["published_at"] = "2026-02-" + str(i + 1).zfill(2)
+            release["prerelease"] = i in (1, 3, 5)
+        db.replace_releases(app_id, releases)
+        db.connect().execute("UPDATE app SET status='published' WHERE id=?", (app_id,))
+        db.connect().commit()
+        pages = [app.h_app_releases(str(app_id), {"prerelease": ["1"],
+                 "page": [str(page)], "page_size": ["2"]}) for page in (1, 2)]
+        self.assertEqual([p["total"] for p in pages], [3, 3])
+        self.assertEqual([r["tag"] for p in pages for r in p["items"]], ["v5", "v3", "v1"])
+        self.assertTrue(all(r["prerelease"] for p in pages for r in p["items"]))
+        db.replace_releases(app_id, [self._release("stable")])
+        empty = app.h_app_releases(str(app_id), {"prerelease": ["1"]})
+        self.assertEqual(empty["total"], 0)
+        self.assertEqual(empty["items"], [])
 
     def test_removed_release_takes_its_assets_with_it(self):
         app = db.upsert_app("owner/repo")

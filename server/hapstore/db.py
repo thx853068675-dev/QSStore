@@ -486,11 +486,14 @@ def configure_published_app(app_id: int, account_id: str, category: str) -> bool
 
 
 def list_releases(app_id: int, *, page: int = 1, page_size: int = 20,
-                  include_prerelease: bool = False) -> dict[str, Any]:
+                  include_prerelease: bool = False,
+                  prerelease_only: bool = False) -> dict[str, Any]:
     c = connect()
     where = ["app_id=?"]
     params: list[Any] = [app_id]
-    if not include_prerelease:
+    if prerelease_only:
+        where.append("prerelease=1")
+    elif not include_prerelease:
         where.append("prerelease=0")
     clause = " AND ".join(where)
 

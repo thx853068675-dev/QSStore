@@ -9,6 +9,7 @@ import { image } from '@kit.ImageKit';
 import { CatalogApp } from '../data/CatalogApp';
 import { StoreClient } from '../data/StoreClient';
 import { ReleaseInfo, HapAsset } from '../data/ReleaseInfo';
+import { ReleaseChannelPreference } from '../data/ReleaseChannelPreference';
 import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
 import { JobStore } from '../jobs/JobStore';
 import { JobScheduler } from '../jobs/JobScheduler';
@@ -591,6 +592,8 @@ struct Detail {
       this.reconcileSelectedAsset(selectedUrl, selectedName);
       this.refreshInstalledVersion();
       this.releaseMessage = '';
+      await ReleaseChannelPreference.save(getContext(this) as common.UIAbilityContext,
+        this.app.id, next);
     } catch (error) {
       this.animateOverlay(() => { this.showPreviewReleases = previous; });
       this.releaseMessage = '无法读取版本：' + errorText(error);
@@ -675,6 +678,8 @@ struct Detail {
       if (id <= 0) throw new Error('应用编号无效');
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
       this.app = await client.appDetail(id);
+      this.showPreviewReleases = await ReleaseChannelPreference.load(
+        getContext(this) as common.UIAbilityContext, id);
       this.appIcon = await client.appIcon(this.app) ?? null;
       const releases = await client.listReleases(id, 1, Detail.RELEASES_PER_PAGE,
         this.showPreviewReleases);
@@ -1075,6 +1080,12 @@ struct Detail {
                   }.width(44).height(44).justifyContent(FlexAlign.Center)
                 }
               }.width('100%').alignItems(VerticalAlign.Center)
+              if (!this.currentRelease()) {
+                Text(this.releaseMessage.length > 0 ? this.releaseMessage :
+                  (this.showPreviewReleases ? '暂无预览版本' : '暂无正式版本'))
+                  .fontSize(13).fontColor(this.colors().textSecondary)
+                  .width('100%').padding({ top: 8, bottom: 12 })
+              }
               if (this.currentRelease()) {
                 Column({ space: 11 }) {
                   // 版本下拉全宽：发布时间并进下拉标签，收起时也能看到

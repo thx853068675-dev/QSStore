@@ -248,6 +248,7 @@ def h_app_releases(app_id: str, q: dict[str, list[str]]) -> dict[str, Any]:
         page=_int((q.get("page") or ["1"])[0], 1, 1, 10000),
         page_size=_int((q.get("page_size") or ["20"])[0], 20, 1, 50),
         include_prerelease=(q.get("prerelease") or ["0"])[0] == "1",
+        prerelease_only=(q.get("prerelease") or ["0"])[0] == "1",
     )
 
 

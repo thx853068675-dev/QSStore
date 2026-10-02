@@ -2,7 +2,7 @@
 
 HarmonyOS 原生侧载安装器，当前版本 **0.4.50**。
 
-[正式版](https://github.com/thx853068675-dev/QSStore/releases/tag/v0.4.50) · [预览版](https://github.com/thx853068675-dev/QSStore/releases/tag/v0.4.49-preview.1)
+[正式版](https://github.com/thx853068675-dev/QSStore/releases/tag/v0.4.50) · [预览版](https://github.com/thx853068675-dev/QSStore/releases/tag/v0.4.51-preview.1)
 
 - 从 GitHub 上架、下载和更新应用。
 - 支持 HAP、APP、ZIP，预览后加入安装队列。

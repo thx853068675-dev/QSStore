@@ -933,7 +933,7 @@ struct Detail {
 
   @Builder
   private releaseChannelOption(label: string, preview: boolean) {
-    Button({ type: ButtonType.Normal }) {
+    Button({ type: ButtonType.Capsule }) {
       Row({ space: 3 }) {
         if (this.showPreviewReleases === preview) {
           SymbolGlyph($r('sys.symbol.checkmark')).fontSize(10)
@@ -944,11 +944,12 @@ struct Detail {
           .fontColor(this.showPreviewReleases === preview ? this.colors().accent : this.colors().textSecondary)
           .maxLines(1)
       }.justifyContent(FlexAlign.Center)
-    }.layoutWeight(1).height(36).padding({ left: 4, right: 4 })
+    }.layoutWeight(1).height(28).padding({ left: 4, right: 4 })
       .backgroundColor(this.showPreviewReleases === preview ? this.colors().surface : Color.Transparent)
-      .borderRadius(10)
+      .borderRadius(14).clip(true)
       .border({ width: this.showPreviewReleases === preview ? 1 : 0,
-        color: this.colors().borderStrong })
+        color: this.colors().borderStrong, radius: 14 })
+      .responseRegion({ x: 0, y: -8, width: '100%', height: 44 })
       .enabled(!this.releaseMoreBusy && !this.refreshBusy).stateEffect(true)
       .accessibilityText(label + (this.showPreviewReleases === preview ? '，已选中' : '，点击切换'))
       .onClick(() => this.selectReleaseChannel(preview))
@@ -959,8 +960,8 @@ struct Detail {
     Row({ space: 2 }) {
       this.releaseChannelOption('正式版', false)
       this.releaseChannelOption('预览版', true)
-    }.width(138).padding(4).backgroundColor(this.colors().fill).borderRadius(14)
-      .border({ width: 1, color: this.colors().border })
+    }.width(138).height(36).padding(4).backgroundColor(this.colors().fill).borderRadius(18).clip(true)
+      .border({ width: 1, color: this.colors().border, radius: 18 })
   }
 
   @Builder
@@ -1067,11 +1068,13 @@ struct Detail {
                   Row() { LoadingProgress().width(20).height(20) }.width(44).height(44)
                     .justifyContent(FlexAlign.Center)
                 } else {
-                  StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '检查更新',
-                    active: !this.releaseMoreBusy,
-                    action: () => this.checkForUpdates() })
+                  Row() {
+                    StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '检查更新', controlSize: 36,
+                      active: !this.releaseMoreBusy,
+                      action: () => this.checkForUpdates() })
+                  }.width(44).height(44).justifyContent(FlexAlign.Center)
                 }
-              }.width('100%')
+              }.width('100%').alignItems(VerticalAlign.Center)
               if (this.currentRelease()) {
                 Column({ space: 11 }) {
                   // 版本下拉全宽：发布时间并进下拉标签，收起时也能看到

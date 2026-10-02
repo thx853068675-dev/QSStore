@@ -34,6 +34,7 @@ export class AgcClient {
   private async request(path: string, body?: Object,
     method?: http.RequestMethod, retried: boolean = false): Promise<Record<string, Object>> {
     const request = http.createHttp();
+    const startedAt = Date.now();
     const verb = method ?? (body ? http.RequestMethod.POST : http.RequestMethod.GET);
     try {
       const options: http.HttpRequestOptions = {
@@ -79,6 +80,7 @@ export class AgcClient {
       throw new ServiceFailure(FailureKind.NETWORK, 'AGC 网络请求失败：' + String(error));
     } finally {
       request.destroy();
+      console.info('AGC request: path=' + path.split('?')[0] + ' elapsedMs=' + (Date.now() - startedAt));
     }
   }
 

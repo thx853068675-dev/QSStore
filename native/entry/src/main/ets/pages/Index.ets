@@ -6,7 +6,8 @@ import { InstallReconnect } from '../jobs/InstallReconnect';
 import { LocalInstallTimeline, LocalTimelineView, LocalTimelineStep } from '../jobs/LocalInstallTimeline';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
 import { router, SymbolGlyphModifier, uiMaterial, LengthMetrics } from '@kit.ArkUI';
-import { HdsTabs, hdsMaterial } from '@kit.UIDesignKit';
+import { HdsTabs, hdsMaterial, HdsNavigation, HdsNavigationTitleMode,
+  TitleBarStyleOptions, ScrollEffectType, DividerShowType } from '@kit.UIDesignKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
@@ -144,7 +145,7 @@ struct Index {
   @StorageProp('darkMode') darkMode: boolean = false;
   @StorageProp('statusBarInset') statusBarInset: number = 0;
   @State private discoverTitleHeight: number = 0;
-  @State private discoverTopBlurOpacity: number = 0;
+  @State private discoverScrollOffset: number = 0;
   private discoverScroller: Scroller = new Scroller();
   @State private viewportWidth: number = 0;
   @State private featuredHeights: Map<number, number> = new Map();
@@ -180,12 +181,15 @@ struct Index {
   @State private needsInstallScan: boolean = false;
   @StorageProp('wirelessLinkRevision') @Watch('onWirelessLinkChanged') private wirelessLinkRevision: number = 0;
   @StorageProp('wirelessDebugRestoring') @Watch('onWirelessLinkChanged') private wirelessDebugRestoring: boolean = false;
-  @State private catalogProbeChecked: number = 0;
-  @State private catalogProbeTotal: number = 0;
+  @StorageProp('signingIdentityRevision') @Watch('onSigningIdentityChanged') private signingIdentityRevision: number = 0;
   private pageVisible: boolean = true;
   private initialScanDismissed: boolean = false;
   private catalogProbePending: string[] = [];
   private catalogProbeNames: string[] = [];
+  private catalogProbeFlight: Promise<void> | undefined = undefined;
+  private refreshConnectionWaiter: ((connected: boolean) => void) | undefined = undefined;
+  private catalogRefreshConnectionCancelled: boolean = false;
+  private refreshOpeningSettings: boolean = false;
   /** 入队写库中的应用；只锁住被重复点击的那张卡。 */
   @State private enqueuingAppIds: number[] = [];
   private queueRecoveryReady: boolean = false;
@@ -340,6 +344,7 @@ struct Index {
    */
   onPageShow(): void {
     this.pageVisible = true;
+    this.refreshOpeningSettings = false;
     this.observeReconnect();
     this.observeInstallTasks();
     this.drainInstallQueue();
@@ -354,6 +359,7 @@ struct Index {
 
   aboutToDisappear(): void {
     this.pageVisible = false;
+    this.completeRefreshConnection(false);
     if (this.localPreviewReady) this.resetLocalTimeline();
     InstallConfirmation.unsubscribe(this.confirmationSubscription);
     this.confirmationSubscription = -1;
@@ -486,21 +492,12 @@ struct Index {
 
   /** 取当前调试证书的名称与到期时间（拿不到不影响签名可用性）。 */
   private async loadCertificateDetail(identity: LocalSigningIdentity): Promise<void> {
-    this.certId = identity.certId;
-    this.certLabel = identity.certName;
-    this.certExpiringSoon = false;
-    if (identity.certExpiry > 0) {
-      this.certExpiry = Index.formatDay(identity.certExpiry);
-      this.certExpiringSoon = identity.certExpiry - Math.floor(Date.now() / 1000) <
-        Index.CERT_EXPIRY_WARNING_DAYS * 86400;
-    } else {
-      this.certExpiry = '';
-    }
+    this.applyCertificateDetail(identity);
     try {
       const rows = await new AgcClient(this.account).certificates();
       const row = rows.find((item: Record<string, Object>) =>
         String(item['id'] ?? '') === identity.certId);
-      if (row === undefined) return;
+      if (row === undefined || this.certId !== identity.certId) return;
       const name = String(row['certName'] ?? '');
       if (name.length > 0) this.certLabel = name;
       const seconds = Index.expirySeconds(row['expireTime']);
@@ -511,6 +508,42 @@ struct Index {
       }
     } catch (_) {
       // 离线时只显示本机记录的名称与到期时间
+    }
+  }
+
+  /** 安装器自动申请证书后立即反映本机材料，不为刷新界面再请求 AGC。 */
+  private async onSigningIdentityChanged(): Promise<void> {
+    if (!this.signedIn) return;
+    const account = this.account;
+    const revision = this.signingIdentityRevision;
+    const identity = await SigningIdentityRecovery.load(getContext(this) as common.UIAbilityContext, account);
+    if (!this.signedIn || this.account.userId !== account.userId ||
+      revision !== this.signingIdentityRevision) return;
+    this.certReady = identity !== undefined;
+    if (identity !== undefined) {
+      this.applyCertificateDetail(identity);
+      if (!this.identityBusy) this.identityMessage = '';
+      // 材料准备成功也是条件变化；等待账号/证书的旧任务无须重启应用才继续。
+      InstallCoordinator.conditionReady(getContext(this) as common.UIAbilityContext,
+        InstallStage.WAITING_ACCOUNT).catch(() => {});
+    } else {
+      this.certId = '';
+      this.certLabel = '';
+      this.certExpiry = '';
+      this.certExpiringSoon = false;
+    }
+  }
+
+  private applyCertificateDetail(identity: LocalSigningIdentity): void {
+    this.certId = identity.certId;
+    this.certLabel = identity.certName;
+    this.certExpiringSoon = false;
+    if (identity.certExpiry > 0) {
+      this.certExpiry = Index.formatDay(identity.certExpiry);
+      this.certExpiringSoon = identity.certExpiry - Math.floor(Date.now() / 1000) <
+        Index.CERT_EXPIRY_WARNING_DAYS * 86400;
+    } else {
+      this.certExpiry = '';
     }
   }
 
@@ -900,8 +933,10 @@ struct Index {
     const nextPage = reset ? 1 : this.catalogPage + 1;
     try {
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
+      const requestStartedAt = Date.now();
       const page = await client.listApps(nextPage, Index.CATALOG_PAGE_SIZE,
         'updated', query);
+      console.info('Catalog read: page=' + nextPage + ' elapsedMs=' + (Date.now() - requestStartedAt));
       if (token !== this.catalogToken || query !== this.activeQuery) return;
       // 先加载的页在后，追加时按 id 去重，避免上架/删除后翻页出现重复项。
       const known = this.apps.map((app: CatalogApp) => app.id);
@@ -921,13 +956,15 @@ struct Index {
       this.catalogTotal = page.total;
       this.catalogError = '';
       // 目录变了就重算「装没装」，卡片按钮跟着更新
-      this.refreshCatalogInstallState(rescanInstalled);
+      const recognition = this.refreshCatalogInstallState(rescanInstalled);
       // 只缓存干净的第一页：缓存与分页混在一起会得到半新半旧的列表
       if (cacheablePage) {
         const context = getContext(this) as common.UIAbilityContext;
         CatalogCache.save(context, page.items, page.rawItems);
       }
       this.loadCatalogIcons(client, this.apps, query, cacheablePage);
+      // 主动下拉等待本轮真实识别完成；启动、搜索和翻页继续异步识别。
+      if (rescanInstalled) await recognition;
     } catch (error) {
       if (token !== this.catalogToken || query !== this.activeQuery) return;
       this.catalogError = errorText(error);
@@ -957,6 +994,7 @@ struct Index {
     if (this.catalogRefreshBusy) return;
     this.catalogRefreshBusy = true;
     this.catalogRefreshing = true;
+    this.catalogRefreshConnectionCancelled = false;
     const startedAt = Date.now();
     try {
       // 只读取服务端已有目录；GitHub 采集由服务端周期任务或详情页主动检查负责。
@@ -970,6 +1008,7 @@ struct Index {
       }
       this.catalogRefreshBusy = false;
       this.catalogRefreshing = false;
+      console.info('Catalog refresh complete: elapsedMs=' + (Date.now() - startedAt));
     }
   }
 
@@ -1592,6 +1631,10 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
+    if (this.refreshConnectionWaiter !== undefined && !this.refreshOpeningSettings) {
+      this.completeRefreshConnection(false);
+      if (this.resumeJobId.length === 0) this.showReconnect = false;
+    }
     InstallConfirmation.deactivate(this.confirmationSubscription);
     InstallReconnect.deactivate(this.reconnectSubscription);
   }
@@ -1768,9 +1811,10 @@ struct Index {
 
   /** 主列表展示设备当前版本；安装历史原样保留，外部更新不改写旧记录。 */
   private currentInstalledView(job: InstallJob): InstallJob {
-    const version = LocalBundles.liveInstalledVersion(job.bundleName);
+    const version = LocalBundles.installedVersion(job.bundleName);
     if (version <= 0) return job;
-    const versionName = LocalBundles.installedVersionName(job.bundleName, version);
+    const versionName = LocalBundles.installedVersionName(job.bundleName, version) ||
+      InstalledAppRegistry.versionName(job.bundleName, version);
     if (version === job.versionCode && (versionName.length === 0 ||
       versionName === job.versionName)) return job;
     const view = JSON.parse(JSON.stringify(job)) as InstallJob;
@@ -2079,19 +2123,27 @@ struct Index {
    *   3. 上次由 HDC 确认并落盘的本机版本（系统权限不足且调试离线时使用）
    * 三者都没有才显示状态未知；未知仍可主动安装或更新。
    */
-  private refreshCatalogInstallState(rescanInstalled: boolean = false): void {
+  private refreshCatalogInstallState(rescanInstalled: boolean = false): Promise<void> {
+    const startedAt = Date.now();
     const next = new Map<number, number>();
-    const unresolved: string[] = [];
+    const unresolved = new Set<string>();
+    const versions = new Map<string, number>();
+    let systemKnown = 0;
     for (const app of this.updateApps()) {
-      for (const candidate of this.latestAssets(app)) {
-        if (candidate.bundleName.length > 0 && (rescanInstalled ||
-          !LocalBundles.isKnown(LocalBundles.installedVersion(candidate.bundleName))) &&
-          !unresolved.includes(candidate.bundleName)) unresolved.push(candidate.bundleName);
+      const candidates = this.latestAssets(app).concat(app.latestAsset === undefined ? [] : [app.latestAsset]);
+      for (const candidate of candidates) {
+        if (candidate.bundleName.length === 0 || versions.has(candidate.bundleName)) continue;
+        const live = LocalBundles.liveInstalledVersion(candidate.bundleName);
+        if (LocalBundles.isKnown(live)) systemKnown++;
+        const version = LocalBundles.isKnown(live) ? live : InstalledAppRegistry.version(candidate.bundleName);
+        versions.set(candidate.bundleName, version);
+        if (!LocalBundles.isKnown(live) && (rescanInstalled || !LocalBundles.isKnown(version))) {
+          unresolved.add(candidate.bundleName);
+        }
       }
       const asset = app.latestAsset;
       if (asset === undefined || asset.bundleName.length === 0) continue;
-      const version = LocalBundles.installedVersion(asset.bundleName);
-      if (rescanInstalled) unresolved.push(asset.bundleName);
+      const version = versions.get(asset.bundleName) ?? -1;
       if (version > 0) {
         next.set(app.id, version);
         continue;
@@ -2099,7 +2151,6 @@ struct Index {
       // 只有「确认没装」才能就此收手；「无法核实」需要退一步问设备。
       if (!LocalBundles.isKnown(version)) {
         next.set(app.id, this.installedVersions.get(app.id) ?? -1);
-        if (!rescanInstalled) unresolved.push(asset.bundleName);
       } else {
         next.set(app.id, 0);
       }
@@ -2107,8 +2158,11 @@ struct Index {
     this.installedVersions = next;
     this.syncDetectedInstalled();
     this.checkInstalledUpdates();
-    if (unresolved.length > 0) this.confirmCatalogVersionsViaDevice(unresolved);
-    else this.updateInstallScanPrompt();
+    console.info('InstalledApps dispatch: unique=' + versions.size + ' systemKnown=' +
+      systemKnown + ' wireless=' + unresolved.size + ' elapsedMs=' + (Date.now() - startedAt));
+    if (unresolved.size > 0) return this.confirmCatalogVersionsViaDevice(Array.from(unresolved));
+    this.updateInstallScanPrompt();
+    return this.catalogProbeFlight ?? Promise.resolve();
   }
 
   /** 初次没有设备快照时，先识别外部侧载应用；用户仍可稍后连接并浏览目录。 */
@@ -2145,49 +2199,127 @@ struct Index {
     else this.updateInstallScanPrompt();
   }
 
-  private async confirmCatalogVersionsViaDevice(bundleNames: string[]): Promise<void> {
-    if (this.catalogProbeBusy) {
-      // 正在读取的包已经涵盖本次请求，只有新增包需要下一批。
+  private confirmCatalogVersionsViaDevice(bundleNames: string[]): Promise<void> {
+    if (this.catalogProbeFlight !== undefined) {
+      // 共用同一个完成信号；新包加入下一批，已经在读的包不重复查询。
       const additional = bundleNames.filter((name: string) => !this.catalogProbeNames.includes(name));
       this.catalogProbePending = this.catalogProbePending.concat(additional)
         .filter((name: string, index: number, all: string[]) => all.indexOf(name) === index);
-      return;
+      return this.catalogProbeFlight;
     }
+    if (bundleNames.length === 0) return Promise.resolve();
     this.catalogProbeBusy = true;
-    this.catalogProbeNames = bundleNames;
-    this.catalogProbeChecked = 0;
-    this.catalogProbeTotal = new Set<string>(bundleNames).size;
-    try {
-      const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
-      const versions = await bridge.installedBundleVersions(bundleNames, (checked: number, total: number) => {
-        this.catalogProbeChecked = checked;
-        this.catalogProbeTotal = total;
-      });
-      if (versions === undefined) return;
-      await this.reconcileCatalogInstallState(bundleNames, versions);
-      await this.reconcileDetectedJobs(versions);
-      if (this.updateCatalogReady && this.updateApps().every((app: CatalogApp) =>
-        (app.latestAsset?.bundleName.length ?? 0) === 0 || this.installedVersionOf(app.id) >= 0)) {
-        await InstalledAppRegistry.markCatalogSnapshot(getContext(this) as common.UIAbilityContext);
-      }
-    } catch (_) {
-      // 不可核实不等于未安装，保持最后一次已知状态。
-    } finally {
+    this.catalogProbeFlight = this.runCatalogVersionProbes(bundleNames).finally(() => {
       this.catalogProbeBusy = false;
       this.catalogProbeNames = [];
-      const pending = this.catalogProbePending;
-      this.catalogProbePending = [];
-      if (pending.length > 0) await this.confirmCatalogVersionsViaDevice(pending);
+      this.catalogProbeFlight = undefined;
       this.updateInstallScanPrompt();
+    });
+    return this.catalogProbeFlight;
+  }
+
+  /** 完成信号涵盖所有合并进来的批次，避免下拉在补查结束前收回。 */
+  private async runCatalogVersionProbes(bundleNames: string[]): Promise<void> {
+    let names = Array.from(new Set<string>(bundleNames));
+    let scanVerified = true;
+    const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
+    while (names.length > 0) {
+      this.catalogProbeNames = names;
+      try {
+        const versions = await bridge.installedBundleVersions(names, (_checked: number, _total: number,
+          name: string = '', version: number = -1) => {
+          if (name.length > 0 && version >= 0) this.applyDetectedCatalogVersion(name, version);
+        });
+        if (versions === undefined) {
+          if (!HdcDeviceBridge.deviceLinked() && await this.waitForRefreshConnection()) continue;
+          scanVerified = false;
+        } else {
+          const reconcileStartedAt = Date.now();
+          await this.reconcileCatalogInstallState(names, versions);
+          await this.reconcileDetectedJobs(versions);
+          scanVerified = scanVerified && names.every((name: string) =>
+            !versions.has(name) || (versions.get(name) ?? 0) > 0);
+          console.info('InstalledApps reconcile: elapsedMs=' + (Date.now() - reconcileStartedAt));
+          if (!HdcDeviceBridge.deviceLinked() && await this.waitForRefreshConnection()) continue;
+        }
+      } catch (_) {
+        // 不可核实不等于未安装，保持最后一次已知状态。
+        if (!HdcDeviceBridge.deviceLinked() && await this.waitForRefreshConnection()) continue;
+        scanVerified = false;
+      }
+      if (this.catalogProbePending.length === 0 && scanVerified && this.updateCatalogReady &&
+        this.updateApps().every((app: CatalogApp) =>
+          (app.latestAsset?.bundleName.length ?? 0) === 0 || this.installedVersionOf(app.id) >= 0)) {
+        try {
+          await InstalledAppRegistry.markCatalogSnapshot(getContext(this) as common.UIAbilityContext);
+        } catch (_) {
+          // 落盘失败不阻塞页面，下次启动仍会重新核对。
+        }
+      }
+      // 落盘期间也可能收到新包，必须在最后一个 await 后再取下一批。
+      names = this.catalogProbePending;
+      this.catalogProbePending = [];
+    }
+  }
+
+  /** 批量识别已自动尝试保存端口；失败后由连接弹窗唤醒同一轮刷新。 */
+  private waitForRefreshConnection(): Promise<boolean> {
+    if (!this.catalogRefreshBusy || !this.pageVisible || this.catalogRefreshConnectionCancelled) {
+      return Promise.resolve(false);
+    }
+    return new Promise<boolean>((resolve: (connected: boolean) => void) => {
+      this.refreshConnectionWaiter = resolve;
+      this.initialScanDismissed = true;
+      if (!this.showReconnect) this.resumeJobId = '';
+      this.reconnectMessage = '自动重连未成功，连接后继续刷新';
+      this.animateOverlay(() => { this.showReconnect = true; });
+    });
+  }
+
+  private completeRefreshConnection(connected: boolean): void {
+    const waiting = this.refreshConnectionWaiter;
+    this.refreshConnectionWaiter = undefined;
+    if (waiting !== undefined) {
+      if (!connected) this.catalogRefreshConnectionCancelled = true;
+      waiting(connected);
+    }
+  }
+
+  private async openReconnectSettings(): Promise<void> {
+    this.refreshOpeningSettings = this.refreshConnectionWaiter !== undefined;
+    try {
+      await new HdcDeviceBridge(getContext(this) as common.UIAbilityContext).openWirelessSettings();
+    } catch (error) {
+      this.refreshOpeningSettings = false;
+      this.reconnectMessage = errorText(error);
+    }
+  }
+
+  private applyDetectedCatalogVersion(bundleName: string, version: number): void {
+    const next = new Map(this.installedVersions);
+    let wasInstalled = false;
+    for (const app of this.updateApps()) {
+      if (app.latestAsset?.bundleName === bundleName) {
+        if ((next.get(app.id) ?? 0) > 0) wasInstalled = true;
+        next.set(app.id, version);
+      }
+    }
+    this.installedVersions = next;
+    // 未安装包只需更新卡片；不要为每个缺席包重算整张管理列表。
+    if (version > 0 || wasInstalled) {
+      this.syncDetectedInstalled(bundleName);
+      this.checkInstalledUpdates();
     }
   }
 
   /** 外部安装条目来自设备，而不是伪造一条本安装器的安装历史。 */
-  private syncDetectedInstalled(): void {
-    const found: InstallJob[] = [];
+  private syncDetectedInstalled(bundleName: string = ''): void {
+    const found: InstallJob[] = bundleName.length === 0 ? [] :
+      this.storeInstalled.filter((job: InstallJob) => job.bundleName !== bundleName);
     const seen = new Set<string>();
     for (const app of this.updateApps()) {
       for (const asset of this.latestAssets(app)) {
+        if (bundleName.length > 0 && asset.bundleName !== bundleName) continue;
         if (asset.bundleName.length === 0 || seen.has(asset.bundleName)) continue;
         const detected = LocalBundles.installedVersion(asset.bundleName);
         const version = LocalBundles.isKnown(detected) ? detected :
@@ -2753,10 +2885,9 @@ struct Index {
       this.reconnectMessage = '';
       this.deviceConnected = true;
       this.forgetInstalledVersions();
+      this.completeRefreshConnection(true);
       // 先读取完整目录对应的实际安装状态，再判断是否还要继续先前的安装。
-      const bundles = this.updateApps().map((app: CatalogApp) => app.latestAsset?.bundleName ?? '')
-        .filter((name: string) => name.length > 0);
-      await this.confirmCatalogVersionsViaDevice(bundles);
+      await this.refreshCatalogInstallState(true);
       InstallReconnect.clear(this.resumeJobId);
       const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
       const job = await store.get(this.resumeJobId);
@@ -2804,34 +2935,41 @@ struct Index {
       .backgroundColor('#00000000')
   }
 
+  private discoverTitleBarStyle(): TitleBarStyleOptions {
+    return {
+      scrollEffectOpts: {
+        enableScrollEffect: true,
+        scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR,
+        blurEffectiveStartOffset: LengthMetrics.vp(Math.max(0, this.discoverTitleHeight - this.statusBarInset - 24)),
+        blurEffectiveEndOffset: LengthMetrics.vp(Math.max(24, this.discoverTitleHeight - this.statusBarInset))
+      },
+      originalStyle: { backgroundStyle: { backgroundColor: Color.Transparent } },
+      scrollEffectStyle: { backgroundStyle: {
+        backgroundColor: this.colors().bg, blurRadius: 32, maskExtraHeight: 48
+      } },
+      systemMaterialEffect: {
+        materialType: hdsMaterial.MaterialType.IMMERSIVE,
+        materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+      }
+    };
+  }
+
   @Builder
-  private discoverTopBlur() {
-    // 系统磨砂叠加半透明色温与柔光，整层再淡出，避免只有模糊、缺少玻璃质感。
-    Stack() {
-      Column().width('100%').height('100%').backgroundColor(this.colors().glassTint)
-      Column().width('100%').height('100%')
-        .linearGradient({ angle: 115, colors: [
-          [this.colors().glassHighlight, 0], ['#00FFFFFF', 0.58], ['#00FFFFFF', 1]
-        ] })
-      Column().width('100%').height('100%')
-        .linearGradient({ angle: 180, colors: [
-          ['#FFFFFFFF', 0], ['#EFFFFFFF', 0.4], ['#66FFFFFF', 0.76], ['#00FFFFFF', 1]
-        ] })
-        .blendMode(BlendMode.DST_IN, BlendApplyType.OFFSCREEN)
-    }.width('100%').height(this.statusBarInset + 90)
-      .blendMode(BlendMode.SRC_OVER, BlendApplyType.OFFSCREEN)
-      .backgroundBlurStyle(BlurStyle.COMPONENT_REGULAR, {
-        colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT
-      })
-      .position({ x: 0, y: -this.statusBarInset })
-      .opacity(this.discoverTopBlurOpacity)
-      .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+  private discoverTitleBarFrame() {
+    // 模糊由 HDS 标题栏执行；搜索框在其上层保持同一个输入组件，滚动不丢焦点。
+    Row().width('100%').height('100%').hitTestBehavior(HitTestMode.None)
+      .accessibilityLevel('no-hide-descendants')
+  }
+
+  @Builder
+  private discoverSearchSpace() {
+    Row().width('100%').height(70).hitTestBehavior(HitTestMode.None)
+      .accessibilityLevel('no-hide-descendants')
   }
 
   @Builder
   private discoverSearchHeader() {
     Stack({ alignContent: Alignment.Top }) {
-      this.discoverTopBlur()
       // 材质直接作用在搜索框上，避免空 HdsTabs 的胶囊边缘与外层圆角叠成两层。
       // 组件级沉浸材质从 API 26 起提供；6.1 使用系统薄磨砂，不创建多余导航容器。
       if (deviceInfo.sdkApiVersion >= 26 && uiMaterial.isImmersiveMaterialSupported()) {
@@ -2853,16 +2991,37 @@ struct Index {
           })
       }
     }.width('100%').height(70)
+      .position({ x: 0, y: this.statusBarInset + Math.max(0, this.discoverTitleHeight - this.discoverScrollOffset) })
+      .hitTestBehavior(HitTestMode.Transparent)
   }
 
   @Builder
   private discoverPage() {
+    Stack({ alignContent: Alignment.Top }) {
+      HdsNavigation() {
+        this.discoverList()
+      }.titleBar({
+        style: this.discoverTitleBarStyle(),
+        avoidLayoutSafeArea: true,
+        content: { stackBuilder: () => this.discoverTitleBarFrame(), divider: { showType: DividerShowType.OFF } }
+      }).titleMode(HdsNavigationTitleMode.MINI).mode(NavigationMode.Stack).hideBackButton(true)
+        .systemBarStyle({ statusBarContentColor: this.colors().text }, { statusBarContentColor: this.colors().text })
+        .bindToScrollable([this.discoverScroller])
+        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+        .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
+        .width('100%').height('100%')
+      this.discoverSearchHeader()
+    }.width('100%').height('100%').backgroundColor(this.colors().bg)
+  }
+
+  @Builder
+  private discoverList() {
     Column() {
       // Refresh 放在最外层：嵌在 if/else 里时下拉手势不会被它接管。
       // 加载态与错误态改为列表项，列表本身始终存在。
       Refresh({ refreshing: $$this.catalogRefreshing }) {
         List({ space: 0, scroller: this.discoverScroller }) {
-            // 大标题随列表滚出，搜索框由 ListItemGroup 的 header 原生吸顶。
+            // 大标题随列表滚出；组头保留搜索框的空间，上层搜索框随实际偏移吸顶。
             ListItem() {
               Row() {
                 Column({ space: 5 }) {
@@ -2880,46 +3039,7 @@ struct Index {
               .onSizeChange((_old: SizeOptions, size: SizeOptions) => {
                 this.discoverTitleHeight = Number(size.height);
               })
-            ListItemGroup({ header: this.discoverSearchHeader }) {
-            if (this.needsInstallScan || this.catalogProbeBusy) {
-              ListItem() {
-                Row({ space: 12 }) {
-                  Column({ space: 4 }) {
-                    Text('识别本机已安装应用').fontSize(14).fontWeight(FontWeight.Medium)
-                      .fontColor(this.colors().text)
-                    Text(this.catalogProbeBusy ? (this.catalogProbeChecked > 0 ?
-                      '已核对 ' + this.catalogProbeChecked + ' / ' + this.catalogProbeTotal + ' 个应用' :
-                      '正在读取设备应用清单…') :
-                      (this.reconnectBusy || this.wirelessDebugRestoring ? '正在恢复无线调试连接…' :
-                      '连接一次无线调试，已有侧载应用会显示打开或更新'))
-                      .fontSize(11).fontColor(this.colors().textSecondary)
-                  }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-                  Button({ type: ButtonType.Normal }) {
-                    Column({ space: 5 }) {
-                      if ((this.catalogProbeBusy && this.catalogProbeChecked === 0) ||
-                        this.reconnectBusy || this.wirelessDebugRestoring) {
-                        Row({ space: 5 }) {
-                          LoadingProgress().width(13).height(13).color(this.colors().accent)
-                          Text(this.catalogProbeBusy ? '识别中' : '连接中').fontSize(12)
-                        }.justifyContent(FlexAlign.Center)
-                      } else {
-                        Text(this.catalogProbeBusy ? '识别中' : '识别').fontSize(12)
-                      }
-                      if (this.catalogProbeBusy && this.catalogProbeTotal > 0 && this.catalogProbeChecked > 0) {
-                        Progress({ value: this.catalogProbeChecked, total: this.catalogProbeTotal, type: ProgressType.Linear })
-                          .width(60).height(3).color(this.colors().accent)
-                          .backgroundColor(this.colors().borderStrong)
-                      }
-                    }
-                  }.width(88).height(48)
-                    .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
-                    .borderRadius(11).enabled(!this.catalogProbeBusy && !this.reconnectBusy && !this.wirelessDebugRestoring)
-                    .accessibilityText(this.catalogProbeBusy ? '正在识别，已核对 ' + this.catalogProbeChecked +
-                      ' / ' + this.catalogProbeTotal + ' 个应用' : '识别本机已安装应用')
-                    .onClick(() => this.openInstallScan())
-                }.width('100%').padding(14).backgroundColor(this.colors().surface).borderRadius(16)
-              }.width('100%').padding({ left: this.pageInset(), right: this.pageInset(), bottom: 12 })
-            }
+            ListItemGroup({ header: this.discoverSearchSpace }) {
             if (this.activeQuery.length > 0) {
               ListItem() {
                 Text('搜索「' + this.activeQuery + '」· ' + this.catalogTotal + ' 个结果')
@@ -3078,8 +3198,9 @@ struct Index {
           .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
           .onDidScroll(() => {
             const offset = this.discoverScroller.currentOffset().yOffset;
-            this.discoverTopBlurOpacity = Math.min(1, Math.max(0,
-              (offset - this.discoverTitleHeight + 24) / 24));
+            // contentStartOffset 使初始 yOffset 为负安全区高度，先归一化，
+            // 否则初始搜索框会多偏移一段状态栏高度，遮住第一张卡片。
+            this.discoverScrollOffset = offset + this.statusBarInset;
           })
           .onReachEnd(() => this.loadMoreApps())
         }
@@ -3470,14 +3591,14 @@ struct Index {
           .fontSize(22).fontWeight(FontWeight.Bold)
           .fontColor(this.colors().text).layoutWeight(1)
         StoreIconButton({ active: !this.reconnectBusy, action: () => {
+          this.completeRefreshConnection(false);
           InstallReconnect.clear(this.resumeJobId); this.animateOverlay(() => { this.showReconnect = false; });
         } })
       }.width('100%')
       Text('前往系统设置，开启无线调试').fontSize(12).padding({ top: 3, bottom: 3 })
         .fontColor(this.colors().accent).width('100%').height(44)
         .decoration({ type: TextDecorationType.Underline, color: this.colors().accent })
-        .onClick(() => new HdcDeviceBridge(getContext(this) as common.UIAbilityContext)
-          .openWirelessSettings())
+        .onClick(() => this.openReconnectSettings())
       Text(this.resumeJobId.length > 0 ? '任务已保存。连接后会从刚才的步骤继续。' :
         '连接后核对本机应用，已有侧载应用会显示打开或更新。')
         .fontSize(13).fontColor(this.colors().textSecondary).width('100%')

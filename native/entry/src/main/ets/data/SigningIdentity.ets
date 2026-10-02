@@ -45,6 +45,13 @@ export class EnrollmentOptions {
 // Login only restores material; an installation or manual enrollment can prepare a certificate.
 export class SigningIdentityRecovery {
   private static deletingCert: string = '';
+  private static restorations: Map<string, Promise<LocalSigningIdentity | undefined>> = new Map();
+  private static freshRestorations: Set<string> = new Set();
+
+  private static notifyChanged(): void {
+    AppStorage.setOrCreate<number>('signingIdentityRevision',
+      (AppStorage.get<number>('signingIdentityRevision') ?? 0) + 1);
+  }
   private static materialDir(context: common.UIAbilityContext): string {
     const dir = context.filesDir + '/signing-identity';
     if (!fileIo.accessSync(dir)) fileIo.mkdirSync(dir, true);
@@ -265,6 +272,7 @@ export class SigningIdentityRecovery {
       const store = await preferences.getPreferences(context, INDEX_NAME);
       await store.put('identity', JSON.stringify(identity));
       await store.flush();
+      SigningIdentityRecovery.notifyChanged();
       return identity;
     } finally {
       try {
@@ -378,6 +386,7 @@ export class SigningIdentityRecovery {
     await store.flush();
     if (String(row['accountId'] ?? '') !== account.userId ||
       String(row['certId'] ?? '') !== certId) return;
+    SigningIdentityRecovery.notifyChanged();
     const certificatePath = SigningIdentityRecovery.materialDir(context) + '/identity.cer';
     try {
       if (fileIo.accessSync(certificatePath)) fileIo.unlinkSync(certificatePath);
@@ -436,7 +445,12 @@ export class SigningIdentityRecovery {
     account: DeveloperAccount): Promise<LocalSigningIdentity> {
     const options = new EnrollmentOptions();
     options.allowLastSlot = true;
-    return (await SigningIdentityRecovery.enroll(context, account, options)).identity;
+    const startedAt = Date.now();
+    try {
+      return (await SigningIdentityRecovery.enroll(context, account, options)).identity;
+    } finally {
+      console.info('SigningIdentity prepare: elapsedMs=' + (Date.now() - startedAt));
+    }
   }
 
   private static async enrollLocked(context: common.UIAbilityContext,
@@ -672,6 +686,7 @@ export class SigningIdentityRecovery {
     await store.put('identity', JSON.stringify(identity));
     await store.put('deleting-cert', '');
     await store.flush();
+    SigningIdentityRecovery.notifyChanged();
     const result = new EnrollmentResult();
     result.outcome = outcome;
     result.identity = identity;
@@ -681,6 +696,27 @@ export class SigningIdentityRecovery {
 
   static async restore(context: common.UIAbilityContext,
     account: DeveloperAccount, refresh: boolean = false): Promise<LocalSigningIdentity | undefined> {
+    const scope = JSON.stringify([context.filesDir, account.userId, account.teamId]);
+    const pending = SigningIdentityRecovery.restorations.get(scope);
+    if (pending !== undefined) {
+      const fresh = SigningIdentityRecovery.freshRestorations.has(scope);
+      const identity = await pending;
+      if (!refresh || fresh) return identity;
+      return SigningIdentityRecovery.restore(context, account, true);
+    }
+    const startedAt = Date.now();
+    if (refresh) SigningIdentityRecovery.freshRestorations.add(scope);
+    const task = SigningIdentityRecovery.restoreLocked(context, account, refresh).finally(() => {
+      SigningIdentityRecovery.restorations.delete(scope);
+      SigningIdentityRecovery.freshRestorations.delete(scope);
+      console.info('SigningIdentity restore: elapsedMs=' + (Date.now() - startedAt));
+    });
+    SigningIdentityRecovery.restorations.set(scope, task);
+    return await task;
+  }
+
+  private static async restoreLocked(context: common.UIAbilityContext,
+    account: DeveloperAccount, refresh: boolean): Promise<LocalSigningIdentity | undefined> {
     if (!refresh) {
       const current = await SigningIdentityRecovery.load(context, account);
       if (current) return current;
@@ -752,6 +788,7 @@ export class SigningIdentityRecovery {
       const store = await preferences.getPreferences(context, INDEX_NAME);
       await store.put('identity', JSON.stringify(identity));
       await store.flush();
+      SigningIdentityRecovery.notifyChanged();
       await new StoreClient(context).rememberSigningIdentity(account, backup);
       return identity;
     } finally {
@@ -807,6 +844,7 @@ export class SigningIdentityRecovery {
         const store = await preferences.getPreferences(context, INDEX_NAME);
         await store.put('identity', JSON.stringify(identity));
         await store.flush();
+        SigningIdentityRecovery.notifyChanged();
         return identity;
       } finally {
         if (fileIo.accessSync(keyTmp)) fileIo.unlinkSync(keyTmp);

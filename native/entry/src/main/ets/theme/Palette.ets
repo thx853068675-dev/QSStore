@@ -38,10 +38,6 @@ export class Palette {
   /** 主色淡底（标签、次要按钮） */
   get accentSoft(): string { return this.pick('#E8EEFF', '#1E2C45'); }
 
-  /** 顶部磨砂的半透明底色和柔光，不形成实色遮挡或黑色投影。 */
-  get glassTint(): string { return this.pick('#70F3F6FD', '#78101B2C'); }
-  get glassHighlight(): string { return this.pick('#52FFFFFF', '#16FFFFFF'); }
-
   /** 主文字 */
   get text(): string { return this.pick('#17213A', '#EAF0F7'); }
   /** 正文 */

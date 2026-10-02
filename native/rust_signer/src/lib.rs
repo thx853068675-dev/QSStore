@@ -1157,9 +1157,7 @@ pub extern "C" fn qingqi_hdc_command(
                 validate_bundle_name(&argument)?;
                 vec!["shell".into(), "bm".into(), "dump".into(), "-n".into(), argument]
             }
-            // 一次列出全部已安装包名。逐个 `bm dump -n` 是「一个包一次设备往返」，
-            // 目录里有多少应用就要多少次；这里一次问完，刷新耗时不再随应用数量
-            // 线性增长（实测应用一多，逐个查询会让刷新慢到十几秒）。
+            // 只返回已安装包名，不包含版本；版本仍须查询在清单中的目标包。
             6 => vec!["shell".into(), "bm".into(), "dump".into(), "-a".into()],
             7 => {
                 validate_bundle_name(&argument)?;

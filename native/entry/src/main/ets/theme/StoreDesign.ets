@@ -13,6 +13,7 @@ export class StoreLayout {
 export struct StoreIconButton {
   symbol: Resource = $r('sys.symbol.xmark');
   label: string = '关闭';
+  controlSize: number = 44;
   @Prop active: boolean = true;
   action: () => void = () => {};
   @StorageProp('darkMode') private darkMode: boolean = false;
@@ -21,8 +22,9 @@ export struct StoreIconButton {
     Button({ type: ButtonType.Circle }) {
       SymbolGlyph(this.symbol).fontSize(18)
         .fontColor([Palette.forMode(this.darkMode).textSecondary])
-    }.width(44).height(44)
+    }.width(this.controlSize).height(this.controlSize)
       .backgroundColor(Palette.forMode(this.darkMode).fill)
+      .responseRegion({ x: (this.controlSize - 44) / 2, y: (this.controlSize - 44) / 2, width: 44, height: 44 })
       .enabled(this.active).stateEffect(true)
       .accessibilityText(this.label)
       .onClick(() => this.action())

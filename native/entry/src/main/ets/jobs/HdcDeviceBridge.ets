@@ -29,11 +29,13 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
 
   private async command(operation: number, parameter: string = '',
     onStart?: () => void): Promise<string> {
+    const queuedAt = Date.now();
     HdcDeviceBridge.commands++;
     const previous = HdcDeviceBridge.queue;
     let release: () => void = () => {};
     HdcDeviceBridge.queue = new Promise<void>((resolve: () => void) => { release = resolve; });
     await previous;
+    const startedAt = Date.now();
     try {
       onStart?.();
       const output = await hdcCommand(this.context.filesDir, operation, parameter);
@@ -44,6 +46,10 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
       HdcDeviceBridge.linked = false;
       throw new Error(String(error));
     } finally {
+      if (operation === 2 || operation === 3 || operation === 6) {
+        console.info('InstalledApps command: op=' + operation + ' queueMs=' +
+          (startedAt - queuedAt) + ' runMs=' + (Date.now() - startedAt));
+      }
       HdcDeviceBridge.commands--;
       release();
       HdcDeviceBridge.idleHandler?.();
@@ -377,11 +383,15 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
 
   /** 先取存在性清单，再只查询目录关心的包版本；清单本身不含 versionCode。 */
   async installedBundleVersions(bundleNames: string[] = [],
-    onProgress?: (checked: number, total: number) => void): Promise<Map<string, number> | undefined> {
+    onProgress?: (checked: number, total: number, bundleName?: string,
+      version?: number) => void): Promise<Map<string, number> | undefined> {
     HdcDeviceBridge.scans++;
+    const startedAt = Date.now();
+    let checked = 0;
+    let present = 0;
+    let queried = 0;
     try {
       const unique = new Set<string>(bundleNames);
-      let checked = 0;
       onProgress?.(checked, unique.size);
       await InstalledAppRegistry.load(this.context);
       if (!await this.connected()) throw new Error('无线调试已断开');
@@ -390,23 +400,35 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
         console.warn('InstalledApps: unrecognized device list');
         return undefined;
       }
+      present = Array.from(unique).filter((name: string) => found.has(name)).length;
       for (const name of unique) {
         if (!found.has(name)) {
           InstalledAppRegistry.remember(name, 0);
-          onProgress?.(++checked, unique.size);
+          onProgress?.(++checked, unique.size, name, 0);
           continue;
         }
+        let version: number = -1;
         try {
+          queried++;
           // 不把单包失败变成未安装；保留它在存在性清单中的位置。
-          found.set(name, await this.readInstalledVersion(name, false));
+          const output = await this.command(3, name);
+          if (output.includes('[Fail]')) break;
+          version = InstalledAppRegistry.parseVersion(output, name);
+          InstalledAppRegistry.remember(name, version);
+          InstalledAppRegistry.rememberLauncher(output, name);
+          found.set(name, version);
         } catch (error) {
           console.warn('InstalledApps: version query failed for ' + name + ': ' + String(error));
+          if (!HdcDeviceBridge.linked) break;
         }
-        onProgress?.(++checked, unique.size);
+        onProgress?.(++checked, unique.size, name, version);
       }
       await InstalledAppRegistry.persist(this.context);
       return found;
     } finally {
+      console.info('InstalledApps scan: requested=' + new Set<string>(bundleNames).size +
+        ' present=' + present + ' queried=' + queried + ' checked=' + checked +
+        ' elapsedMs=' + (Date.now() - startedAt));
       HdcDeviceBridge.scans--;
       HdcDeviceBridge.idleHandler?.();
     }

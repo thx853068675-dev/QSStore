@@ -446,6 +446,28 @@ pub async fn run_server_mode(
     tcp_map: TcpMap,
     usb_map: UsbMap,
 ) -> io::Result<()> {
+    run_server(addr_str, connect_map, tcp_map, usb_map, true).await
+}
+
+/// The app owns both ends of the loopback connection and uses standard HDC.
+/// Waiting for a possible IDE header deadlocks with that client's server-first
+/// handshake until the 800ms sniff timeout expires, once for EVERY command.
+pub async fn run_embedded_server_mode(
+    addr_str: &str,
+    connect_map: ConnectMap,
+    tcp_map: TcpMap,
+    usb_map: UsbMap,
+) -> io::Result<()> {
+    run_server(addr_str, connect_map, tcp_map, usb_map, false).await
+}
+
+async fn run_server(
+    addr_str: &str,
+    connect_map: ConnectMap,
+    tcp_map: TcpMap,
+    usb_map: UsbMap,
+    detect_ide_clients: bool,
+) -> io::Result<()> {
     // Normalize IPv4-mapped/unbracketed IPv6 forms (e.g. "::ffff:127.0.0.1:8710"
     // as shown by netstat), then create the socket in the address's own family.
     let addr: std::net::SocketAddr = crate::parser::normalize_listen_addr(addr_str)
@@ -472,60 +494,72 @@ pub async fn run_server_mode(
     tokio::spawn(usb_device_monitor(cm, tm, um, fm));
 
     loop {
-        let (mut stream, addr) = listener.accept().await?;
+        let (stream, addr) = listener.accept().await?;
         info!("accepted client {addr}");
         let cm = connect_map.clone();
         let tm = tcp_map.clone();
         let um = usb_map.clone();
         let fm = forward_map.clone();
         tokio::spawn(async move {
-            let _ = stream.set_nodelay(true);
-            // Detect DevEco Studio protocol: it sends a flat 48-byte header with
-            // "OHOS HDC" at offsets 4-11 and a length char ',' (0x2C) at offset 3.
-            // The standard hdc client waits for the server handshake before responding,
-            // so a full 48-byte peek that matches this pattern identifies DevEco.
-            let mut peek_buf = [0u8; 48];
-            let is_deveco = match tokio::time::timeout(
-                tokio::time::Duration::from_millis(800),
-                stream.peek(&mut peek_buf),
-            )
-            .await
-            {
-                Ok(Ok(n)) if n == 48 => {
-                    let magic = std::str::from_utf8(&peek_buf[4..12]).unwrap_or("");
-                    let detected = peek_buf[3] == 0x2C && magic == "OHOS HDC";
-                    info!(
-                        "peeked 48 bytes: first=[{:02x},{:02x},{:02x},{:02x}], magic={magic:?}, deveco={detected}",
-                        peek_buf[0], peek_buf[1], peek_buf[2], peek_buf[3]
-                    );
-                    detected
-                }
-                Ok(Ok(n)) => {
-                    info!("peeked {n} bytes, not a full DevEco header");
-                    false
-                }
-                Ok(Err(e)) => {
-                    info!("peek error: {e}");
-                    false
-                }
-                Err(_) => {
-                    info!("peek timeout, treating as standard hdc client");
-                    false
-                }
-            };
-
-            let result = if is_deveco {
-                info!("detected DevEco Studio client protocol");
-                handle_deveco_client(stream, cm, tm, um, fm).await
-            } else {
-                handle_client(stream, cm, tm, um, fm).await
-            };
-            if let Err(e) = result {
-                // Most errors here are normal disconnects (e.g. DevEco Studio closing
-                // the IDE socket or the target device going away). Log at warn level.
-                warn!("client handler ended: {e}");
-            }
+            handle_host_connection(stream, cm, tm, um, fm, detect_ide_clients).await;
         });
+    }
+}
+
+async fn handle_host_connection(
+    stream: TcpStream,
+    cm: ConnectMap,
+    tm: TcpMap,
+    um: UsbMap,
+    fm: ForwardMap,
+    detect_ide_clients: bool,
+) {
+    let _ = stream.set_nodelay(true);
+    let is_deveco = detect_ide_clients && detect_deveco_client(&stream).await;
+
+    let result = if is_deveco {
+        info!("detected DevEco Studio client protocol");
+        handle_deveco_client(stream, cm, tm, um, fm).await
+    } else {
+        handle_client(stream, cm, tm, um, fm).await
+    };
+    if let Err(e) = result {
+        // Most errors here are normal disconnects (e.g. DevEco Studio closing
+        // the IDE socket or the target device going away). Log at warn level.
+        warn!("client handler ended: {e}");
+    }
+}
+
+async fn detect_deveco_client(stream: &TcpStream) -> bool {
+    // IDE clients send first; standard clients wait for server-hello.
+    let mut peek_buf = [0u8; 48];
+    match tokio::time::timeout(
+        tokio::time::Duration::from_millis(800),
+        stream.peek(&mut peek_buf),
+    )
+    .await
+    {
+        Ok(Ok(n)) if n == 48 => {
+            let magic = std::str::from_utf8(&peek_buf[4..12]).unwrap_or("");
+            let detected = peek_buf[3] == 0x2C && magic == "OHOS HDC";
+            info!(
+                "peeked 48 bytes: first=[{:02x},{:02x},{:02x},{:02x}], magic={magic:?}, deveco={detected}",
+                peek_buf[0], peek_buf[1], peek_buf[2], peek_buf[3]
+            );
+            detected
+        }
+        Ok(Ok(n)) => {
+            info!("peeked {n} bytes, not a full DevEco header");
+            false
+        }
+        Ok(Err(e)) => {
+            info!("peek error: {e}");
+            false
+        }
+        Err(_) => {
+            info!("peek timeout, treating as standard hdc client");
+            false
+        }
     }
 }
 
@@ -4756,6 +4790,31 @@ async fn start_usb_session(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn embedded_standard_client_receives_hello_without_ide_sniff_delay() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                handle_host_connection(stream, ConnectMap::new(), TcpMap::new(),
+                    UsbMap::new(), Arc::new(Mutex::new(HashMap::new())), false).await;
+            }
+        });
+        for _ in 0..3 {
+            let parsed = crate::parser::parse_command(
+                ["hdc", "-p", "-s", &address, "list", "targets"].map(String::from).into_iter()).unwrap();
+            let mut client = crate::client::Client::new(&parsed).await.unwrap();
+            // A standard client waits for server-hello; the previous auto-sniff
+            // branch cannot deliver that hello until 800ms has elapsed.
+            tokio::time::timeout(std::time::Duration::from_millis(300),
+                client.handshake()).await.expect("loopback hello must not wait for an IDE").unwrap();
+            client.execute_command().await.unwrap();
+            assert!(!client.take_output().contains("[Fail]"));
+        }
+        server.await.unwrap();
+    }
+
     #[test]
     fn install_result_uses_bm_response_instead_of_ambiguous_status_byte() {
         for status in [0, 1] {

@@ -18,7 +18,7 @@ function load(file, mocks = {}, globals = {}) {
     load('jobs/InstallTaskState.ets', { './InstallJob': load('jobs/InstallJob.ets') }) :
     n === './JobCancellation' ? load('jobs/JobCancellation.ets') :
     n === './BackgroundInstallTask' ? load('jobs/BackgroundInstallTask.ets') : {}),
-    setTimeout, clearTimeout, console, ...globals });
+    setTimeout, clearTimeout, console, AppStorage: { get: () => 0, setOrCreate() {} }, ...globals });
   return exports;
 }
 function preferences() {
@@ -51,7 +51,7 @@ async function fixture({ expiry = 1, backup = true, key = true,
     copyFile: async (a, b) => { if (!files.has(a)) throw Error('missing source'); files.set(b, files.get(a)); },
     renameSync: (a, b) => { if (!files.has(a)) throw Error('missing source'); files.set(b, files.get(a)); files.delete(a); } };
   class StoreClient {
-    async signingIdentity() { state.cloudReads++; if (state.cloudError) throw Error('offline'); return state.backup; }
+    async signingIdentity() { state.cloudReads++; if (state.cloudError) throw Error('offline'); if (state.cloudGate) await state.cloudGate; return state.backup; }
     async rememberSigningIdentity(_account, data) { state.acknowledged.push(data.revision); }
     async publishSigningIdentity(certId) { state.published.push(certId);
       if (state.publishErrorAt === certId) throw Error('backup unavailable'); }
@@ -84,7 +84,7 @@ async function fixture({ expiry = 1, backup = true, key = true,
       }
     } }
   });
-  return { R, EnrollmentOptions, context, account, identity, keyPath, files, state };
+  return { R, EnrollmentOptions, context, account, identity, keyPath, files, state, prefs };
 }
 
 test('update selects another AGC certificate only when its leaf matches and the local key pairs', async () => {
@@ -395,4 +395,30 @@ test('backup: failed acknowledgement is rejected instead of clearing warning', a
   const { c, account } = await clientFixture();
   c.requestData = async () => ({ synced: false, cert_id: '999', revision: 4 });
   await assert.rejects(c.publishSigningIdentity('101', 'key', account));
+});
+
+test('startup recovery and automatic enrollment share the same slow backup read', async () => {
+  const f = await fixture({ expiry: 4102444800 });
+  await (await f.prefs.getPreferences(f.context, 'signing-identity')).put('identity', '');
+  let finish;
+  f.state.cloudGate = new Promise(resolve => { finish = resolve; });
+  const startup = f.R.restore(f.context, f.account);
+  const automatic = f.R.ensureForInstall(f.context, f.account);
+  await new Promise(setImmediate);
+  assert.equal(f.state.cloudReads, 1, 'no duplicate recovery while the first read is pending');
+  finish();
+  const [recovered, installed] = await Promise.all([startup, automatic]);
+  assert.equal(recovered.certId, '100');
+  assert.equal(installed.certId, '100');
+  assert.equal(f.state.creates, 0);
+});
+
+test('a failed shared recovery is released so the same process can retry', async () => {
+  const f = await fixture({ expiry: 4102444800 });
+  await (await f.prefs.getPreferences(f.context, 'signing-identity')).put('identity', '');
+  f.state.cloudError = true;
+  await assert.rejects(f.R.restore(f.context, f.account), /offline/);
+  f.state.cloudError = false;
+  assert.equal((await f.R.ensureForInstall(f.context, f.account)).certId, '100');
+  assert.equal(f.state.creates, 0);
 });

@@ -52,6 +52,26 @@ test('a month-old device observation is not presented as a current install', asy
   assert.equal(registry.version(bundle), -1);
   assert.equal(registry.launcher(bundle), undefined);
 });
+test('the detected version name survives restart and is never applied to a different build', async () => {
+  const disk = new Map();
+  const mocks = { '@kit.ArkData': { preferences: { getPreferences: async () => ({
+    get: async (key, fallback) => disk.get(key) ?? fallback,
+    put: async (key, value) => disk.set(key, value), flush: async () => {}
+  }) } } };
+  const first = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  first.remember(bundle, 120101);
+  first.rememberLauncher(JSON.stringify({ name: bundle, versionCode: 120101,
+    versionName: '1.2.1-beta' }), bundle);
+  await first.persist({});
+  const restarted = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  await restarted.load({});
+  assert.equal(restarted.versionName(bundle, 120101), '1.2.1-beta');
+  assert.equal(restarted.versionName(bundle, 110003), '');
+  restarted.remember(bundle, 120102);
+  assert.equal(restarted.versionName(bundle, 120102), '');
+  restarted.remember(bundle, 0);
+  assert.equal(restarted.versionName(bundle, 120101), '');
+});
 function fixture() {
   const { InstalledAppRegistry: registry } = load('jobs/InstalledAppRegistry');
   const f = { calls: [], detail: JSON.stringify({ name: bundle, versionCode: 110003, versionName: '1.1.0' }), list: names };
@@ -59,7 +79,7 @@ function fixture() {
     './InstalledAppRegistry': { InstalledAppRegistry: registry }
   });
   f.bridge = new HdcDeviceBridge({ filesDir: '/sandbox' });
-  f.bridge.connected = async () => true;
+  f.bridge.connected = async () => { HdcDeviceBridge.linked = true; return true; };
   f.bridge.command = async (op, arg) => { f.calls.push([op, arg]); return op === 6 ? f.list : f.detail; };
   f.registry = registry; f.Bridge = HdcDeviceBridge; return f;
 }
@@ -67,6 +87,40 @@ test('real 6.1 list format only proves presence; requested versions come from pa
   const f = fixture(); const values = await f.bridge.installedBundleVersions([bundle, bundle]);
   assert.equal(values.get(bundle), 110003); assert.equal(f.registry.version(bundle), 110003);
   assert.equal(f.calls.length, 2); assert.equal(f.calls[0][0], 6); assert.equal(f.calls[1][0], 3);
+});
+test('manual rescan immediately detects an external version change and uninstall, even with fresh display cache', async () => {
+  const f = fixture();
+  await f.bridge.installedBundleVersions([bundle]);
+  f.detail = JSON.stringify({ name: bundle, versionCode: 120101 });
+  const updated = await f.bridge.installedBundleVersions([bundle]);
+  assert.equal(updated.get(bundle), 120101);
+  assert.equal(f.calls.filter(([op]) => op === 3).length, 2, 'a fresh display cache cannot skip live rescan');
+  f.list = 'ID: 100:\ncom.tonghongxiang.hapstore\n';
+  const removed = await f.bridge.installedBundleVersions([bundle]);
+  assert.equal(removed.has(bundle), false);
+  assert.equal(f.registry.version(bundle), 0);
+});
+test('one malformed package does not repeat the full inventory or lose other live results', async () => {
+  const f = fixture(), other = 'com.example.other';
+  f.list += other + '\n';
+  f.bridge.command = async (op, name) => {
+    f.calls.push([op, name]);
+    return op === 6 ? f.list : name === bundle ? 'invalid package details' :
+      JSON.stringify({ name: other, versionCode: 42 });
+  };
+  const values = await f.bridge.installedBundleVersions([bundle, other]);
+  assert.equal(values.has(bundle), true);
+  assert.equal(values.get(other), 42);
+  assert.equal(f.calls.filter(([op]) => op === 6).length, 1);
+});
+test('a broken link stops the remaining package queries without deleting cached installs', async () => {
+  const f = fixture(), other = 'com.example.other';
+  f.list += other + '\n'; f.registry.remember(other, 99);
+  f.detail = '[Fail] disconnected';
+  const values = await f.bridge.installedBundleVersions([bundle, other]);
+  assert.equal(f.calls.filter(([op]) => op === 3).length, 1);
+  assert.equal(values.has(other), true);
+  assert.equal(f.registry.version(other), 99);
 });
 test('inventory progress counts unique present and absent packages and protects the full scan', async () => {
   const f = fixture(); const progress = [];

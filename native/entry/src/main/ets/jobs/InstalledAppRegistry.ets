@@ -4,12 +4,14 @@ import { preferences } from '@kit.ArkData';
 /** 跨页面复用设备已确认的版本；没有安装记录的侧载应用也能被识别。 */
 class InstalledVersionEntry {
   version: number = 0;
+  versionName: string = '';
   at: number = 0;
 }
 
 class SavedInstalledEntry {
   bundleName: string = '';
   version: number = 0;
+  versionName: string = '';
   at: number = 0;
   moduleName: string = '';
   abilityName: string = '';
@@ -71,6 +73,7 @@ export class InstalledAppRegistry {
         if (existing !== undefined && existing.at >= at) continue;
         const entry = new InstalledVersionEntry();
         entry.version = version;
+        entry.versionName = String(row['versionName'] ?? '').trim().substring(0, 128);
         entry.at = at;
         InstalledAppRegistry.savedVersions.set(name, entry);
         const moduleName = String(row['moduleName'] ?? '');
@@ -120,6 +123,7 @@ export class InstalledAppRegistry {
           const row = new SavedInstalledEntry();
           row.bundleName = name;
           row.version = entry.version;
+          row.versionName = entry.versionName;
           row.at = entry.at;
           const target = InstalledAppRegistry.launchers.get(name);
           row.moduleName = target?.moduleName ?? '';
@@ -145,6 +149,10 @@ export class InstalledAppRegistry {
   static rememberLauncher(output: string, bundleName: string): void {
     const row = JSON.parse(output.substring(output.indexOf('{'))) as Record<string, Object>;
     if (String(row['name'] ?? '') !== bundleName) return;
+    const observed = InstalledAppRegistry.savedVersions.get(bundleName);
+    if (observed !== undefined && observed.version === Number(row['versionCode'])) {
+      observed.versionName = String(row['versionName'] ?? '').trim().substring(0, 128);
+    }
     const modules = row['hapModuleInfos'] as Array<Record<string, Object>> | undefined;
     const entry = String(row['entryModuleName'] ?? row['mainEntry'] ?? '');
     const module = modules?.find((item: Record<string, Object>) =>
@@ -167,6 +175,7 @@ export class InstalledAppRegistry {
     const previous = InstalledAppRegistry.savedVersions.get(bundleName);
     const entry = new InstalledVersionEntry();
     entry.version = version;
+    entry.versionName = previous?.version === version ? previous.versionName : '';
     entry.at = Date.now();
     InstalledAppRegistry.versions.set(bundleName, entry);
     if (version > 0) {
@@ -187,6 +196,13 @@ export class InstalledAppRegistry {
     const saved = InstalledAppRegistry.savedVersions.get(bundleName);
     return saved !== undefined && Date.now() - saved.at < InstalledAppRegistry.SAVED_MAX_AGE_MS ?
       saved.version : -1;
+  }
+
+  /** 版本名仅属于被核对的那个构建，不能套用商店最新版本或旧安装历史。 */
+  static versionName(bundleName: string, versionCode: number): string {
+    const saved = InstalledAppRegistry.savedVersions.get(bundleName);
+    return saved !== undefined && saved.version === versionCode &&
+      InstalledAppRegistry.version(bundleName) === versionCode ? saved.versionName : '';
   }
 
   /** -a 是存在性清单，不含版本；缺席才可以记为未安装。 */

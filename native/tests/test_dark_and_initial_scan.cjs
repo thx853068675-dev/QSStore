@@ -34,7 +34,7 @@ function deferred() {
 function fixture() {
   const f = { snapshot: false, snapshots: 0, probes: [], reconciles: [] };
   const ui = page('Index', ['animateOverlay', 'updateInstallScanPrompt', 'openInstallScan',
-    'confirmCatalogVersionsViaDevice', 'reconcileCatalogInstallState'], {
+    'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'reconcileCatalogInstallState'], {
     Curve: { EaseOut: 'ease-out' },
     getContext: () => ({}),
     InstalledAppRegistry: {
@@ -42,6 +42,7 @@ function fixture() {
       async markCatalogSnapshot() { f.snapshot = true; f.snapshots++; }
     },
     HdcDeviceBridge: class {
+      static deviceLinked() { return true; }
       async installedBundleVersions(names) {
         const work = deferred(); f.probes.push({ names: [...names], ...work });
         return work.promise;
@@ -109,7 +110,8 @@ test('catalog arriving during a scan is coalesced instead of losing the later ap
   const f = fixture(), ui = f.ui;
   const run = ui.confirmCatalogVersionsViaDevice(['com.example.one']);
   ui.apps.push({ id: 2, latestAsset: { bundleName: 'com.example.two' } });
-  await ui.confirmCatalogVersionsViaDevice(['com.example.two']);
+  const joined = ui.confirmCatalogVersionsViaDevice(['com.example.two']);
+  assert.equal(joined, run, 'all callers share the full scan completion');
   f.probes[0].resolve(new Map([['com.example.one', 1]]));
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(f.probes[1].names, ['com.example.two']);
@@ -125,6 +127,14 @@ test('failed wireless reads preserve confirmed state and do not mark first scan 
   f.probes[0].reject(Error('offline')); await run;
   assert.equal(ui.installedVersions.get(1), 110003);
   assert.equal(f.snapshots, 0);
+});
+test('cached display state cannot turn a partial live inventory into a completed scan', async () => {
+  const f = fixture(), ui = f.ui;
+  ui.installedVersions.set(1, 110003);
+  const run = ui.confirmCatalogVersionsViaDevice(['com.example.one']);
+  f.probes[0].resolve(new Map([['com.example.one', 0]])); await run;
+  assert.equal(ui.installedVersions.get(1), 110003, 'keep the offline display state');
+  assert.equal(f.snapshots, 0, 'a failed version read is not proof of a complete scan');
 });
 test('scan completion and side-loaded versions survive a process restart independently', async () => {
   const disk = new Map();
@@ -173,8 +183,77 @@ test('an old icon color request cannot put a light hero background into a dark p
 test('an inventory already in flight covers repeated requests for the same packages', async () => {
   const f = fixture(), ui = f.ui;
   const work = ui.confirmCatalogVersionsViaDevice(['com.example.one']);
-  await ui.confirmCatalogVersionsViaDevice(['com.example.one', 'com.example.one']);
+  const joined = ui.confirmCatalogVersionsViaDevice(['com.example.one', 'com.example.one']);
+  assert.equal(joined, work);
   f.probes[0].resolve(new Map([['com.example.one', 1]])); await work;
   assert.equal(f.probes.length, 1);
   assert.equal(ui.installedVersions.get(1), 1);
+});
+
+test('packages arriving while a snapshot is being saved are included in scan completion', async () => {
+  const f = fixture(), ui = f.ui, save = deferred();
+  const registry = { hasCatalogSnapshot: () => false, markCatalogSnapshot: () => save.promise };
+  // Reuse the production drain with a delayed snapshot adapter.
+  const drain = page('Index', ['runCatalogVersionProbes'], {
+    getContext: () => ({}), InstalledAppRegistry: registry,
+    HdcDeviceBridge: class {
+      static deviceLinked() { return true; } installedBundleVersions(names) {
+      const work = deferred(); f.probes.push({ names: [...names], ...work }); return work.promise;
+    } }
+  });
+  ui.runCatalogVersionProbes = drain.runCatalogVersionProbes;
+  const work = ui.confirmCatalogVersionsViaDevice(['com.example.one']);
+  f.probes[0].resolve(new Map([['com.example.one', 1]]));
+  await new Promise(resolve => setImmediate(resolve));
+  ui.apps.push({ id: 2, latestAsset: { bundleName: 'com.example.two' } });
+  const joined = ui.confirmCatalogVersionsViaDevice(['com.example.two']);
+  assert.equal(joined, work);
+  save.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.catalogProbeBusy, true);
+  assert.deepEqual(f.probes[1].names, ['com.example.two']);
+  f.probes[1].resolve(new Map([['com.example.two', 2]])); await work;
+  assert.equal(ui.installedVersions.get(2), 2);
+});
+
+test('a failed earlier batch cannot be hidden by a successful later batch', async () => {
+  const f = fixture(), ui = f.ui;
+  ui.installedVersions.set(1, 100);
+  const work = ui.confirmCatalogVersionsViaDevice(['com.example.one']);
+  ui.apps.push({ id: 2, latestAsset: { bundleName: 'com.example.two' } });
+  ui.confirmCatalogVersionsViaDevice(['com.example.two']);
+  f.probes[0].resolve(new Map([['com.example.one', 0]]));
+  await new Promise(resolve => setImmediate(resolve));
+  f.probes[1].resolve(new Map([['com.example.two', 2]])); await work;
+  assert.equal(f.snapshots, 0);
+  assert.equal(ui.installedVersions.get(1), 100);
+});
+
+test('automatic identity changes update My locally and wake certificate-paused installs without a restart', async () => {
+  const work = deferred(), wakes = [];
+  const ui = page('Index', ['onSigningIdentityChanged', 'applyCertificateDetail'], {
+    getContext: () => ({}),
+    SigningIdentityRecovery: { load: () => work.promise },
+    InstallCoordinator: { conditionReady: async (_context, stage) => wakes.push(stage) },
+    InstallStage: { WAITING_ACCOUNT: 'waiting-account' }
+  });
+  Object.assign(ui, { signedIn: true, account: { userId: '42' }, signingIdentityRevision: 1,
+    certReady: false, identityBusy: false, identityMessage: '待申请' });
+  const run = ui.onSigningIdentityChanged();
+  work.resolve({ certId: '100', certName: 'paired', certExpiry: 0 }); await run;
+  assert.equal(ui.certReady, true);
+  assert.equal(ui.certId, '100'); assert.equal(ui.certLabel, 'paired');
+  assert.equal(ui.identityMessage, '');
+  assert.deepEqual(wakes, ['waiting-account']);
+});
+
+test('a late identity read cannot restore certificate state after signing out or switching users', async () => {
+  const work = deferred();
+  const ui = page('Index', ['onSigningIdentityChanged'], {
+    getContext: () => ({}), SigningIdentityRecovery: { load: () => work.promise }
+  });
+  Object.assign(ui, { signedIn: true, account: { userId: '42' }, signingIdentityRevision: 1, certReady: false });
+  const run = ui.onSigningIdentityChanged();
+  ui.account = { userId: 'other' };
+  work.resolve({ certId: '100' }); await run;
+  assert.equal(ui.certReady, false);
 });

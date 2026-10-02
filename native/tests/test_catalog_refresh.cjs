@@ -24,7 +24,7 @@ const code = ts.transpileModule(`class Index {
   static STAR_FIELD_COUNT = 46;
   static STARRED_MIN_STARS = 100;
   ${['catalogHasMore', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
-    'latestAssets', 'assetForBundle', 'refreshCatalogInstallState', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice',
+    'latestAssets', 'assetForBundle', 'refreshCatalogInstallState', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion',
     'displayApps', 'featuredTier', 'featuredColors']
     .map(method).join('\n')}
 }; globalThis.Page = Index;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
@@ -49,6 +49,7 @@ function fixture() {
     decode: async () => ({ release: async () => releases.push('pixels') }) };
   const f2 = {};
   f2.localBundles = { installedVersion: () => f.localVersion,
+    liveInstalledVersion: () => f.localVersion,
     isKnown: (v) => v !== -1, UNKNOWN: -1 };
   f2.bridgeClass = class {
     async connected() { calls.push('connected'); return f.deviceConnected; }
@@ -69,7 +70,8 @@ function fixture() {
       return out.size > 0 ? out : undefined;
     }
   };
-  f2.store = { forget: async (id) => removed.push(id) };
+  f2.bridgeClass.deviceLinked = () => f.deviceConnected;
+  f2.store = { forget: async (id) => removed.push(id), get: async () => undefined };
   f2.removed = removed;
   f2.calls = calls;
   f2.localVersion = 0;
@@ -79,7 +81,8 @@ function fixture() {
   f2.deviceUnparsable = false;
   f2.deviceVersions = {};
   f2.knownBundles = [];
-  const sandbox = { setTimeout, clearTimeout, console,
+  const sandbox = { setTimeout, clearTimeout, console, Curve: { EaseOut: 'ease-out' },
+    InstallReconnect: { clear() {}, deactivate() {} }, InstallConfirmation: { deactivate() {} }, InstallCoordinator: { conditionReady() {} }, InstallStage: { WAITING_DEVICE: 'waiting-device' },
     StoreClient: class {
       listApps(number, size, sort, query) {
         const d = deferred(); requests.push({ ...d, number, query }); return d.promise;
@@ -96,7 +99,7 @@ function fixture() {
     image: { createImageSource: () => ({ createPixelMap: () => f.decode(),
       release: async () => releases.push('source') }) },
     util: { Base64Helper: class { encodeToStringSync(bytes) { return Buffer.from(bytes).toString('base64'); } } },
-    InstalledAppRegistry: { markCatalogSnapshot: async () => {} },
+    InstalledAppRegistry: { markCatalogSnapshot: async () => {}, version: () => -1 },
     LocalBundles: f.localBundles,
     HdcDeviceBridge: f.bridgeClass,
     JobStore: { open: async () => f.store }
@@ -107,6 +110,7 @@ function fixture() {
   Object.assign(ui, { catalogToken: 0, activeQuery: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
     catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false,
     catalogRefreshing: false, catalogRefreshBusy: false, catalogError: '',
+    getUIContext: () => ({ animateTo: (_options, change) => change() }),
     installedVersions: new Map(), installedJobs: [], catalogProbeBusy: false, catalogProbeNames: [], catalogProbePending: [], updateCatalogReady: false, updateInstallScanPrompt() {}, refreshCatalogInstallState() {},
     updateApps() { return this.apps; }, syncDetectedInstalled() {}, reconcileDetectedJobs: async () => {}, forgetInstalledVersions() {}, loadUpdateCatalog() {}, checkInstalledUpdates() {},
     refreshCatalogInstallState() {} });
@@ -366,25 +370,65 @@ test('featured card thresholds cover hundreds, thousands, and ten thousands', ()
   assert.notEqual(ui.featuredColors(1000)[0][0], ui.featuredColors(10000)[0][0]);
 });
 
-test('pull refresh ends while an icon and a device inventory are still pending', async () => {
+test('pull refresh waits for device recognition but leaves icon downloads in the background', async () => {
   const f = fixture(), ui = f.ui, icon = deferred(), device = deferred();
+  f.localVersion = -1;
   f.icon = () => icon.promise;
   f.bridgeClass.prototype.installedBundleVersions = () => device.promise;
   delete ui.refreshCatalogInstallState; // execute the production dispatcher
   ui.updateInstallScanPrompt = () => {};
   const run = ui.pullRefreshCatalog();
   f.requests[0].resolve(page([{ id: 1, latestAsset: { bundleName: 'app.one' } }]));
-  await run;
-  assert.equal(ui.catalogRefreshing, false);
+  await tick();
+  assert.equal(ui.catalogRefreshing, true);
   assert.equal(ui.catalogPage, 1);
   assert.equal(ui.catalogTotal, 1);
   assert.equal(ui.catalogProbeBusy, true);
   assert.equal(ui.appIcons.length, 0);
-  icon.resolve(new ArrayBuffer(4)); device.resolve(new Map([['app.one', 123]]));
-  await tick();
+  device.resolve(new Map([['app.one', 123]]));
+  await run;
+  assert.equal(ui.catalogRefreshing, false);
+  assert.equal(ui.catalogProbeBusy, false);
+  assert.equal(ui.appIcons.length, 0);
+  icon.resolve(new ArrayBuffer(4)); await tick();
   assert.equal(ui.appIcons.length, 1);
   assert.equal(ui.installedVersions.get(1), 123);
   assert.equal(f.savedIcons[0][0].id, '1');
+});
+
+test('dispatcher deduplicates variant bundle names and only sends system-unknown packages to wireless', () => {
+  const f = fixture(), ui = f.ui, nativeQueries = [], scans = [];
+  const asset = bundleName => ({ bundleName });
+  ui.apps = [{ id: 1, latestAsset: asset('app.known'), latestAssets: [asset('app.known'), asset('app.known')] },
+    { id: 2, latestAsset: asset('app.unknown'), latestAssets: [asset('app.unknown'), asset('app.unknown')] }];
+  f.localBundles.liveInstalledVersion = name => {
+    nativeQueries.push(name); return name === 'app.known' ? 9 : -1;
+  };
+  delete ui.refreshCatalogInstallState;
+  ui.confirmCatalogVersionsViaDevice = names => scans.push([...names]);
+  ui.refreshCatalogInstallState(true);
+  assert.deepEqual(nativeQueries, ['app.known', 'app.unknown']);
+  assert.deepEqual(scans, [['app.unknown']]);
+  assert.equal(ui.installedVersions.get(1), 9);
+});
+
+test('a live package result updates its button before the rest of the device scan finishes', async () => {
+  const f = fixture(), ui = f.ui, remaining = deferred();
+  ui.apps = [{ id: 1, latestAsset: { bundleName: 'app.one' } },
+    { id: 2, latestAsset: { bundleName: 'app.two' } }];
+  f.bridgeClass.prototype.installedBundleVersions = async (_names, progress) => {
+    progress(1, 2, 'app.one', 123);
+    await remaining.promise;
+    progress(2, 2, 'app.two', 456);
+    return new Map([['app.one', 123], ['app.two', 456]]);
+  };
+  const run = ui.confirmCatalogVersionsViaDevice(['app.one', 'app.two']);
+  await tick();
+  assert.equal(ui.catalogProbeBusy, true);
+  assert.equal(ui.installedVersions.get(1), 123);
+  assert.equal(ui.installedVersions.has(2), false);
+  remaining.resolve(); await run;
+  assert.equal(ui.installedVersions.get(2), 456);
 });
 
 test('repeated refresh and pagination reuse an unfinished icon without losing the first page', async () => {
@@ -407,4 +451,113 @@ test('old icon revisions cannot replace a new icon after a background download f
   await tick(); old.resolve(new ArrayBuffer(4)); await tick();
   assert.equal(ui.appIcons.length, 1); assert.equal(ui.appIcons[0].rev, 'rev-2');
   assert.ok(f.savedIcons.flat().every(icon => icon.rev === 'rev-2'));
+});
+
+test('pull refresh joins an existing scan and remains visible until new packages are checked', async () => {
+  const f = fixture(), ui = f.ui, batches = [];
+  f.localVersion = -1;
+  delete ui.refreshCatalogInstallState;
+  f.bridgeClass.prototype.installedBundleVersions = names => {
+    const work = deferred(); batches.push({ names: [...names], ...work }); return work.promise;
+  };
+  const existing = ui.confirmCatalogVersionsViaDevice(['app.one']);
+  const pull = ui.pullRefreshCatalog();
+  f.requests[0].resolve(page([
+    { id: 1, latestAsset: { bundleName: 'app.one' } },
+    { id: 2, latestAsset: { bundleName: 'app.two' } }
+  ]));
+  await tick();
+  assert.equal(ui.catalogRefreshing, true);
+  assert.equal(batches.length, 1);
+  batches[0].resolve(new Map([['app.one', 123]])); await tick();
+  assert.equal(ui.catalogRefreshing, true);
+  assert.deepEqual(batches[1].names, ['app.two']);
+  batches[1].resolve(new Map([['app.two', 456]]));
+  await Promise.all([existing, pull]);
+  assert.equal(ui.catalogRefreshing, false);
+  assert.equal(ui.installedVersions.get(1), 123);
+  assert.equal(ui.installedVersions.get(2), 456);
+});
+
+test('a failed device scan releases pull refresh without erasing confirmed versions', async () => {
+  const f = fixture(), ui = f.ui, device = deferred();
+  f.localVersion = -1;
+  ui.installedVersions.set(1, 123);
+  delete ui.refreshCatalogInstallState;
+  f.bridgeClass.prototype.installedBundleVersions = () => device.promise;
+  const pull = ui.pullRefreshCatalog();
+  f.requests[0].resolve(page([{ id: 1, latestAsset: { bundleName: 'app.one' } }]));
+  await tick(); assert.equal(ui.catalogRefreshing, true);
+  device.reject(Error('wireless port closed')); await pull;
+  assert.equal(ui.catalogRefreshing, false);
+  assert.equal(ui.catalogProbeBusy, false);
+  assert.equal(ui.installedVersions.get(1), 123);
+});
+
+test('failed automatic reconnect opens a sheet and successful manual connection resumes the same refresh', async () => {
+  const f = fixture(), ui = f.ui;
+  f.localVersion = -1; f.deviceConnected = false;
+  ui.pageVisible = true; ui.showReconnect = false; ui.resumeJobId = ''; ui.reconnectPort = '45678';
+  delete ui.refreshCatalogInstallState;
+  let probes = 0, connects = 0;
+  f.bridgeClass.prototype.installedBundleVersions = async () => {
+    probes++;
+    if (!f.deviceConnected) throw Error('saved port could not reconnect');
+    return new Map([['app.one', 123]]);
+  };
+  f.bridgeClass.prototype.connect = async () => {
+    connects++;
+    if (connects === 1) return false;
+    f.deviceConnected = true; return true;
+  };
+  f.bridgeClass.prototype.connectionFailureMessage = () => '端口未开启';
+  const pull = ui.pullRefreshCatalog();
+  f.requests[0].resolve(page([{ id: 1, latestAsset: { bundleName: 'app.one' } }]));
+  await tick();
+  assert.equal(probes, 1, 'the inventory already tried automatic reconnect');
+  assert.equal(ui.showReconnect, true);
+  assert.equal(ui.catalogRefreshing, true);
+  await ui.reconnect();
+  assert.equal(ui.showReconnect, true, 'bad manual port leaves the sheet available for retry');
+  assert.equal(ui.catalogRefreshing, true);
+  assert.equal(ui.reconnectBusy, false);
+  await ui.reconnect(); await pull;
+  assert.equal(probes, 2, 'resume the existing batch, without an extra parallel scan');
+  assert.equal(ui.showReconnect, false);
+  assert.equal(ui.catalogRefreshing, false);
+  assert.equal(ui.installedVersions.get(1), 123);
+});
+
+test('cancelling the connection sheet ends refresh and does not ask again for later batches', async () => {
+  const f = fixture(), ui = f.ui;
+  f.localVersion = -1; f.deviceConnected = false;
+  ui.pageVisible = true; ui.showReconnect = false;
+  delete ui.refreshCatalogInstallState;
+  f.bridgeClass.prototype.installedBundleVersions = async () => { throw Error('offline'); };
+  const pull = ui.pullRefreshCatalog();
+  f.requests[0].resolve(page([{ id: 1, latestAsset: { bundleName: 'app.one' } }]));
+  await tick(); assert.equal(ui.showReconnect, true);
+  const joined = ui.confirmCatalogVersionsViaDevice(['app.two']);
+  ui.completeRefreshConnection(false); ui.showReconnect = false;
+  await Promise.all([pull, joined]);
+  assert.equal(ui.catalogRefreshing, false);
+  assert.equal(ui.showReconnect, false);
+  assert.equal(ui.installedVersions.get(1), -1);
+});
+
+test('opening wireless settings preserves the pending refresh while ordinary navigation cancels it', async () => {
+  const f = fixture(), ui = f.ui;
+  ui.catalogRefreshBusy = true; ui.pageVisible = true; ui.showReconnect = false; ui.resumeJobId = '';
+  f.bridgeClass.prototype.openWirelessSettings = async () => {};
+  let ended = false;
+  const wait = ui.waitForRefreshConnection().then(value => { ended = true; return value; });
+  await ui.openReconnectSettings(); ui.onPageHide(); await tick();
+  assert.equal(ended, false);
+  assert.equal(ui.showReconnect, true);
+  ui.pageVisible = true; ui.refreshOpeningSettings = false;
+  ui.completeRefreshConnection(true);
+  assert.equal(await wait, true);
+  const cancelled = ui.waitForRefreshConnection(); ui.onPageHide();
+  assert.equal(await cancelled, false);
+  assert.equal(ui.showReconnect, false);
 });

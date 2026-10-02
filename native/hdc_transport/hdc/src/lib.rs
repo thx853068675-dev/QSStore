@@ -169,7 +169,7 @@ fn start_on(address: &str, port: u16) -> io::Result<()> {
         if let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
             .enable_all().worker_threads(2).build()
         {
-            let result = runtime.block_on(server::run_server_mode(&server_address,
+            let result = runtime.block_on(server::run_embedded_server_mode(&server_address,
                 connect_map, tcp_map, server::UsbMap::new()));
             if let Err(error) = result {
                 tracing::error!("Qingqi HDC server stopped: {error}");

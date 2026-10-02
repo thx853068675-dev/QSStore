@@ -42,6 +42,7 @@ function fixture() {
     UpdateTarget: class {}, LocalBundles: { isKnown: v => v !== -1,
       installedVersion: () => f.actual, liveInstalledVersion: () => f.actual,
       installedVersionName: () => f.versionName ?? '' },
+    InstalledAppRegistry: { versionName: () => f.observedName ?? '' },
     router: { pushUrl: value => f.routes.push(value) }, getContext: () => ({}),
     errorText: e => e.message, JobStore: { open: async () => store },
     JobScheduler: { runDownload: async (_, __, job) => f.downloads.push(job) }
@@ -75,6 +76,16 @@ test('only the exact nonempty bundle and a higher version qualify', () => {
 test('newer actual device version suppresses a stale local record update', () => {
   const f = fixture(); f.actual = 3; f.ui.updateCatalog = [app()]; f.ui.updateCatalogReady = true;
   f.ui.checkInstalledUpdates(); assert.equal(f.ui.updates.length, 0);
+});
+test('Management displays the HDC-detected external update while preserving installation history', () => {
+  const f = fixture(), old = { ...local(), versionCode: 110003, versionName: '1.1.0' };
+  f.ui.installedJobs = [old];
+  f.actual = 120101; f.observedName = '1.2.1-beta';
+  const displayed = f.ui.allInstalledJobs()[0];
+  assert.equal(displayed.versionCode, 120101);
+  assert.equal(displayed.versionName, '1.2.1-beta');
+  assert.equal(old.versionName, '1.1.0');
+  assert.equal(old.versionCode, 110003);
 });
 
 test('self update shows the system version name and stops updating after the target build is installed', () => {

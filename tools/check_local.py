@@ -50,7 +50,7 @@ def main():
     ]
     if args.build:
         steps.append(('arkts-build', [sys.executable, 'native/tools/build_unsigned_formal.py',
-                      '--output', str(output / 'qingqi-installer-0.4.49-unsigned.hap')], 900))
+                      '--output', str(output / 'qingqi-installer-0.4.50-unsigned.hap')], 900))
     results = []
     for name, command, timeout in steps:
         print(f'Checking {name}…', flush=True)

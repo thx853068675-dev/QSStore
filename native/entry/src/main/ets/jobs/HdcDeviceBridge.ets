@@ -1,5 +1,5 @@
 import { ConnectionHint } from './ConnectionHint';
-import { InstalledAppRegistry, InstalledSigningIdentity } from './InstalledAppRegistry';
+import { InstalledAppRegistry, InstalledDeviceApp, InstalledSigningIdentity } from './InstalledAppRegistry';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
@@ -46,7 +46,7 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
       HdcDeviceBridge.linked = false;
       throw new Error(String(error));
     } finally {
-      if (operation === 2 || operation === 3 || operation === 6) {
+      if (operation === 2 || operation === 3 || operation === 6 || operation === 13 || operation === 14) {
         console.info('InstalledApps command: op=' + operation + ' queueMs=' +
           (startedAt - queuedAt) + ' runMs=' + (Date.now() - startedAt));
       }
@@ -429,6 +429,46 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
       console.info('InstalledApps scan: requested=' + new Set<string>(bundleNames).size +
         ' present=' + present + ' queried=' + queried + ' checked=' + checked +
         ' elapsedMs=' + (Date.now() - startedAt));
+      HdcDeviceBridge.scans--;
+      HdcDeviceBridge.idleHandler?.();
+    }
+  }
+
+  /** 只读调试签名应用，避免遍历系统应用；名称与入口缓存到本机，离线仍可打开。 */
+  async sideloadedApps(knownBundles: string[] = []): Promise<InstalledDeviceApp[]> {
+    HdcDeviceBridge.scans++;
+    try {
+      await InstalledAppRegistry.load(this.context);
+      if (!await this.connected()) throw new Error('无线调试未连接');
+      const names = InstalledAppRegistry.parseSideloadedNames(await this.command(13));
+      if (names === undefined) throw new Error('设备未返回完整的侧载应用清单');
+      const all = InstalledAppRegistry.parseNames(await this.command(6));
+      for (const name of names) {
+        const previousVersion = InstalledAppRegistry.version(name);
+        try {
+          const output = await this.command(3, name);
+          if (output.includes('[Fail]')) throw new Error('读取应用信息失败');
+          const version = InstalledAppRegistry.parseVersion(output, name);
+          InstalledAppRegistry.remember(name, version);
+          InstalledAppRegistry.rememberLauncher(output, name);
+          if (version !== previousVersion || InstalledAppRegistry.displayName(name).length === 0) {
+            try { InstalledAppRegistry.rememberDisplayName(name, await this.command(14, name)); } catch (_) {}
+          }
+        } catch (error) {
+          if (!HdcDeviceBridge.linked) throw new Error(String(error));
+          // 单包失败保留已有观察，不将它误判为未安装。
+        }
+      }
+      if (all !== undefined) {
+        const observed = InstalledAppRegistry.sideloadedApps().map((app: InstalledDeviceApp) => app.bundleName);
+        for (const name of new Set<string>(knownBundles.concat(observed))) {
+          if (!all.has(name)) InstalledAppRegistry.remember(name, 0);
+        }
+      }
+      InstalledAppRegistry.rememberSideloadedNames(names);
+      await InstalledAppRegistry.persist(this.context);
+      return InstalledAppRegistry.sideloadedApps();
+    } finally {
       HdcDeviceBridge.scans--;
       HdcDeviceBridge.idleHandler?.();
     }

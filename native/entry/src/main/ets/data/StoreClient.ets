@@ -89,6 +89,14 @@ class PublicResponse {
 }
 
 export class StoreClient {
+  private static viewedApps: Map<number, CatalogApp> = new Map();
+
+  /** 返回页面只合并详情已读取的变化，不重载分页列表、重置滚动和图标。 */
+  static consumeViewedApps(): CatalogApp[] {
+    const apps = Array.from(StoreClient.viewedApps.values());
+    StoreClient.viewedApps.clear();
+    return apps;
+  }
   private static responses: Map<string, PublicResponse> = new Map();
   private static remember(path: string, etag: string, data: Record<string, Object>): void {
     if (!etag) return;
@@ -205,7 +213,10 @@ export class StoreClient {
   }
 
   async appDetail(id: number): Promise<CatalogApp> {
-    return CatalogApp.fromJson(await this.getData('/api/v1/apps/' + id));
+    const app = CatalogApp.fromJson(await this.getData('/api/v1/apps/' + id));
+    StoreClient.viewedApps.set(id, CatalogApp.copy(app));
+    if (StoreClient.viewedApps.size > 32) StoreClient.viewedApps.delete(Array.from(StoreClient.viewedApps.keys())[0]);
+    return app;
   }
 
   /**

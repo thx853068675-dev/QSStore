@@ -384,7 +384,7 @@ napi_value HdcCommand(napi_env env, napi_callback_info info) {
   std::vector<char> root(length + 1);
   if (napi_get_value_string_utf8(env, args[0], root.data(), root.size(), &length) != napi_ok ||
       napi_get_value_uint32(env, args[1], &state->operation) != napi_ok ||
-      state->operation > 9 ||
+      state->operation > 14 ||
       napi_get_value_string_utf8(env, args[2], nullptr, 0, &length) != napi_ok ||
       length > 4096) {
     delete state;

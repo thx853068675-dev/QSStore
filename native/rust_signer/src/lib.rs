@@ -1183,6 +1183,12 @@ pub extern "C" fn qingqi_hdc_command(
                 Vec::new()
             }
             11 | 12 => { parse_staged_ticket(&argument)?; Vec::new() }
+            // Debug provisioning includes release builds installed with a debug profile.
+            13 => vec!["shell".into(), "bm".into(), "dump".into(), "-g".into()],
+            14 => {
+                validate_bundle_name(&argument)?;
+                vec!["shell".into(), "bm".into(), "dump".into(), "-l".into(), "-n".into(), argument]
+            }
             _ => return Err("unsupported HDC operation".into()),
         };
         // start() 返回实际监听端口：首选端口被别的程序占用时它会换一个空闲的

@@ -465,6 +465,9 @@ test('Management moves installed apps with queued updates into the task section,
   const installed = [{ id: 'local', appId: 0, bundleName: 'test.bundle' },
     { id: 'other', appId: 12, bundleName: 'another.bundle' }];
   ui.allInstalledJobs = () => installed;
+  ui.updateApps = () => [{ latestAssets: installed.map(job => ({ bundleName: job.bundleName })) }];
+  ui.installedAssets = app => app.latestAssets;
+  ui.installedLocalOnly = false;
   ui.pendingJobs = [{ appId: 42, bundleName: '', catalogBundleName: 'test.bundle' }];
   assert.deepEqual(Array.from(ui.managementInstalledJobs(), job => job.id), ['other']);
   ui.pendingJobs = [];

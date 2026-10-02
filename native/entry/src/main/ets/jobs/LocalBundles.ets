@@ -1,6 +1,8 @@
 import { InstalledAppRegistry } from './InstalledAppRegistry';
-import { bundleManager } from '@kit.AbilityKit';
+import { bundleManager, common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import bundle from '@ohos.bundle';
+import { image } from '@kit.ImageKit';
 
 /**
  * 查本机装了哪些应用。
@@ -30,6 +32,20 @@ import { BusinessError } from '@kit.BasicServicesKit';
  *             并且在拿到确定答案前不要把状态显示成「未安装」
  */
 export class LocalBundles {
+  /** 普通 GET_BUNDLE_INFO 下可用的官方图标接口；权限被拒时保持占位，不阻塞识别。 */
+  static async installedIcon(context: common.UIAbilityContext, bundleName: string,
+    abilityName: string): Promise<image.PixelMap | undefined> {
+    const resource = InstalledAppRegistry.iconResource(bundleName);
+    if (resource !== undefined) {
+      try {
+        const drawable = context.resourceManager.getDrawableDescriptor(resource);
+        const pixels = drawable?.getPixelMap();
+        if (pixels !== undefined) return pixels;
+      } catch (_) {}
+    }
+    try { return await bundle.getAbilityIcon(bundleName, abilityName); }
+    catch (_) { return undefined; }
+  }
   /// 无法核实时的返回值。调用方必须与 0（确认未装）区别对待。
   static readonly UNKNOWN: number = -1;
 

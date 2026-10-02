@@ -24,10 +24,11 @@ import { isPending } from '../jobs/RecoveryPlanner';
 import { retryDelayMs } from '../jobs/RecoveryPlanner';
 import { LocalImport } from '../jobs/LocalImport';
 import { LocalBundles } from '../jobs/LocalBundles';
-import { InstalledAppRegistry } from '../jobs/InstalledAppRegistry';
+import { InstalledAppRegistry, InstalledDeviceApp } from '../jobs/InstalledAppRegistry';
 import { PackageArchive } from '../jobs/PackageArchive';
 import { CatalogApp } from '../data/CatalogApp';
 import { CatalogCache, CachedIcon } from '../data/CatalogCache';
+import { InstalledIconCache } from '../data/InstalledIconCache';
 import { ReleaseInfo, HapAsset } from '../data/ReleaseInfo';
 import { StoreClient } from '../data/StoreClient';
 import { AccountSession, DeveloperAccount } from '../data/DeveloperAccount';
@@ -151,6 +152,7 @@ struct Index {
   @State private discoverMotion: DiscoverMotion = new DiscoverMotion();
   @State private discoverCanRefresh: boolean = true;
   @State private discoverShowTop: boolean = false;
+  @State private topActionEpoch: number = 0;
   private discoverScroller: Scroller = new Scroller();
   private managementScroller: Scroller = new Scroller();
   @State private viewportWidth: number = 0;
@@ -160,6 +162,10 @@ struct Index {
   @State private installedJobs: InstallJob[] = [];
   /** 商店目录里、本机已安装但非轻启安装的应用（无 job 记录）。 */
   @State private storeInstalled: InstallJob[] = [];
+  @State private deviceInstalled: InstallJob[] = [];
+  @State private installedLocalOnly: boolean = false;
+  private deviceInventoryFlight: Promise<void> | undefined = undefined;
+  private deviceInventoryAt: number = 0;
   // 探测已装版本的缓存与并发控制。installedVersion 每次都要起 hdc 进程，
   // 串行遍历目录在大目录下会非常慢，所以这里做 TTL 缓存 + 有界并发。
   private static readonly VERSION_TTL_MS: number = 60000;
@@ -190,7 +196,7 @@ struct Index {
   @StorageProp('wirelessLinkRevision') @Watch('onWirelessLinkChanged') private wirelessLinkRevision: number = 0;
   @StorageProp('wirelessDebugRestoring') @Watch('onWirelessLinkChanged') private wirelessDebugRestoring: boolean = false;
   @StorageProp('signingIdentityRevision') @Watch('onSigningIdentityChanged') private signingIdentityRevision: number = 0;
-  private pageVisible: boolean = true;
+  @State private pageVisible: boolean = true;
   private initialScanDismissed: boolean = false;
   private catalogProbePending: string[] = [];
   private catalogProbeNames: string[] = [];
@@ -227,6 +233,7 @@ struct Index {
   private catalogIconFlights: Map<string, Promise<CachedIcon | undefined>> = new Map();
   /** 本地 HAP 的包内图标，按任务 ID 缓存。 */
   @State private localIcons: LocalIcon[] = [];
+  private deviceIconRequested: Set<string> = new Set();
   @State private catalogError: string = '';
   @State private catalogLoading: boolean = true;
   /** 服务端目录分页：catalogPage 是已加载到的页码，catalogTotal 是服务端总数。 */
@@ -364,7 +371,7 @@ struct Index {
     this.observeReconnect();
     this.observeInstallTasks();
     InstalledAppRegistry.load(getContext(this) as common.UIAbilityContext)
-      .then(() => this.refreshCatalogInstallState());
+      .then(() => { this.syncDeviceInstalled(); this.refreshCatalogInstallState(); });
     this.loadJobs();
     this.loadUpdateCatalog();
     this.migrateLegacyJobs();
@@ -386,16 +393,35 @@ struct Index {
    */
   onPageShow(): void {
     this.pageVisible = true;
+    // 系统在路由离开时关闭 Popup。重新创建其锚点，避免缓存页面仍绑定旧的已隐藏 Popup。
+    this.topActionEpoch++;
     this.refreshOpeningSettings = false;
     this.observeReconnect();
     this.observeInstallTasks();
     this.drainInstallQueue();
+    this.syncViewedCatalog();
     this.refreshCatalogInstallState();
+    if (this.currentTab === Index.TAB_MANAGE) this.scanDeviceInstalled();
     this.reconcileInterruptedInstalls().then(() => this.reconcileStuckJobs());
-    // Detail always fetches its icon afresh. Refresh the catalog when returning
-    // so an icon revision changed on the server is reflected on discovery too.
-    if (this.catalogPage > 0 && !this.catalogLoading && this.currentTab === Index.TAB_DISCOVER) {
-      this.loadApps();
+  }
+
+  private syncViewedCatalog(): void {
+    const viewed = StoreClient.consumeViewedApps();
+    if (viewed.length === 0) return;
+    const merge = (rows: CatalogApp[]): CatalogApp[] => rows.map((row: CatalogApp) => {
+      const fresh = viewed.find((app: CatalogApp) => app.id === row.id);
+      return fresh !== undefined && JSON.stringify(row) !== JSON.stringify(fresh) ? fresh : row;
+    });
+    const visible = merge(this.apps);
+    const catalog = merge(this.updateCatalog);
+    if (visible.some((row: CatalogApp, i: number) => row !== this.apps[i])) this.apps = visible;
+    if (catalog.some((row: CatalogApp, i: number) => row !== this.updateCatalog[i])) this.updateCatalog = catalog;
+    // 新图标到位后替换旧像素，读取期间保留原图标。
+    for (const app of viewed) {
+      const current = this.appIcons.find((icon: AppIcon) => icon.id === app.id);
+      if (current?.rev !== app.iconRev && this.apps.some((row: CatalogApp) => row.id === app.id)) {
+        this.loadAppIcon(new StoreClient(getContext(this) as common.UIAbilityContext), app, this.activeQuery);
+      }
     }
   }
 
@@ -1165,7 +1191,8 @@ struct Index {
       const source = image.createImageSource(bytes);
       try {
         const pixels = await source.createPixelMap();
-        if (!this.isCurrentCatalogIcon(app, query) || this.iconFor(app.id) !== undefined) {
+        if (!this.isCurrentCatalogIcon(app, query) ||
+          this.appIcons.some((icon: AppIcon) => icon.id === app.id && icon.rev === app.iconRev)) {
           await pixels.release();
           return undefined;
         }
@@ -1173,7 +1200,7 @@ struct Index {
         icon.id = app.id;
         icon.rev = app.iconRev;
         icon.pixels = pixels;
-        this.appIcons = this.appIcons.concat([icon]);
+        this.appIcons = this.appIcons.filter((old: AppIcon) => old.id !== app.id).concat([icon]);
         if (CatalogCache.iconWithinLimit(bytes)) {
           const record = new CachedIcon();
           record.id = String(app.id);
@@ -1236,8 +1263,10 @@ struct Index {
 
   /** 已安装条目的图标：商店应用用目录图标，本地 HAP 用包内图标。 */
   private jobIcon(job: InstallJob): image.PixelMap | undefined {
-    if (job.appId > 0) return this.iconFor(job.appId);
-    return this.localIcons.find((entry: LocalIcon) => entry.jobId === job.id)?.pixels;
+    const app = this.catalogForJob(job);
+    return (app === undefined ? undefined : this.iconFor(app.id)) ??
+      this.localIcons.find((entry: LocalIcon) => entry.jobId === job.id ||
+        entry.jobId === 'device-' + job.bundleName)?.pixels;
   }
 
   /**
@@ -1247,11 +1276,14 @@ struct Index {
    * `resources/base/media/<app.icon>`。读不到就保持文字占位，不算错误。
    */
   private async loadLocalIcon(job: InstallJob): Promise<void> {
-    if (job.cachePath.length === 0 || !fileIo.accessSync(job.cachePath)) return;
     if (this.localIcons.some((entry: LocalIcon) => entry.jobId === job.id)) return;
     try {
-      // 清单只解析一次，之后按引用直接取图标字节
-      const bytes = await PackageArchive.icon(job.cachePath);
+      const context = getContext(this) as common.UIAbilityContext;
+      let bytes = await InstalledIconCache.load(context, job.bundleName, job.versionCode);
+      if (bytes === undefined && job.cachePath.length > 0 && fileIo.accessSync(job.cachePath)) {
+        bytes = await PackageArchive.icon(job.cachePath);
+        if (bytes !== undefined) await InstalledIconCache.save(context, job.bundleName, job.versionCode, bytes);
+      }
       if (bytes === undefined) return;
       const source = image.createImageSource(bytes);
       try {
@@ -1277,7 +1309,7 @@ struct Index {
   /** 后台补齐本地 HAP 的图标，失败不影响列表本身。 */
   private syncLocalIcons(): void {
     const jobs = this.allInstalledJobs().filter((job: InstallJob) =>
-      job.appId <= 0 && job.cachePath.length > 0);
+      job.appId <= 0);
     if (jobs.length === 0) return;
     this.loadLocalIcons(jobs);
   }
@@ -1365,9 +1397,15 @@ struct Index {
 
   private jobTitle(job: InstallJob): string {
     const app = this.catalogForJob(job);
-    if (app && app.displayName.length > 0) return app.displayName;
+    if (app && app.displayName.length > 0) {
+      const asset = this.installedAssets(app).find((item: HapAsset) => item.bundleName === job.bundleName);
+      return app.displayName + (/^HiCar[-_.]/i.test(asset?.name ?? job.assetName) ? ' · HiCar' : '');
+    }
     if (job.bundleName === 'com.tonghongxiang.hapstore.nativepreview' ||
       job.bundleName === 'com.tonghongxiang.hapstore') return '轻启·安装器';
+    const label = InstalledAppRegistry.displayName(job.bundleName);
+    if (label.length > 0) return label;
+    if (job.sourceUrl === 'device') return job.assetName || job.bundleName;
     if (job.sourceUrl === 'local' && job.bundleName.length > 0) {
       const parts = job.bundleName.split('.');
       return parts[parts.length - 1] + ' · 本地应用';
@@ -1863,12 +1901,71 @@ struct Index {
     await InstallCoordinator.recovered(getContext(this) as common.UIAbilityContext);
   }
 
-  /** 「已安装」区块展示的全部条目：轻启装过的 + 商店里探测到的。 */
+  /** 以包名合并设备清单、商店识别与安装历史；明确已卸载的记录不参与展示。 */
   private allInstalledJobs(): InstallJob[] {
-    const recent = this.recentInstalledJobs();
-    return recent.concat(this.storeInstalled.filter((job: InstallJob) =>
-      !recent.some((item: InstallJob) => item.bundleName === job.bundleName)))
+    const seen = new Set<string>();
+    return this.recentInstalledJobs().concat(this.storeInstalled, this.deviceInstalled ?? [])
+      .filter((job: InstallJob) => {
+        if (job.bundleName.length === 0 || seen.has(job.bundleName) ||
+          this.displayInstalledVersion(job.bundleName) === 0) return false;
+        seen.add(job.bundleName);
+        return true;
+      })
       .map((job: InstallJob) => this.currentInstalledView(job));
+  }
+
+  private syncDeviceInstalled(): void {
+    this.deviceInstalled = InstalledAppRegistry.sideloadedApps().map((app: InstalledDeviceApp) => {
+      const job = new InstallJob();
+      job.id = 'device-' + app.bundleName; job.bundleName = app.bundleName;
+      job.assetName = app.displayName; job.sourceUrl = 'device';
+      job.versionCode = app.versionCode; job.versionName = app.versionName;
+      job.moduleName = app.moduleName; job.mainAbility = app.abilityName;
+      job.stage = InstallStage.INSTALLED;
+      return job;
+    });
+    for (const job of this.deviceInstalled) {
+      const resource = InstalledAppRegistry.iconResource(job.bundleName);
+      const key = job.bundleName + ':' + job.versionCode + ':' + (resource?.id ?? 0) + ':' +
+        (resource?.moduleName ?? '');
+      if (job.mainAbility.length === 0 || this.deviceIconRequested.has(key)) continue;
+      this.deviceIconRequested.add(key);
+      LocalBundles.installedIcon(getContext(this) as common.UIAbilityContext, job.bundleName,
+        job.mainAbility).then((pixels: image.PixelMap | undefined) => {
+        if (pixels === undefined) return;
+        const icon = new LocalIcon(); icon.jobId = job.id; icon.pixels = pixels;
+        this.localIcons = this.localIcons.filter((row: LocalIcon) => row.jobId !== job.id).concat([icon]);
+      });
+    }
+  }
+
+  /** 自动扫描只在管理页且已有链路时运行；手动核对可尝试保存端口，失败保留缓存。 */
+  private scanDeviceInstalled(force: boolean = false): Promise<void> {
+    if (this.deviceInventoryFlight !== undefined) return this.deviceInventoryFlight;
+    if (!force && (!HdcDeviceBridge.deviceLinked() ||
+      Date.now() - this.deviceInventoryAt < Index.VERSION_TTL_MS ||
+      this.installTasks.some((task: InstallTaskSnapshot) => task.running))) return Promise.resolve();
+    const context = getContext(this) as common.UIAbilityContext;
+    const names = this.allInstalledJobs().map((job: InstallJob) => job.bundleName);
+    this.deviceInventoryFlight = new HdcDeviceBridge(context).sideloadedApps(names).then(() => {
+      this.deviceInventoryAt = Date.now();
+      const display = new Map(this.installedDisplay);
+      for (const name of names.concat(InstalledAppRegistry.sideloadedApps().map((app: InstalledDeviceApp) => app.bundleName))) {
+        const version = InstalledAppRegistry.version(name);
+        if (version < 0) continue;
+        const row = new VersionCacheEntry(); row.version = version;
+        row.versionName = InstalledAppRegistry.versionName(name, version); row.at = Date.now();
+        display.set(name, row);
+      }
+      this.installedDisplay = display;
+      this.syncDeviceInstalled();
+      this.syncLocalIcons();
+      this.refreshCatalogInstallState();
+      if (force) this.syncMessage = '已核对本机侧载应用';
+    }).catch((error: Object) => {
+      if (force) this.syncMessage = '未能完成核对：' + errorText(error) + '，保留已知应用';
+    }).finally(() => { this.deviceInventoryFlight = undefined; });
+    return this.deviceInventoryFlight;
   }
 
   /** 主列表展示设备当前版本；安装历史原样保留，外部更新不改写旧记录。 */
@@ -1887,14 +1984,6 @@ struct Index {
     return view;
   }
 
-  /**
-   * 扫描商店目录里本机已安装的应用。
-   *
-   * 原生桥没有「列出全部已装应用」的能力（只支持 operation 0-4），
-   * 所以只能反向探测：对目录里每个应用取版本资源拿到 bundleName，
-   * 再用已装的 installedVersion 判断是否在本机。侧载进来但不在本店的
-   * 应用仍然看不到。
-   */
   /** 带 TTL 缓存的已装版本查询。 */
   private async cachedInstalledVersion(bridge: HdcDeviceBridge,
     bundleName: string): Promise<number> {
@@ -2271,7 +2360,10 @@ struct Index {
 
   onWirelessLinkChanged(): void {
     if (!this.pageVisible || this.wirelessDebugRestoring) return;
-    if (HdcDeviceBridge.deviceLinked()) this.refreshCatalogInstallState(true);
+    if (HdcDeviceBridge.deviceLinked()) {
+      this.refreshCatalogInstallState(true);
+      if (this.currentTab === Index.TAB_MANAGE) this.scanDeviceInstalled();
+    }
     else this.updateInstallScanPrompt();
   }
 
@@ -2513,6 +2605,7 @@ struct Index {
   private openJobDetails(job: InstallJob): void {
     const app = this.catalogForJob(job);
     if (app !== undefined) router.pushUrl({ url: 'pages/Detail', params: { id: app.id } });
+    else if (job.stage === InstallStage.INSTALLED) this.openInstalled(job);
   }
 
   private async loadUpdateCatalog(): Promise<void> {
@@ -2684,8 +2777,10 @@ struct Index {
         entry.bundleName === job.bundleName) === index);
   }
 
-  private managementInstalledJobs(): InstallJob[] {
+  private managementInstalledJobs(localOnly: boolean = this.installedLocalOnly): InstallJob[] {
     return this.allInstalledJobs().filter((installed: InstallJob) =>
+      localOnly !== this.updateApps().some((app: CatalogApp) =>
+        this.installedAssets(app).some((asset: HapAsset) => asset.bundleName === installed.bundleName)) &&
       !this.pendingJobs.some((pending: InstallJob) =>
         (installed.appId > 0 && pending.appId === installed.appId) ||
         (installed.bundleName.length > 0 && (pending.bundleName === installed.bundleName ||
@@ -2745,63 +2840,13 @@ struct Index {
     });
   }
 
-  /**
-   * 刷新已安装列表：与设备对一次账，顺手清掉设备上已经没有的记录。
-   *
-   * 应用可能在系统设置里被卸载；轻启只记着自己装过，于是管理页会一直留着
-   * 一条永远打不开的记录。这里逐条问设备：
-   *   · 确认已卸载 → 移除该条记录
-   *   · 连接失败   → 整体放弃，绝不把「连不上」当成「已卸载」
-   */
+  /** 核对完整侧载清单；不把展示条目写成伪安装历史，离线保留上次观察。 */
   private async refreshInstalled(): Promise<void> {
     if (this.syncBusy) return;
     this.syncBusy = true;
-    this.syncMessage = '正在刷新…';
-    try {
-      const context = getContext(this) as common.UIAbilityContext;
-      const bridge = new HdcDeviceBridge(context);
-      if (!await bridge.connected()) {
-        this.syncMessage = '无线调试未连接，没能刷新。已安装记录保持不变。';
-        return;
-      }
-      const store = await JobStore.open(context);
-      const candidates = this.allInstalledJobs().filter((job: InstallJob) =>
-        job.bundleName.length > 0);
-      const bundles: string[] = [];
-      for (const job of candidates) {
-        if (!bundles.includes(job.bundleName)) bundles.push(job.bundleName);
-      }
-      if (bundles.length === 0) {
-        this.syncMessage = '没有需要刷新的记录。';
-        return;
-      }
-      const present: string[] = [];
-      const missing: string[] = [];
-      for (const bundle of bundles) {
-        try {
-          if (await bridge.isInstalled(bundle)) present.push(bundle);
-          else missing.push(bundle);
-        } catch (_) {
-          // 单条查询失败（例如设备刚断开）按「不确定」处理，不删记录
-          present.push(bundle);
-        }
-      }
-      if (missing.length === 0) {
-        this.syncMessage = '已刷新，与设备一致（' + present.length + ' 个应用）。';
-        return;
-      }
-      for (const job of candidates) {
-        if (missing.includes(job.bundleName)) await store.forget(job.id);
-      }
-      this.forgetInstalledVersions();
-      this.syncMessage = '已移除 ' + missing.length +
-        ' 个设备上已卸载的记录：' + missing.join('、');
-    } catch (error) {
-      this.syncMessage = '刷新失败：' + errorText(error);
-    } finally {
-      this.syncBusy = false;
-      await this.loadJobs();
-    }
+    this.syncMessage = '';
+    try { await this.scanDeviceInstalled(true); }
+    finally { this.syncBusy = false; }
   }
 
   private async recoverDownloads(): Promise<void> {
@@ -3085,11 +3130,12 @@ struct Index {
             this.discoverTitleHeight = height;
           }
         }, searchContent: (): void => this.discoverSearchInput() })
-      if (this.discoverShowTop) {
-        DiscoverTopAction({ darkMode: this.darkMode, inset: this.pageInset(),
-          active: this.pageVisible && this.currentTab === Index.TAB_DISCOVER,
-          action: () => this.backToDiscoverTop() })
-          .position({ left: 0, bottom: 116 })
+      if (this.discoverShowTop && this.pageVisible && this.currentTab === Index.TAB_DISCOVER) {
+        ForEach([this.topActionEpoch], (_epoch: number) => {
+          DiscoverTopAction({ darkMode: this.darkMode, inset: this.pageInset(),
+            action: () => this.backToDiscoverTop() })
+            .position({ left: 0, bottom: 116 })
+        }, (epoch: number) => String(epoch))
       }
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
@@ -3419,6 +3465,36 @@ struct Index {
   }
 
   @Builder
+  private installedSourceOption(label: string, localOnly: boolean) {
+    Button({ type: ButtonType.Capsule }) {
+      Row({ space: 4 }) {
+        if (this.installedLocalOnly === localOnly) {
+          SymbolGlyph($r('sys.symbol.checkmark')).fontSize(10).fontColor([this.colors().accent])
+        }
+        Text(label + ' ' + this.managementInstalledJobs(localOnly).length).fontSize(12)
+          .fontWeight(this.installedLocalOnly === localOnly ? FontWeight.Bold : FontWeight.Medium)
+          .fontColor(this.installedLocalOnly === localOnly ? this.colors().accent : this.colors().textSecondary)
+          .maxLines(1)
+      }.justifyContent(FlexAlign.Center)
+    }.layoutWeight(1).height(28).padding({ left: 4, right: 4 })
+      .backgroundColor(this.installedLocalOnly === localOnly ? this.colors().surface : Color.Transparent)
+      .borderRadius(14).clip(true)
+      .border({ width: this.installedLocalOnly === localOnly ? 1 : 0, color: this.colors().borderStrong, radius: 14 })
+      .responseRegion({ x: 0, y: -8, width: '100%', height: 44 })
+      .accessibilityText(label + (this.installedLocalOnly === localOnly ? '，已选中' : '，点击切换'))
+      .onClick(() => { this.installedLocalOnly = localOnly; this.scanDeviceInstalled(); })
+  }
+
+  @Builder
+  private installedSourceSelector() {
+    Row({ space: 2 }) {
+      this.installedSourceOption('商店应用', false)
+      this.installedSourceOption('本地侧载', true)
+    }.width(238).height(36).padding(4).backgroundColor(this.colors().fill).borderRadius(18).clip(true)
+      .border({ width: 1, color: this.colors().border, radius: 18 })
+  }
+
+  @Builder
   private managementList() {
     Column() {
       List({ space: 11, scroller: this.managementScroller }) {
@@ -3574,91 +3650,96 @@ struct Index {
               .backgroundColor(this.colors().dangerSoft).borderRadius(15)
           }
         }
-        if (this.managementInstalledJobs().length > 0) {
-          ListItem() {
-            Row() {
-              Text('已安装').fontSize(19).fontWeight(FontWeight.Bold)
-                .fontColor(this.colors().text).layoutWeight(1)
-              // 刷新：与设备核对一遍，顺手清掉设备上已经卸载的记录。
-              // 按钮本身就是状态——转圈时不给再点。
-              if (this.syncBusy) {
-                Row() { LoadingProgress().width(20).height(20) }
-                  .width(44).height(44).justifyContent(FlexAlign.Center)
-              } else {
-                StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '核对已安装应用',
-                  action: () => this.refreshInstalled() })
-              }
-            }.width('100%').padding({ top: 18, bottom: 4 })
-          }
-          if (this.syncMessage.length > 0) {
-            ListItem() {
-              Text(this.syncMessage).fontSize(11).fontColor(this.colors().textTertiary)
-                .width('100%').maxLines(3).padding({ bottom: 4 })
+        ListItem() {
+          Row() {
+            Text('已安装 · ' + (this.managementInstalledJobs(false).length + this.managementInstalledJobs(true).length)).fontSize(19).fontWeight(FontWeight.Bold)
+              .fontColor(this.colors().text).layoutWeight(1)
+            // 刷新完整设备清单，隐藏明确已卸载的应用，保留安装历史。
+            // 按钮本身就是状态——转圈时不给再点。
+            if (this.syncBusy) {
+              Row() { LoadingProgress().width(20).height(20) }
+                .width(44).height(44).justifyContent(FlexAlign.Center)
+            } else {
+              StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '核对已安装应用',
+                action: () => this.refreshInstalled() })
             }
-          }
-          ForEach(this.managementInstalledJobs(), (job: InstallJob) => {
-            ListItem() {
-              Column({ space: 10 }) {
-                Row({ space: 12 }) {
-                  if (this.jobIcon(job)) {
-                    Image(this.jobIcon(job)).width(46).height(46).borderRadius(13)
-                  } else {
-                    Text(this.jobTitle(job).length > 0 ? this.jobTitle(job).substring(0, 1) : '应')
-                      .fontSize(19).fontColor(this.colors().accent).textAlign(TextAlign.Center)
-                      .width(46).height(46).backgroundColor(this.colors().accentSoft).borderRadius(13)
-                  }
-                  Column({ space: 4 }) {
-                    Text(this.jobTitle(job)).fontSize(15).fontWeight(FontWeight.Medium)
-                      .fontColor(this.colors().text).maxLines(1)
-                    Text(this.jobStatusLine(job))
-                      .fontSize(11)
-                      .fontColor(this.activeJobId === job.id ? this.colors().accent :
-                        (this.updateFor(job.bundleName) !== undefined ? this.colors().accent :
-                          this.colors().textTertiary))
-                      .maxLines(2)
-                  }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-                    .onClick(() => this.openJobDetails(job))
-                  if (this.taskPending(this.updateFor(job.bundleName)?.appId ?? job.appId, job.bundleName)) {
-                    Column() {
-                      this.taskIndicator(this.updateFor(job.bundleName)?.appId ?? job.appId, job.bundleName, '')
-                    }.width(74)
-                  } else if (this.updateFor(job.bundleName) !== undefined) {
-                    Button('更新')
-                      .height(44).fontSize(12).fontColor(this.colors().onAccent)
-                      .backgroundColor(this.colors().accent).borderRadius(11)
-                      .onClick(() => {
-                        const target = this.updateFor(job.bundleName);
-                        if (target !== undefined) this.startUpdate(job, target);
-                      })
-                  } else {
-                    Button('打开').height(44).fontSize(12)
-                      .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
-                      .borderRadius(11).onClick(() => this.openInstalled(job))
-                  }
-                }.width('100%')
-                if (this.olderInstalledJobs(job.bundleName, job.id).length > 0) {
-                  Row() {
-                    Text((this.expandedInstallBundles.includes(job.bundleName) ? '收起' : '查看') +
-                      '过往安装 · ' + this.olderInstalledJobs(job.bundleName, job.id).length)
-                      .fontSize(11).fontColor(this.colors().textSecondary)
-                      .onClick(() => this.toggleInstallHistory(job.bundleName))
-                  }.width('100%')
-                }
-                if (this.expandedInstallBundles.includes(job.bundleName)) {
-                  ForEach(this.olderInstalledJobs(job.bundleName, job.id), (older: InstallJob) => {
-                    Row({ space: 8 }) {
-                      Text('版本 ' + this.versionLabel(older)).fontSize(11)
-                        .fontColor(this.colors().textTertiary).layoutWeight(1)
-                    }.width('100%').padding({ top: 8 })
-                  }, (older: InstallJob) => older.id)
-                }
-              }.alignItems(HorizontalAlign.Start).width('100%')
-                .padding(15).backgroundColor(this.colors().surface).borderRadius(17)
-                // 移除记录收进长按，避免右上一排动作按钮把标题挤变形。
-                .gesture(LongPressGesture().onAction(() => this.forgetJob(job)))
-            }
-          }, (job: InstallJob) => job.id)
+          }.width('100%').padding({ top: 18, bottom: 4 })
         }
+        ListItem() { this.installedSourceSelector() }
+        if (this.managementInstalledJobs().length === 0) {
+          ListItem() {
+            Text(this.installedLocalOnly ? '暂无本地侧载应用' : '暂无已安装的商店应用')
+              .fontSize(12).fontColor(this.colors().textTertiary).padding({ top: 12, bottom: 12 })
+          }
+        }
+        if (this.syncMessage.length > 0) {
+          ListItem() {
+            Text(this.syncMessage).fontSize(11).fontColor(this.colors().textTertiary)
+              .width('100%').maxLines(3).padding({ bottom: 4 })
+          }
+        }
+        ForEach(this.managementInstalledJobs(), (job: InstallJob) => {
+          ListItem() {
+            Column({ space: 10 }) {
+              Row({ space: 12 }) {
+                if (this.jobIcon(job)) {
+                  Image(this.jobIcon(job)).width(46).height(46).borderRadius(13)
+                } else {
+                  Text(this.jobTitle(job).length > 0 ? this.jobTitle(job).substring(0, 1) : '应')
+                    .fontSize(19).fontColor(this.colors().accent).textAlign(TextAlign.Center)
+                    .width(46).height(46).backgroundColor(this.colors().accentSoft).borderRadius(13)
+                }
+                Column({ space: 4 }) {
+                  Text(this.jobTitle(job)).fontSize(15).fontWeight(FontWeight.Medium)
+                    .fontColor(this.colors().text).maxLines(1)
+                  Text(this.jobStatusLine(job))
+                    .fontSize(11)
+                    .fontColor(this.activeJobId === job.id ? this.colors().accent :
+                      (this.updateFor(job.bundleName) !== undefined ? this.colors().accent :
+                        this.colors().textTertiary))
+                    .maxLines(2)
+                }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+                  .onClick(() => this.openJobDetails(job))
+                if (this.taskPending(this.updateFor(job.bundleName)?.appId ?? job.appId, job.bundleName)) {
+                  Column() {
+                    this.taskIndicator(this.updateFor(job.bundleName)?.appId ?? job.appId, job.bundleName, '')
+                  }.width(74)
+                } else if (this.updateFor(job.bundleName) !== undefined) {
+                  Button('更新')
+                    .height(44).fontSize(12).fontColor(this.colors().onAccent)
+                    .backgroundColor(this.colors().accent).borderRadius(11)
+                    .onClick(() => {
+                      const target = this.updateFor(job.bundleName);
+                      if (target !== undefined) this.startUpdate(job, target);
+                    })
+                } else {
+                  Button('打开').height(44).fontSize(12)
+                    .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
+                    .borderRadius(11).onClick(() => this.openInstalled(job))
+                }
+              }.width('100%')
+              if (this.olderInstalledJobs(job.bundleName, job.id).length > 0) {
+                Row() {
+                  Text((this.expandedInstallBundles.includes(job.bundleName) ? '收起' : '查看') +
+                    '过往安装 · ' + this.olderInstalledJobs(job.bundleName, job.id).length)
+                    .fontSize(11).fontColor(this.colors().textSecondary)
+                    .onClick(() => this.toggleInstallHistory(job.bundleName))
+                }.width('100%')
+              }
+              if (this.expandedInstallBundles.includes(job.bundleName)) {
+                ForEach(this.olderInstalledJobs(job.bundleName, job.id), (older: InstallJob) => {
+                  Row({ space: 8 }) {
+                    Text('版本 ' + this.versionLabel(older)).fontSize(11)
+                      .fontColor(this.colors().textTertiary).layoutWeight(1)
+                  }.width('100%').padding({ top: 8 })
+                }, (older: InstallJob) => older.id)
+              }
+            }.alignItems(HorizontalAlign.Start).width('100%')
+              .padding(15).backgroundColor(this.colors().surface).borderRadius(17)
+              // 移除记录收进长按，避免右上一排动作按钮把标题挤变形。
+              .gesture(LongPressGesture().onAction(() => this.forgetJob(job)))
+          }
+        }, (job: InstallJob) => job.id)
         // 为悬浮导航留出可滚走的尾部空间，不缩小列表的触摸/显示区域。
         ListItem() { Row().height(110).width('100%') }
       }.padding({ left: this.pageInset(), right: this.pageInset() })
@@ -4151,7 +4232,7 @@ struct Index {
       // 离开「本地」页就把侧载进度收起来：那是「这一次安装」的过程，装完再回来
       // 还挂着上一次的流程卡片没有意义。清掉选中项，下次导入才会重新出现。
       if (leavingLocal && !this.localPreviewReady) this.resetLocalTimeline();
-      if (index === 2) { this.loadJobs(); this.loadMyApps(); this.loadUpdateCatalog(); }
+      if (index === 2) { this.loadJobs(); this.loadMyApps(); this.loadUpdateCatalog(); this.scanDeviceInstalled(); }
       if (index === 3) {
         // 安装流程可能刚自动准备了证书，进入「我的」后同步显示并备份。
         this.recoverSigningIdentity();

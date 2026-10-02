@@ -54,6 +54,7 @@ function fixture() {
     enqueuingAppIds: [], signedIn: true, taskPending: () => false, loadJobs: async () => {},
     installedDisplay: { get: () => f.actual >= 0 ? { version: f.actual, versionName: f.versionName ?? f.observedName ?? '' } : undefined }, storeInstalled: [], installedVersions: new Map(), updates: [], activeJobId: '',
     refreshCatalogInstallState() { this.checkInstalledUpdates(); }, jobRunning: () => false,
+    openInstalled(job) { f.opened = job; },
     forgetInstalledVersions() {}, drainInstallQueue() { f.downloads.push(f.lastJob); f.continued = f.lastJob; } });
   return f;
 }

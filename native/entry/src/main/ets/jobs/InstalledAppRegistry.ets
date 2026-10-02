@@ -6,6 +6,10 @@ class InstalledVersionEntry {
   version: number = 0;
   versionName: string = '';
   at: number = 0;
+  displayName: string = '';
+  sideloaded: boolean = false;
+  iconId: number = 0;
+  iconModuleName: string = '';
 }
 
 class SavedInstalledEntry {
@@ -13,6 +17,20 @@ class SavedInstalledEntry {
   version: number = 0;
   versionName: string = '';
   at: number = 0;
+  moduleName: string = '';
+  abilityName: string = '';
+  displayName: string = '';
+  sideloaded: boolean = false;
+  iconId: number = 0;
+  iconModuleName: string = '';
+}
+
+/** 设备清单的展示模型，独立于安装任务和历史记录。 */
+export class InstalledDeviceApp {
+  bundleName: string = '';
+  displayName: string = '';
+  versionCode: number = 0;
+  versionName: string = '';
   moduleName: string = '';
   abilityName: string = '';
 }
@@ -36,7 +54,7 @@ export class InstalledAppRegistry {
   private static readonly SCAN_KEY: string = 'catalog-scan-at';
   private static scanAt: number = 0;
   private static readonly SAVED_MAX_AGE_MS: number = 30 * 24 * 60 * 60 * 1000;
-  private static readonly SAVED_MAX_ROWS: number = 300;
+  private static readonly SAVED_MAX_ROWS: number = 1000;
   private static loading?: Promise<void>;
   private static saving: Promise<void> = Promise.resolve();
   private static launchers: Map<string, InstalledLaunchTarget> = new Map();
@@ -58,7 +76,7 @@ export class InstalledAppRegistry {
         InstalledAppRegistry.scanAt = scanAt;
       }
       const raw = await store.get(InstalledAppRegistry.STORE_KEY, '') as string;
-      if (raw.length === 0 || raw.length > 256 * 1024) return;
+      if (raw.length === 0 || raw.length > 1024 * 1024) return;
       const rows = JSON.parse(raw) as Array<Record<string, Object>>;
       if (!Array.isArray(rows)) return;
       for (const row of rows.slice(0, InstalledAppRegistry.SAVED_MAX_ROWS)) {
@@ -75,6 +93,11 @@ export class InstalledAppRegistry {
         entry.version = version;
         entry.versionName = String(row['versionName'] ?? '').trim().substring(0, 128);
         entry.at = at;
+        entry.displayName = String(row['displayName'] ?? '').trim().substring(0, 256);
+        entry.sideloaded = row['sideloaded'] === true;
+        const iconId = Number(row['iconId'] ?? 0);
+        entry.iconId = Number.isSafeInteger(iconId) && iconId > 0 ? iconId : 0;
+        entry.iconModuleName = String(row['iconModuleName'] ?? '');
         InstalledAppRegistry.savedVersions.set(name, entry);
         const moduleName = String(row['moduleName'] ?? '');
         const abilityName = String(row['abilityName'] ?? '');
@@ -125,6 +148,10 @@ export class InstalledAppRegistry {
           row.version = entry.version;
           row.versionName = entry.versionName;
           row.at = entry.at;
+          row.displayName = entry.displayName;
+          row.sideloaded = entry.sideloaded;
+          row.iconId = entry.iconId;
+          row.iconModuleName = entry.iconModuleName;
           const target = InstalledAppRegistry.launchers.get(name);
           row.moduleName = target?.moduleName ?? '';
           row.abilityName = target?.abilityName ?? '';
@@ -152,6 +179,11 @@ export class InstalledAppRegistry {
     const observed = InstalledAppRegistry.savedVersions.get(bundleName);
     if (observed !== undefined && observed.version === Number(row['versionCode'])) {
       observed.versionName = String(row['versionName'] ?? '').trim().substring(0, 128);
+      const app = row['applicationInfo'] as Record<string, Object> | undefined;
+      const icon = app?.['iconResource'] as Record<string, Object> | undefined;
+      const iconId = Number(icon?.['id'] ?? app?.['iconId'] ?? 0);
+      observed.iconId = Number.isSafeInteger(iconId) && iconId > 0 ? iconId : 0;
+      observed.iconModuleName = String(icon?.['moduleName'] ?? row['entryModuleName'] ?? '');
     }
     const modules = row['hapModuleInfos'] as Array<Record<string, Object>> | undefined;
     const entry = String(row['entryModuleName'] ?? row['mainEntry'] ?? '');
@@ -176,6 +208,10 @@ export class InstalledAppRegistry {
     const entry = new InstalledVersionEntry();
     entry.version = version;
     entry.versionName = previous?.version === version ? previous.versionName : '';
+    entry.displayName = previous?.displayName ?? '';
+    entry.sideloaded = previous?.sideloaded ?? false;
+    entry.iconId = previous?.version === version ? previous.iconId : 0;
+    entry.iconModuleName = previous?.version === version ? previous.iconModuleName : '';
     entry.at = Date.now();
     InstalledAppRegistry.versions.set(bundleName, entry);
     if (version > 0) {
@@ -203,6 +239,64 @@ export class InstalledAppRegistry {
     const saved = InstalledAppRegistry.savedVersions.get(bundleName);
     return saved !== undefined && saved.version === versionCode &&
       InstalledAppRegistry.version(bundleName) === versionCode ? saved.versionName : '';
+  }
+
+  static displayName(bundleName: string): string {
+    return InstalledAppRegistry.version(bundleName) > 0 ?
+      InstalledAppRegistry.savedVersions.get(bundleName)?.displayName ?? '' : '';
+  }
+
+  /** 通过设备给出的资源标识读取分层/单层图标，不复制整份已安装 HAP。 */
+  static iconResource(bundleName: string): Resource | undefined {
+    const entry = InstalledAppRegistry.savedVersions.get(bundleName);
+    if (InstalledAppRegistry.version(bundleName) <= 0 || entry === undefined || entry.iconId <= 0 ||
+      !/^[A-Za-z][A-Za-z0-9_.]{0,255}$/.test(entry.iconModuleName)) return undefined;
+    return { id: entry.iconId, type: 20000, params: [], bundleName: bundleName,
+      moduleName: entry.iconModuleName };
+  }
+
+  static rememberDisplayName(bundleName: string, output: string): void {
+    const entry = InstalledAppRegistry.savedVersions.get(bundleName);
+    const label = output.trim();
+    if (entry !== undefined && label.length > 0 && label.length <= 256 &&
+      !/[\r\n]|\[Fail\]|error:|^\$string:/i.test(label)) entry.displayName = label;
+  }
+
+  /** -g 来自调试签名清单，不能用 applicationInfo.debug（编译模式）替代。 */
+  static parseSideloadedNames(output: string): string[] | undefined {
+    if (!output.endsWith('\n')) return undefined;
+    let header = false;
+    const names = new Set<string>();
+    for (const raw of output.split('\n')) {
+      const line = raw.trim();
+      if (line.length === 0) continue;
+      if (/^ID:\s*\d+:$/.test(line)) { header = true; continue; }
+      if (!header || !/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(line)) return undefined;
+      names.add(line);
+    }
+    return header ? Array.from(names) : undefined;
+  }
+
+  static rememberSideloadedNames(names: string[]): void {
+    const present = new Set<string>(names);
+    for (const name of InstalledAppRegistry.savedVersions.keys()) {
+      InstalledAppRegistry.savedVersions.get(name)!.sideloaded = present.has(name);
+    }
+  }
+
+  static sideloadedApps(): InstalledDeviceApp[] {
+    const rows: InstalledDeviceApp[] = [];
+    for (const name of InstalledAppRegistry.savedVersions.keys()) {
+      const entry = InstalledAppRegistry.savedVersions.get(name)!;
+      if (!entry.sideloaded || InstalledAppRegistry.version(name) <= 0) continue;
+      const app = new InstalledDeviceApp();
+      app.bundleName = name; app.displayName = entry.displayName || name;
+      app.versionCode = entry.version; app.versionName = entry.versionName;
+      const target = InstalledAppRegistry.launcher(name);
+      app.moduleName = target?.moduleName ?? ''; app.abilityName = target?.abilityName ?? '';
+      rows.push(app);
+    }
+    return rows;
   }
 
   /** -a 是存在性清单，不含版本；缺席才可以记为未安装。 */

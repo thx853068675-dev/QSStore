@@ -88,6 +88,16 @@ CREATE TABLE IF NOT EXISTS signing_identity (
     revision INTEGER NOT NULL DEFAULT 1
 );
 
+-- A single developer account can own independent signing keys on several devices.
+CREATE TABLE IF NOT EXISTS signing_identity_certificate (
+    account_id TEXT NOT NULL,
+    cert_id TEXT NOT NULL,
+    nonce BLOB NOT NULL,
+    ciphertext BLOB NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (account_id, cert_id)
+);
+
 
 CREATE TABLE IF NOT EXISTS release (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,

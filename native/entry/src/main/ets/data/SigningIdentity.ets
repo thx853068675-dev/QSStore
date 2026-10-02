@@ -33,6 +33,8 @@ export class EnrollmentResult {
 }
 
 export class EnrollmentOptions {
+  /** 重置时核对 AGC，不能把已被远端删除的本机证书当成可复用身份。 */
+  refreshCertificate: boolean = false;
   /**
    * 账号只剩最后一个调试证书槽位时是否仍要新建。
    * 默认 false：先让用户确认，避免一次误点占掉团队最后一个槽位。
@@ -395,13 +397,13 @@ export class SigningIdentityRecovery {
     }
   }
 
-  /** 先验证云端材料，再原子刷新证书；始终保留本机私钥及失败前的可用材料。 */
+  /** 本机配对身份优先向 AGC 刷新；缺少本机材料时才取回对应备份。 */
   static async reset(context: common.UIAbilityContext,
     account: DeveloperAccount): Promise<void> {
-    const restored = await SigningIdentityRecovery.restore(context, account, true);
-    if (restored === undefined) {
-      throw new Error('云端没有可恢复的有效证书，已保留本机私钥和原有材料，请准备签名身份');
-    }
+    const options = new EnrollmentOptions();
+    options.refreshCertificate = true;
+    options.allowLastSlot = true;
+    await SigningIdentityRecovery.enroll(context, account, options);
   }
 
 
@@ -421,7 +423,7 @@ export class SigningIdentityRecovery {
   static async enroll(context: common.UIAbilityContext, account: DeveloperAccount,
     options: EnrollmentOptions = new EnrollmentOptions()): Promise<EnrollmentResult> {
     const scope = JSON.stringify([context.filesDir, account.userId, account.teamId,
-      options.allowLastSlot, options.renewBeforeSeconds]);
+      options.allowLastSlot, options.renewBeforeSeconds, options.refreshCertificate]);
     const pending = SigningIdentityRecovery.enrollment;
     if (pending !== undefined) {
       if (SigningIdentityRecovery.enrollmentScope === scope) return await pending;
@@ -459,7 +461,7 @@ export class SigningIdentityRecovery {
     // 白占一个团队共享的槽位。所以这里把核实失败直接抛给用户重试。
     let reusable: LocalSigningIdentity | undefined = undefined;
     try {
-      reusable = await SigningIdentityRecovery.restore(context, account);
+      reusable = await SigningIdentityRecovery.restore(context, account, options.refreshCertificate);
     } catch (error) {
       throw new Error('暂时无法核实本机签名身份（' + String(error) +
         '）。为避免重复占用调试证书槽位，本次不申请新证书，请稍后重试。');
@@ -723,18 +725,37 @@ export class SigningIdentityRecovery {
       const legacy = await SigningIdentityRecovery.migrateLegacy(context, account);
       if (legacy) return legacy;
     }
-    const backup = await new StoreClient(context).signingIdentity(account);
+    const client = new StoreClient(context);
+    const previous = await SigningIdentityRecovery.load(context, account, true);
+    let backup: BackedUpIdentity | undefined = undefined;
+    const localRefresh = refresh && previous !== undefined;
+    if (localRefresh) {
+      // A valid local key/certificate pair needs no store-server round trip to
+      // refresh its AGC certificate. Another device's backup cannot block reset.
+      backup = new BackedUpIdentity();
+      backup.certId = previous!.certId;
+      backup.privateKeyPem = fileIo.readTextSync(previous!.privateKeyPath);
+    } else {
+      backup = await client.signingIdentity(account, previous?.certId ?? '');
+    }
+    if (!backup && previous !== undefined) {
+      // A second device may have never had its own slot. Back up the verified
+      // local pair before refreshing it; no account-wide identity is replaced.
+      await client.publishSigningIdentity(previous.certId,
+        fileIo.readTextSync(previous.privateKeyPath), account);
+      backup = await client.signingIdentity(account, previous.certId);
+    }
     if (!backup) return undefined;
     if (refresh) {
-      const previous = await SigningIdentityRecovery.load(context, account, true);
       if (previous !== undefined && previous.certId !== backup.certId) {
         throw new Error('备份证书与本机不同，已保留原身份，请先完成备份同步');
       }
     }
     const agc = new AgcClient(account);
     const rows = await agc.certificates();
+    const backedUpCertId = backup.certId;
     let cert = rows.find((row: Record<string, Object>) =>
-      String(row['id'] ?? '') === backup.certId && Number(row['certType'] ?? 0) === 1);
+      String(row['id'] ?? '') === backedUpCertId && Number(row['certType'] ?? 0) === 1);
     const index = await preferences.getPreferences(context, INDEX_NAME);
     const marker = account.userId + ':' + backup.certId;
     const deletion = await index.get('deleting-cert', '') as string;
@@ -749,6 +770,9 @@ export class SigningIdentityRecovery {
     const privateKeyPath = dir + '/identity.pem';
     if (fileIo.accessSync(privateKeyPath) &&
       fileIo.readTextSync(privateKeyPath).trim() !== backup.privateKeyPem.trim()) {
+      // With no valid local index, another device's default backup must not
+      // block enrollment's existing-key/AGC matching path.
+      if (previous === undefined && !refresh) return undefined;
       throw new Error('云端与本机私钥不同，已保留本机材料，未覆盖身份');
     }
     const expirySeconds = cert === undefined ? 0 :
@@ -761,7 +785,7 @@ export class SigningIdentityRecovery {
         SigningIdentityRecovery.writeFile(keyTmp, backup.privateKeyPem);
         fileIo.renameSync(keyTmp, privateKeyPath);
       }
-      await new StoreClient(context).rememberSigningIdentity(account, backup);
+      if (!localRefresh) await client.rememberSigningIdentity(account, backup);
       return undefined;
     }
     const objectId = String(cert['certObjectId'] ?? '');
@@ -789,7 +813,7 @@ export class SigningIdentityRecovery {
       await store.put('identity', JSON.stringify(identity));
       await store.flush();
       SigningIdentityRecovery.notifyChanged();
-      await new StoreClient(context).rememberSigningIdentity(account, backup);
+      if (!localRefresh) await client.rememberSigningIdentity(account, backup);
       return identity;
     } finally {
       if (fileIo.accessSync(keyTmp)) fileIo.unlinkSync(keyTmp);

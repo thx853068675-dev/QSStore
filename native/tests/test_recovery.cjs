@@ -51,10 +51,13 @@ async function fixture({ expiry = 1, backup = true, key = true,
     copyFile: async (a, b) => { if (!files.has(a)) throw Error('missing source'); files.set(b, files.get(a)); },
     renameSync: (a, b) => { if (!files.has(a)) throw Error('missing source'); files.set(b, files.get(a)); files.delete(a); } };
   class StoreClient {
-    async signingIdentity() { state.cloudReads++; if (state.cloudError) throw Error('offline'); if (state.cloudGate) await state.cloudGate; return state.backup; }
+    async signingIdentity(_account, certId = '') { state.cloudReads++; state.requestedCert = certId;
+      if (state.cloudError) throw Error('offline'); if (state.cloudGate) await state.cloudGate;
+      return !certId || state.backup?.certId === certId ? state.backup : undefined; }
     async rememberSigningIdentity(_account, data) { state.acknowledged.push(data.revision); }
-    async publishSigningIdentity(certId) { state.published.push(certId);
-      if (state.publishErrorAt === certId) throw Error('backup unavailable'); }
+    async publishSigningIdentity(certId, pem) { state.published.push(certId);
+      if (state.publishErrorAt === certId) throw Error('backup unavailable');
+      state.backup = { certId, privateKeyPem: pem, revision: 1 }; }
   }
   class AgcClient {
     async certificates() { return state.rows; }
@@ -74,7 +77,7 @@ async function fixture({ expiry = 1, backup = true, key = true,
     }, keyMatchesCertificate: (_key, cert) => {
       if (state.probeError) throw Error('certificate unreadable');
       return files.get(cert) !== 'unrelated' && files.get(cert) !== state.unpaired;
-    } }, './StoreClient': { StoreClient }, './AgcClient': { AgcClient },
+    } }, './StoreClient': { StoreClient, BackedUpIdentity: class {} }, './AgcClient': { AgcClient },
     './DeviceIdentity': { DeviceIdentity: {
       csrFor: async pem => { assert.equal(pem, KEY); return 'csr'; },
       certNameFor: async () => 'test-cert', generate: async () => {
@@ -148,35 +151,67 @@ test('first enrollment generates a CSR without exporting the EC public key', asy
     /^-----BEGIN CERTIFICATE REQUEST-----/);
 });
 
-test('reset: missing backup never removes an expired private key', async () => {
+test('reset: expired certificate is renewed with retained private key even without backup', async () => {
   const f = await fixture({ backup: false });
-  await assert.rejects(f.R.reset(f.context, f.account));
+  await f.R.reset(f.context, f.account);
+  assert.equal((await f.R.load(f.context, f.account)).certId, '102');
   assert.equal(f.files.get(f.keyPath), KEY);
-  assert.equal(f.state.cloudReads, 1);
+  assert.equal(f.state.cloudReads, 0, 'expired local material is preserved without reading another device backup');
 });
-test('empty AGC certificate list: reset cannot issue, explicit enrollment creates one certificate', async () => {
+test('empty AGC certificate list: reset creates one certificate and later enrollment reuses it', async () => {
   const f = await fixture({ backup: false, key: false, allowGeneration: true });
   f.state.rows = [];
-  await assert.rejects(f.R.reset(f.context, f.account), /没有可恢复的有效证书/);
-  assert.equal(f.state.creates, 0);
+  await f.R.reset(f.context, f.account);
+  assert.equal(f.state.creates, 1);
   const result = await f.R.enroll(f.context, f.account);
   assert.equal(result.identity.certId, '102');
   assert.equal(f.state.generated, 1);
   assert.equal(f.state.creates, 1);
 });
-test('reset: offline or different backup preserves all original material', async () => {
+test('reset: AGC failure or unpaired downloaded certificate preserves original material', async () => {
   for (const offline of [true, false]) {
-    const f = await fixture(); const before = [...f.files];
-    if (offline) f.state.cloudError = true; else f.state.backup.privateKeyPem = 'other-key';
+    const f = await fixture({ expiry: 4102444800 }); const before = [...f.files];
+    if (offline) f.state.downloadError = true; else f.state.unpaired = 'cert100';
     await assert.rejects(f.R.reset(f.context, f.account));
     assert.deepEqual([...f.files], before);
   }
 });
-test('reset: matching valid backup refreshes certificate and records revision', async () => {
+test('reset: remotely deleted local certificate is renewed without touching other device certificates', async () => {
   const f = await fixture({ expiry: 4102444800 });
+  f.state.rows = [{ id: '999', certType: 1, expireTime: 4102444800, certObjectId: 'unrelated' }];
+  f.state.backup = { certId: '999', privateKeyPem: 'other-device-key', revision: 1 };
+  await f.R.reset(f.context, f.account);
+  assert.equal((await f.R.load(f.context, f.account)).certId, '102');
+  assert.equal(f.files.get(f.keyPath), KEY);
+  assert.equal(f.state.creates, 1);
+  assert.equal(f.state.generated, 0);
+  assert.equal(f.state.rows[0].id, '999');
+});
+test('reset: valid local identity refreshes through AGC without cloud backup', async () => {
+  const f = await fixture({ expiry: 4102444800 });
+  f.state.cloudError = true;
   await f.R.reset(f.context, f.account);
   assert.equal(f.files.get(f.keyPath), KEY);
-  assert.deepEqual(f.state.acknowledged, [1]);
+  assert.deepEqual(f.state.acknowledged, []);
+  assert.equal(f.state.cloudReads, 0);
+});
+test('reset: another device cloud key never changes the local certificate or key', async () => {
+  const f = await fixture({ expiry: 4102444800 });
+  f.state.backup = { certId: '999', privateKeyPem: 'other-device-key', revision: 7 };
+  await f.R.reset(f.context, f.account);
+  assert.equal((await f.R.load(f.context, f.account)).certId, '100');
+  assert.equal(f.files.get(f.keyPath), KEY);
+  assert.equal(f.state.creates, 0);
+  assert.equal(f.state.cloudReads, 0);
+});
+test('recovery: retained key with a missing index can match AGC despite another device backup', async () => {
+  const f = await fixture({ expiry: 4102444800 });
+  await (await f.prefs.getPreferences(f.context, 'signing-identity')).put('identity', '');
+  f.state.backup = { certId: '999', privateKeyPem: 'other-device-key', revision: 7 };
+  const result = await f.R.enroll(f.context, f.account);
+  assert.equal(result.identity.certId, '100');
+  assert.equal(f.files.get(f.keyPath), KEY);
+  assert.equal(f.state.creates, 0);
 });
 test('expiry: reuses another certificate without generating a key or issuing', async () => {
   const f = await fixture();
@@ -379,17 +414,18 @@ async function clientFixture() {
   const c = Object.create(C.prototype); c.context = {};
   return { c, account: { userId: '42' }, prefs };
 }
-test('backup: stale client uses saved revision and never retries with server current value', async () => {
+test('backup: certificate-scoped upload never sends a stale global replacement condition', async () => {
   const { c, account, prefs } = await clientFixture();
   await c.rememberSigningIdentity(account, { certId: '100', revision: 1 });
   const calls = [];
   c.requestData = async (_url, _method, _account, body) => { calls.push(body); throw Error('conflict'); };
   await assert.rejects(c.publishSigningIdentity('101', 'key', account));
-  const raw = await (await prefs.getPreferences({}, 'signing-backup-version')).get('42', '');
+  const raw = await (await prefs.getPreferences({}, 'signing-backup-version')).get('42:100', '');
   assert.equal(JSON.parse(raw).revision, 1);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].replace_cert_id, '100');
-  assert.equal(calls[0].replace_revision, 1);
+  assert.equal(calls[0].backup_scope, 'certificate');
+  assert.equal(calls[0].replace_cert_id, undefined);
+  assert.equal(calls[0].replace_revision, undefined);
 });
 test('backup: failed acknowledgement is rejected instead of clearing warning', async () => {
   const { c, account } = await clientFixture();

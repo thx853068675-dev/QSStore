@@ -67,16 +67,27 @@ export struct DiscoverTopAction {
       .fontColor([Palette.forMode(this.darkMode).text])
   }
 
+  @Builder
+  private immersiveAction() {
+    Button({ type: ButtonType.Circle }) { this.arrow() }
+      .width(48).height(48).id('discover-back-to-top').accessibilityText('回到顶部')
+      .backgroundColor(Color.Transparent)
+      .onClick(() => this.action())
+  }
+
   build() {
     Row() {
       if (deviceInfo.sdkApiVersion >= 26 && uiMaterial.isImmersiveMaterialSupported()) {
-        Button({ type: ButtonType.Circle }) { this.arrow() }
-          .width(48).height(48).id('discover-back-to-top').accessibilityText('回到顶部')
-          .backgroundColor(Color.Transparent)
-          .systemMaterial(new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THIN,
-            colorInvert: true, applyShadow: true, interactive: true,
-            lightEffect: { color: Palette.forMode(this.darkMode).surface } }))
-          .onClick(() => this.action())
+        // Ordinary Button material only works in navigation/tab bars on API 26.
+        // Popup supports system material throughout the page. A nonmodal,
+        // arrowless circular popup supplies the native floating backplate.
+        Column() {}.width(48).height(48)
+          .bindPopup(this.active, { builder: this.immersiveAction, width: 48, radius: 24,
+            placement: Placement.Top, targetSpace: 0, offset: { x: 0, y: 48 },
+            enableArrow: false, autoCancel: false, focusable: false, mask: false,
+            systemMaterial: new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THIN,
+              colorInvert: true, applyShadow: true, interactive: true,
+              lightEffect: { color: Palette.forMode(this.darkMode).surface } }) })
       } else {
         // 旧系统尚无组件级 ImmersiveMaterial，使用系统毛玻璃保持形态与可读性。
         Button({ type: ButtonType.Circle }) { this.arrow() }

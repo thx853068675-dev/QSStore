@@ -17,14 +17,9 @@ class ConfirmBody {
 class ReviewBody { stars: number = 0; body: string = ''; }
 class CategoryBody { category: string = ''; }
 class IdentityBody {
+  backup_scope: string = 'certificate';
   cert_id: string = '';
   private_key_pem: string = '';
-  /**
-   * 证书轮换时才带的期望值：服务端只在记录里的 cert_id 等于它时才替换。
-   * 首次备份不带（留空），服务端按 first-write-wins 处理。
-   */
-  replace_cert_id: string = '';
-  replace_revision: number = 0;
 }
 /**
  * 无参数的 POST 的请求体。
@@ -406,7 +401,7 @@ export class StoreClient {
     return result;
   }
 
-  /** 仅保存本机已经恢复或成功备份的版本，查询冲突不能更新此期望值。 */
+  /** 按账号及证书保留成功备份的回执，不把其他设备的版本作为轮换条件。 */
   async rememberSigningIdentity(account: DeveloperAccount, identity: BackedUpIdentity): Promise<void> {
     if (!Number.isSafeInteger(identity.revision) || identity.revision < 1) {
       throw new Error('备份服务尚未支持版本校验，请更新服务端');
@@ -416,24 +411,15 @@ export class StoreClient {
     const baseline = new BackedUpIdentity();
     baseline.certId = identity.certId;
     baseline.revision = identity.revision;
-    await store.put(account.userId, JSON.stringify(baseline));
+    await store.put(account.userId + ':' + identity.certId, JSON.stringify(baseline));
     await store.flush();
   }
 
   async publishSigningIdentity(certId: string, privateKeyPem: string,
     account: DeveloperAccount): Promise<void> {
-    const store = await preferences.getPreferences(this.context, 'signing-backup-version');
-    const raw = await store.get(account.userId, '') as string;
     const body = new IdentityBody();
     body.cert_id = certId;
     body.private_key_pem = privateKeyPem;
-    if (raw.length > 0) {
-      const baseline = JSON.parse(raw) as BackedUpIdentity;
-      if (baseline.certId.length > 0 && baseline.revision > 0) {
-        body.replace_cert_id = baseline.certId;
-        body.replace_revision = baseline.revision;
-      }
-    }
     const result = await this.requestData('/api/v1/signing-identity',
       http.RequestMethod.POST, account, body);
     if (result['synced'] !== true || String(result['cert_id'] ?? '') !== certId) {
@@ -445,8 +431,9 @@ export class StoreClient {
     await this.rememberSigningIdentity(account, saved);
   }
 
-  async signingIdentity(account: DeveloperAccount): Promise<BackedUpIdentity | undefined> {
-    const data = await this.getData('/api/v1/signing-identity', account);
+  async signingIdentity(account: DeveloperAccount, certId: string = ''): Promise<BackedUpIdentity | undefined> {
+    const data = await this.getData('/api/v1/signing-identity' +
+      (certId.length > 0 ? '?cert_id=' + encodeURIComponent(certId) : ''), account);
     const row = data['identity'] as Record<string, Object> | null | undefined;
     if (!row) return undefined;
     const identity = new BackedUpIdentity();
@@ -457,6 +444,9 @@ export class StoreClient {
       !/^-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----\s*$/.test(identity.privateKeyPem) ||
       identity.privateKeyPem.length > 8192) {
       throw new Error('云端签名身份格式无效');
+    }
+    if (certId.length > 0 && identity.certId !== certId) {
+      throw new Error('备份服务返回了其他证书，已保留本机身份，请更新服务端');
     }
     return identity;
   }

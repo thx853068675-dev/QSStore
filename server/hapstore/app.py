@@ -196,8 +196,11 @@ def h_put_review(app_id: str, body: dict[str, Any], identity: tuple[str, str]) -
     return db.list_reviews(int(app_id), page=1, page_size=20)
 
 
-def h_get_signing_identity(identity: tuple[str, str]) -> dict[str, Any]:
-    return {"identity": identity_vault.get(identity[0])}
+def h_get_signing_identity(identity: tuple[str, str], cert_id: str = "") -> dict[str, Any]:
+    if cert_id and (not cert_id.isdecimal() or len(cert_id) > 64):
+        raise ApiError(400, "INVALID_IDENTITY", "证书编号格式不正确")
+    return {"identity": identity_vault.get_certificate(identity[0], cert_id) if cert_id
+            else identity_vault.get(identity[0])}
 
 
 def h_put_signing_identity(body: dict[str, Any], identity: tuple[str, str]) -> dict[str, Any]:
@@ -215,6 +218,18 @@ def h_put_signing_identity(body: dict[str, Any], identity: tuple[str, str]) -> d
             raise ValueError("wrong curve")
     except (ValueError, TypeError, UnicodeError):
         raise ApiError(400, "INVALID_IDENTITY", "签名身份格式不正确") from None
+    if body.get("backup_scope") == "certificate":
+        existing = identity_vault.get_certificate(identity[0], cert_id)
+        if existing and existing["private_key_pem"].strip() != pem.strip():
+            raise ApiError(409, "IDENTITY_CONFLICT", "该证书的备份私钥不同，已保留原备份和本机材料")
+        created = identity_vault.put_certificate(identity[0], cert_id, pem)
+        stored = identity_vault.get_certificate(identity[0], cert_id)
+        if not stored or stored["private_key_pem"].strip() != pem.strip():
+            raise ApiError(409, "IDENTITY_CONFLICT", "该证书的备份已变化，已保留本机材料")
+        # Keep the default for older clients; never replace another device's key.
+        identity_vault.put_once(identity[0], cert_id, pem)
+        return {"created": created, "replaced": False, "synced": True,
+                "cert_id": cert_id, "revision": stored["revision"]}
     expect = str(body.get("replace_cert_id") or "")
     revision = body.get("replace_revision")
     if expect and (not expect.isdecimal() or len(expect) > 64 or
@@ -701,7 +716,7 @@ class Handler(BaseHTTPRequestHandler):
             elif fn == "REVIEW":
                 self._json(h_put_review(params["app_id"], self._read_body(), self._identity()))
             elif fn == "IDENTITY_GET":
-                data = h_get_signing_identity(self._identity())
+                data = h_get_signing_identity(self._identity(), (query.get("cert_id") or [""])[0])
                 payload = json.dumps({"ok": True, "data": data,
                     "server_time": _now_iso(), "api_version": API_VERSION},
                     ensure_ascii=False).encode("utf-8")

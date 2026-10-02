@@ -653,12 +653,16 @@ struct Index {
    */
   private async syncIdentityToCloud(context: common.UIAbilityContext,
     identity: LocalSigningIdentity): Promise<boolean> {
+    const account = this.account;
+    if (identity.accountId !== account.userId) return false;
     try {
       const pem = fileIo.readTextSync(identity.privateKeyPath);
-      await new StoreClient(context).publishSigningIdentity(identity.certId, pem, this.account);
+      await new StoreClient(context).publishSigningIdentity(identity.certId, pem, account);
+      if (this.account.userId !== account.userId) return false;
       if (this.backupWarning.length > 0) this.backupWarning = '';
       return true;
     } catch (error) {
+      if (this.account.userId !== account.userId) return false;
       this.backupWarning = '签名身份尚未备份到云端（' + errorText(error) +
         '）。已保留本机材料，下次核对身份时会重试备份。';
       return false;
@@ -782,10 +786,9 @@ struct Index {
       return;
     }
     this.identityBusy = true;
-    this.identityMessage = '正在确认云端备份可用…';
+    this.identityMessage = '正在核对并取回本机证书…';
     try {
-      // 先确认云端确实存着这把私钥才允许删除本机材料；
-      // 备份不可用时 reset 会抛错并保留本机身份（不再先删后试恢复）。
+      // 按本机证书取回备份；缺少备份时先同步已经配对的本机材料。
       await SigningIdentityRecovery.reset(
         getContext(this) as common.UIAbilityContext, this.account);
     } catch (error) {
@@ -793,7 +796,7 @@ struct Index {
       this.identityBusy = false;
       return;
     }
-    // 本机材料已经删掉，界面状态必须跟着清空，否则会显示一个已不存在的身份。
+    // 重新读取已核验的材料，刷新界面状态。
     this.certReady = false;
     this.certId = '';
     this.certLabel = '';

@@ -49,8 +49,8 @@ curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 | POST | `/api/v1/apps/refresh-stale` | 兼容旧客户端，仅按新鲜度入队，不在请求中采集 |
 | GET | `/api/v1/apps/{id}/reviews` | 评分与评论列表。支持 `page` `page_size`（上限 50） |
 | POST | `/api/v1/apps/{id}/reviews` | 已验证华为开发者账号新增评分与评论（同账号可多条） |
-| GET | `/api/v1/signing-identity` | 已验证账号取回加密保存的签名身份；无记录时 `identity` 为 `null` |
-| POST | `/api/v1/signing-identity` | 备份 P-256 签名身份；首次写入或携带已确认版本进行 CAS 轮换，冲突返回 409 |
+| GET | `/api/v1/signing-identity` | 已验证账号取回身份；可带 `cert_id` 精确读取本机证书备份，无记录时为 `null` |
+| POST | `/api/v1/signing-identity` | 新客户端带 `backup_scope=certificate` 分证书备份；旧客户端保留主槽位 CAS 轮换，冲突返回 409 |
 | POST | `/api/v1/submit/prepare` | 检查 GitHub Release；APP/ZIP 由后台解析，返回草稿与检查状态；需 Bearer 凭证 |
 | POST | `/api/v1/submit/status` | 携带 `draft_token` 查询 APP/ZIP 检查状态，仅草稿所属账号可访问 |
 | POST | `/api/v1/submit/confirm` | 携带 `draft_token`、`asset_names`、`category` 确认多包上架；兼容旧 `asset_name` 单包接口 |
@@ -237,6 +237,16 @@ ssh -i ~/.ssh/ts_hapstore_ed25519 root@47.98.250.230 'systemctl restart hapstore
 | HTTPS | 已启用 IP 证书及客户端证书指纹校验 |
 
 ## 签名身份备份版本
+
+2026100207 起，新客户端 POST 携带 `backup_scope: "certificate"`，同账号不同
+`cert_id` 分别加密保存；同一证书的私钥不可覆盖。GET 携带 `?cert_id=...` 精确
+取回本账号的该证书，无记录返回 `null`，不回退到其他证书。密文 AAD 同时绑定
+账号与证书。旧主槽位保留，旧客户端 CAS 轮换在同一事务内归档原身份。
+
+本机已有配对私钥时，证书重置直接向 AGC 核对和下载，云端备份不可用不会
+阻止这条路径。云端由商店服务端加密保存，不是端到端加密。
+
+以下为旧客户端仍支持的主槽位协议：
 
 `GET /api/v1/signing-identity` 的 `identity` 包含 `cert_id`、`private_key_pem` 和
 `revision`（从 1 开始）。旧数据库启动时自动补充 revision，不改动已保存的私钥。

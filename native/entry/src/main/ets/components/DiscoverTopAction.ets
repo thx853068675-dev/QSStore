@@ -68,7 +68,7 @@ export struct DiscoverTopAction {
   }
 
   build() {
-    Stack({ alignContent: Alignment.TopStart }) {
+    Row() {
       if (deviceInfo.sdkApiVersion >= 26 && uiMaterial.isImmersiveMaterialSupported()) {
         Button({ type: ButtonType.Circle }) { this.arrow() }
           .width(48).height(48).id('discover-back-to-top').accessibilityText('回到顶部')
@@ -76,8 +76,6 @@ export struct DiscoverTopAction {
           .systemMaterial(new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THIN,
             colorInvert: true, applyShadow: true, interactive: true,
             lightEffect: { color: Palette.forMode(this.darkMode).surface } }))
-          .position({ x: this.leftHand ? this.inset : 'calc(100% - ' + (this.inset + 48) + 'vp)', y: 0 })
-          .animation({ duration: 220, curve: Curve.EaseOut })
           .onClick(() => this.action())
       } else {
         // 旧系统尚无组件级 ImmersiveMaterial，使用系统毛玻璃保持形态与可读性。
@@ -88,10 +86,11 @@ export struct DiscoverTopAction {
             colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT })
           .border({ width: 0.5, color: Palette.forMode(this.darkMode).border, radius: 24 })
           .shadow(ShadowStyle.OUTER_DEFAULT_SM)
-          .position({ x: this.leftHand ? this.inset : 'calc(100% - ' + (this.inset + 48) + 'vp)', y: 0 })
-          .animation({ duration: 220, curve: Curve.EaseOut })
           .onClick(() => this.action())
       }
-    }.width('100%').height(48).hitTestBehavior(HitTestMode.Transparent)
+    }.width('100%').height(48).padding({ left: this.inset, right: this.inset })
+      .justifyContent(this.leftHand ? FlexAlign.Start : FlexAlign.End)
+      .animation({ duration: 220, curve: Curve.EaseOut })
+      .hitTestBehavior(HitTestMode.Transparent)
   }
 }

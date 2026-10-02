@@ -5,7 +5,8 @@
 两个关键设计：
 
 1) **可信元数据与镜像下载**
-   release 摘要和下载地址只从 GitHub API 直连取得。镜像只用于下载 HAP；
+   release 摘要和下载地址只从 GitHub API 直连取得。旧附件没有摘要时只允许官方
+   HTTPS 直连计算摘要。镜像只用于下载已有可信摘要的 HAP；
    下载后必须匹配 GitHub 摘要才会解析包内元数据。直连不可用时同步失败，
    防止第三方镜像同时伪造安装包与校验值。
 
@@ -500,14 +501,18 @@ def _unlink_quiet(path: str | None) -> None:
         pass
 
 
-def _download_to_temp(url: str, *, token: str = "") -> str | None:
+def _download_to_temp(url: str, *, token: str = "", direct_only: bool = False) -> str | None:
     """把 HAP 下到临时文件用于解析。失败返回 None（不阻断采集）。
 
     重要：**超限截断的文件必须丢弃**。超限时若把已写入的临时文件当完整包返回，
     随后按它算出的 sha256 是错的，一旦入库就会毒害客户端的完整性校验 ——
     客户端会拿这个错误哈希去比对，从而拒掉本来正常的包（或反之放行被截断的包）。
     """
-    for prefix in API_MIRRORS:
+    if direct_only:
+        parsed = urlparse(url)
+        if parsed.scheme != 'https' or parsed.hostname != 'github.com' or '/releases/download/' not in parsed.path:
+            return None
+    for prefix in (('',) if direct_only else API_MIRRORS):
         target = f"{prefix}{url}" if prefix else url
         tmp: str | None = None
         try:
@@ -601,12 +606,27 @@ def fetch_app_metadata(repo: str, *, token: str = "", timeout: int = TIMEOUT) ->
     }
 
 
-def fetch_releases(repo: str, *, token: str = "", limit: int = 30,
+def fetch_releases(repo: str, *, token: str = "", limit: int = 300,
                    timeout: int = TIMEOUT) -> list[dict[str, Any]]:
-    """拉取 release 列表并筛出 HAP 附件。"""
-    raw = _json(f"/repos/{repo}/releases?per_page={limit}", token=token, timeout=timeout)
+    """分页取发布元数据；只解析有限安装包，完整分页失败时不提交残缺快照。"""
+    limit = max(1, min(int(limit), 1000))
+    page_size = min(limit, 100)
+    raw = []
+    for page in range(1, (limit + page_size - 1) // page_size + 1):
+        suffix = '' if page == 1 else f'&page={page}'
+        rows = _json(f"/repos/{repo}/releases?per_page={page_size}{suffix}", token=token, timeout=timeout)
+        if not isinstance(rows, list):
+            raise CollectError('GitHub 版本列表格式异常，保留原有版本')
+        raw.extend(rows)
+        if len(rows) < page_size:
+            break
+    else:
+        # 不能让数据库把未抓到的历史版本当成上游删除。
+        raise CollectError('GitHub 版本列表超过采集上限，保留原有版本')
     out: list[dict[str, Any]] = []
     for r in raw:
+        if r.get('draft'):
+            continue
         assets = []
         for a in r.get("assets") or []:
             if not is_hap_asset(a.get("name", "")):
@@ -633,6 +653,17 @@ def fetch_releases(repo: str, *, token: str = "", limit: int = 30,
             "assets": assets,
         })
     return sorted(out, key=lambda r: r["published_at"], reverse=True)
+
+
+def metadata_scan_order(releases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """在原有三条解析预算内，同时覆盖最新正式包和预览包。"""
+    leading = []
+    for preview in (False, True):
+        row = next((r for r in releases if bool(r.get('prerelease')) == preview and r.get('assets')), None)
+        if row is not None:
+            leading.append(row)
+    remaining = [r for r in releases if not any(r is item for item in leading)]
+    return leading + [r for r in remaining if r.get('prerelease')] + [r for r in remaining if not r.get('prerelease')]
 
 
 def enrich_assets_with_hap_metadata(
@@ -664,19 +695,21 @@ def enrich_assets_with_hap_metadata(
             if cached is not None:
                 a.update(cached[0])
                 continue
-            tmp = _download_to_temp(a["download_url"], token=token)
+            trusted_sha = a.get("sha256") or ""
+            # GitHub 的旧附件可能没有 digest；只能从官方 HTTPS 下载并计算，
+            # 不能用镜像内容补成可信校验值。
+            tmp = _download_to_temp(a["download_url"], token=token, direct_only=not bool(trusted_sha))
             if not tmp:
                 continue
             try:
-                trusted_sha = a.get("sha256") or ""
                 actual_sha = _sha256_file(tmp)
                 if trusted_sha and actual_sha != trusted_sha:
                     if progress:
                         progress(f"  {a['name']}: 下载内容与 GitHub 摘要不一致，已跳过")
                     continue
                 if not trusted_sha:
-                    # GitHub 未提供摘要时，镜像内容无法成为可信校验基准。
-                    continue
+                    trusted_sha = actual_sha
+                    a['sha256'] = actual_sha
                 meta = parse_hap_metadata(tmp)
                 a.update(meta)
                 a["_icon_checked"] = True
@@ -710,7 +743,7 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
     releases = copy.deepcopy(snapshot["releases"]) if snapshot else fetch_releases(repo, token=token)
 
     if with_metadata and releases:
-        scan_releases = releases
+        scan_releases = metadata_scan_order(releases)
         if generation is not None and selection:
             selected = next((r for r in releases if r["tag"] == selection.get("tag")), None)
             if selected:
@@ -720,7 +753,7 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
                                         (selection.get('assets') or [selection])]]
                 # The selected HAP comes first, including a legacy draft whose
                 # Release is no longer in GitHub's first three entries.
-                scan_releases = [target] + [r for r in releases if r is not selected and r.get("assets")]
+                scan_releases = [target] + metadata_scan_order([r for r in releases if r is not selected and r.get("assets")])
         enrich_assets_with_hap_metadata(scan_releases, token=token, progress=progress)
         if scan_releases is not releases and scan_releases:
             for original in releases:
@@ -779,6 +812,10 @@ def sync_app(repo: str, *, token: str = "", with_metadata: bool = True,
                 preferred = [a for a in matching if a['name'] == chosen['asset_name']]
                 for asset in preferred or matching:
                     if not any(old['name'] == asset['name'] for old in keep): keep.append(asset)
+            if release.get('prerelease') and not keep:
+                # 同一仓库的旧预发布可能改过包名。保留已解析的实际身份；
+                # 客户端按包名关联安装状态，不把不同包名的包当成覆盖更新。
+                keep = [a for a in release.get('assets', []) if a.get('bundle_name') and a.get('version_code', 0) > 0]
             release['assets'] = keep
 
     presentation_releases = [r for r in releases if not r.get("prerelease")] or releases

@@ -46,7 +46,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
       installedVersionCode = 0;
     } },
     './LocalBundles': { LocalBundles: { liveInstalledVersion: () => installedVersion,
-      isSelfBundle: () => selfUpdate, selfSigningFingerprint: () => 'A'.repeat(64),
+      isKnown: version => version >= 0, isSelfBundle: () => selfUpdate, selfSigningFingerprint: () => 'A'.repeat(64),
       selfAppIdentifier: () => 'installed-app-id' } },
     './InstalledAppRegistry': { InstalledSigningIdentity: class {
       fingerprint = ''; appIdentifier = ''; versionCode = 0;
@@ -434,4 +434,12 @@ test('staged replacement keeps a cleanup ticket when the link drops during clean
   runtime.device.discardStaged = async () => false;
   await runtime.install(job);
   assert.equal(calls.uninstalls, 1); assert.ok(job.stagedTicket.length > 0);
+});
+
+test('an online queued package cannot downgrade after another source upgrades the app', async () => {
+  const { job, calls, runtime } = fixture(9);
+  job.appId = 12; job.versionCode = 7; job.allowDataLoss = true;
+  await assert.rejects(() => runtime.install(job), /无法降级/);
+  assert.equal(calls.uninstalls, 0); assert.equal(calls.installedPath, '');
+  assert.equal(calls.selfStaged, '');
 });

@@ -24,7 +24,7 @@ const code = ts.transpileModule(`class Index {
   static STAR_FIELD_COUNT = 46;
   static STARRED_MIN_STARS = 100;
   ${['catalogHasMore', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
-    'latestAssets', 'assetForBundle', 'refreshCatalogInstallState', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion',
+    'latestAssets', 'installedAssets', 'assetForBundle', 'refreshCatalogInstallState', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion',
     'displayApps', 'featuredTier', 'featuredColors']
     .map(method).join('\n')}
 }; globalThis.Page = Index;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
@@ -49,7 +49,7 @@ function fixture() {
     decode: async () => ({ release: async () => releases.push('pixels') }) };
   const f2 = {};
   f2.localBundles = { installedVersion: () => f.localVersion,
-    liveInstalledVersion: () => f.localVersion,
+    liveInstalledVersion: () => f.localVersion, installedVersionName: () => '',
     isKnown: (v) => v !== -1, UNKNOWN: -1 };
   f2.bridgeClass = class {
     async connected() { calls.push('connected'); return f.deviceConnected; }
@@ -81,7 +81,7 @@ function fixture() {
   f2.deviceUnparsable = false;
   f2.deviceVersions = {};
   f2.knownBundles = [];
-  const sandbox = { setTimeout, clearTimeout, console, Curve: { EaseOut: 'ease-out' },
+  const sandbox = { ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {}, setTimeout, clearTimeout, console, Curve: { EaseOut: 'ease-out' },
     InstallReconnect: { clear() {}, deactivate() {} }, InstallConfirmation: { deactivate() {} }, InstallCoordinator: { conditionReady() {} }, InstallStage: { WAITING_DEVICE: 'waiting-device' },
     StoreClient: class {
       listApps(number, size, sort, query) {
@@ -99,7 +99,7 @@ function fixture() {
     image: { createImageSource: () => ({ createPixelMap: () => f.decode(),
       release: async () => releases.push('source') }) },
     util: { Base64Helper: class { encodeToStringSync(bytes) { return Buffer.from(bytes).toString('base64'); } } },
-    InstalledAppRegistry: { markCatalogSnapshot: async () => {}, version: () => -1 },
+    InstalledAppRegistry: { markCatalogSnapshot: async () => {}, versionName: () => '', version: () => -1 },
     LocalBundles: f.localBundles,
     HdcDeviceBridge: f.bridgeClass,
     JobStore: { open: async () => f.store }
@@ -111,7 +111,7 @@ function fixture() {
     catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false,
     catalogRefreshing: false, catalogRefreshBusy: false, catalogError: '',
     getUIContext: () => ({ animateTo: (_options, change) => change() }),
-    installedVersions: new Map(), installedJobs: [], catalogProbeBusy: false, catalogProbeNames: [], catalogProbePending: [], updateCatalogReady: false, updateInstallScanPrompt() {}, refreshCatalogInstallState() {},
+    installedDisplay: new Map(), installedVersions: new Map(), installedJobs: [], catalogProbeBusy: false, catalogProbeNames: [], catalogProbePending: [], updateCatalogReady: false, updateInstallScanPrompt() {}, refreshCatalogInstallState() {},
     updateApps() { return this.apps; }, syncDetectedInstalled() {}, reconcileDetectedJobs: async () => {}, forgetInstalledVersions() {}, loadUpdateCatalog() {}, checkInstalledUpdates() {},
     refreshCatalogInstallState() {} });
   Object.assign(f, f2);

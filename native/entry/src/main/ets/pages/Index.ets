@@ -1,3 +1,5 @@
+import { DiscoverHeader, DiscoverMotion, DiscoverRefreshIndicator } from '../components/DiscoverHeader';
+import { ReleaseChannelRegistry } from '../data/ReleaseChannelRegistry';
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
 import { ClassifiedFailure } from '../data/ServiceFailure';
 import { AccountService } from '../data/AccountService';
@@ -5,10 +7,9 @@ import { InstallCoordinator } from '../jobs/InstallCoordinator';
 import { InstallReconnect } from '../jobs/InstallReconnect';
 import { LocalInstallTimeline, LocalTimelineView, LocalTimelineStep } from '../jobs/LocalInstallTimeline';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
-import { router, SymbolGlyphModifier, uiMaterial, LengthMetrics } from '@kit.ArkUI';
+import { router, SymbolGlyphModifier, LengthMetrics } from '@kit.ArkUI';
 import { HdsTabs, hdsMaterial, HdsNavigation, HdsNavigationTitleMode,
   TitleBarStyleOptions, ScrollEffectType, DividerShowType } from '@kit.UIDesignKit';
-import { deviceInfo } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
@@ -63,6 +64,7 @@ class CertRow {
 /** 已安装应用可用的新版本（管理页据此决定显示「更新」还是「打开」）。 */
 /** installedVersion 的缓存条目：避免来回切页时反复起 hdc 进程。 */
 class VersionCacheEntry {
+  versionName: string = '';
   version: number = 0;
   at: number = 0;
 }
@@ -144,8 +146,10 @@ struct Index {
   // 每个颜色使用点通过 colors() 读取此状态，主题变化会更新对应组件。
   @StorageProp('darkMode') darkMode: boolean = false;
   @StorageProp('statusBarInset') statusBarInset: number = 0;
-  @State private discoverTitleHeight: number = 0;
-  @State private discoverScrollOffset: number = 0;
+  @State private discoverTitleHeight: number = 88;
+  @State private discoverMotion: DiscoverMotion = new DiscoverMotion();
+  @State private discoverCanRefresh: boolean = true;
+  @State private discoverShowTop: boolean = false;
   private discoverScroller: Scroller = new Scroller();
   @State private viewportWidth: number = 0;
   @State private featuredHeights: Map<number, number> = new Map();
@@ -178,6 +182,8 @@ struct Index {
   @State private activeQuery: string = '';
   /** 目录里每个应用在本机的版本（来自系统 bundleManager），0/缺失表示没装。 */
   @State private installedVersions: Map<number, number> = new Map<number, number>();
+  @State private installedDisplay: Map<string, VersionCacheEntry> = new Map();
+  @StorageProp('releaseChannelRevision') @Watch('onReleaseChannelsChanged') private releaseChannelRevision: number = 0;
   @State private needsInstallScan: boolean = false;
   @StorageProp('wirelessLinkRevision') @Watch('onWirelessLinkChanged') private wirelessLinkRevision: number = 0;
   @StorageProp('wirelessDebugRestoring') @Watch('onWirelessLinkChanged') private wirelessDebugRestoring: boolean = false;
@@ -304,6 +310,40 @@ struct Index {
   private colors(): Palette { return Palette.forMode(this.darkMode); }
 
   private pageInset(): number { return StoreLayout.inset(this.viewportWidth); }
+
+  private onReleaseChannelsChanged(): void {
+    if (this.pageVisible) this.refreshCatalogInstallState();
+    else {
+      this.syncDetectedInstalled();
+      this.checkInstalledUpdates();
+    }
+  }
+
+  /** 渲染只读本机观察；主动刷新/安装完成后的查询仍读取真实系统状态。 */
+  private displayInstalledVersion(bundleName: string): number {
+    return this.installedDisplay.get(bundleName)?.version ?? InstalledAppRegistry.version(bundleName);
+  }
+
+  private syncDiscoverScroll(): void {
+    const distance = this.discoverMotion.scroll(this.discoverScroller.currentOffset().yOffset,
+      this.discoverTitleHeight);
+    const refresh = distance <= 0.5;
+    const showTop = distance > 240;
+    if (refresh !== this.discoverCanRefresh) this.discoverCanRefresh = refresh;
+    if (showTop !== this.discoverShowTop) this.discoverShowTop = showTop;
+  }
+
+  private revealDiscoverTop(): void {
+    // 使用列表真实起点，HdsNavigation 与安全区会改变 offset 基准。
+    this.discoverMotion.reachStart(this.discoverScroller.currentOffset().yOffset);
+    if (!this.discoverCanRefresh) this.discoverCanRefresh = true;
+    if (this.discoverShowTop) this.discoverShowTop = false;
+  }
+
+  private backToDiscoverTop(): void {
+    this.discoverScroller.scrollEdge(Edge.Top);
+    this.revealDiscoverTop();
+  }
 
   private rememberFeaturedHeight(appId: number, height: number): void {
     if (!Number.isFinite(height) || height <= 0 ||
@@ -936,6 +976,7 @@ struct Index {
       const requestStartedAt = Date.now();
       const page = await client.listApps(nextPage, Index.CATALOG_PAGE_SIZE,
         'updated', query);
+      await ReleaseChannelRegistry.restore(getContext(this) as common.UIAbilityContext);
       console.info('Catalog read: page=' + nextPage + ' elapsedMs=' + (Date.now() - requestStartedAt));
       if (token !== this.catalogToken || query !== this.activeQuery) return;
       // 先加载的页在后，追加时按 id 去重，避免上架/删除后翻页出现重复项。
@@ -956,6 +997,9 @@ struct Index {
       this.catalogTotal = page.total;
       this.catalogError = '';
       // 目录变了就重算「装没装」，卡片按钮跟着更新
+      const channels = ReleaseChannelRegistry.refreshTargets(getContext(this) as common.UIAbilityContext,
+        this.apps, rescanInstalled);
+      if (rescanInstalled) await channels;
       const recognition = this.refreshCatalogInstallState(rescanInstalled);
       // 只缓存干净的第一页：缓存与分页混在一起会得到半新半旧的列表
       if (cacheablePage) {
@@ -1015,6 +1059,14 @@ struct Index {
   /** 只有设备明确确认卸载才清理旧记录；批量扫描统一由 confirm 方法调度。 */
   private async reconcileCatalogInstallState(bundleNames: string[],
     versions: Map<string, number>): Promise<void> {
+    const display = new Map(this.installedDisplay);
+    for (const name of bundleNames) {
+      const version = versions.get(name);
+      if (version !== undefined && version <= 0) continue;
+      const entry = new VersionCacheEntry(); entry.version = version ?? 0;
+      entry.versionName = InstalledAppRegistry.versionName(name, entry.version);
+      display.set(name, entry);
+    }
     const missing = bundleNames.filter((name: string) => !versions.has(name));
     const dropped = this.installedJobs.filter((job: InstallJob) =>
       job.bundleName.length > 0 && missing.includes(job.bundleName));
@@ -1022,13 +1074,14 @@ struct Index {
       !missing.includes(job.bundleName));
     const next = new Map(this.installedVersions);
     for (const app of this.updateApps()) {
-      const name = app.latestAsset?.bundleName ?? '';
+      const name = (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName ?? '';
       if (!bundleNames.includes(name)) continue;
       const version = versions.get(name);
       if (version === undefined) next.set(app.id, 0);
       else if (version > 0) next.set(app.id, version);
       // 包存在但版本查询失败时保留原值，不能误判为未装。
     }
+    this.installedDisplay = display;
     this.installedVersions = next;
     this.syncDetectedInstalled();
     this.checkInstalledUpdates();
@@ -1140,6 +1193,7 @@ struct Index {
    */
   private async loadCatalogFromCache(): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
+    await ReleaseChannelRegistry.restore(context);
     const cached = await CatalogCache.load(context);
     if (cached.length === 0) return;
     // 期间已经拿到新数据就不要用旧数据覆盖
@@ -1259,7 +1313,7 @@ struct Index {
    */
   private versionLabel(job: InstallJob): string {
     if (job.stage === InstallStage.INSTALLED) {
-      const liveName = LocalBundles.installedVersionName(job.bundleName, job.versionCode);
+      const liveName = this.currentInstalledView(job).versionName;
       if (liveName.length > 0) return liveName;
     }
     if (job.versionName.length > 0) return job.versionName;
@@ -1294,7 +1348,7 @@ struct Index {
     if (update === undefined) {
       const ambiguous = job.appId === 0 && job.bundleName.length > 0 &&
         this.updateApps().filter((app: CatalogApp) =>
-          this.latestAssets(app).some((asset: HapAsset) => asset.bundleName === job.bundleName)).length > 1;
+          this.installedAssets(app).some((asset: HapAsset) => asset.bundleName === job.bundleName)).length > 1;
       return '版本 ' + this.versionLabel(job) +
         (ambiguous ? ' · 存在多个同包名来源，请从发现页选择' : '');
     }
@@ -1535,10 +1589,11 @@ struct Index {
   }
 
   private latestVersionTag(app: CatalogApp): string {
-    const version = app.latestAsset?.versionName.trim() ?? '';
+    if (ReleaseChannelRegistry.apply(app).channelUnavailable) return '暂无预览版';
+    const version = ReleaseChannelRegistry.apply(app).latestAsset?.versionName.trim() ?? '';
     if (version.length > 0) return /^v/i.test(version) ? version : 'v' + version;
     // 缺少解析版本时才回退 Release 名称，不把 versionCode 当可读版本号。
-    return app.latestName.trim();
+    return ReleaseChannelRegistry.apply(app).latestName.trim();
   }
 
   // Updating this installer stops its process before HDC can return success.
@@ -1693,6 +1748,8 @@ struct Index {
   }
 
   private taskForApp(appId: number, bundleName: string = ''): InstallTaskSnapshot | undefined {
+    const active = InstallTaskState.activeForApp(this.installTasks, appId, bundleName);
+    if (active !== undefined) return active;
     const app = this.catalogApp(appId);
     const asset = app === undefined ? undefined : (bundleName.length > 0 ?
       this.assetForBundle(app, bundleName) : app.latestAsset);
@@ -1811,9 +1868,10 @@ struct Index {
 
   /** 主列表展示设备当前版本；安装历史原样保留，外部更新不改写旧记录。 */
   private currentInstalledView(job: InstallJob): InstallJob {
-    const version = LocalBundles.installedVersion(job.bundleName);
+    const version = this.displayInstalledVersion(job.bundleName);
     if (version <= 0) return job;
-    const versionName = LocalBundles.installedVersionName(job.bundleName, version) ||
+    const observed = this.installedDisplay.get(job.bundleName);
+    const versionName = (observed?.version === version ? observed.versionName : '') ||
       InstalledAppRegistry.versionName(job.bundleName, version);
     if (version === job.versionCode && (versionName.length === 0 ||
       versionName === job.versionName)) return job;
@@ -1955,13 +2013,17 @@ struct Index {
   @Builder
   private catalogCardAction(app: CatalogApp, featured: boolean = false) {
     Column() {
-      if (this.taskPending(app.id, app.latestAsset?.bundleName ?? '')) {
+      if (this.taskPending(app.id, (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName ?? '')) {
         Column() {
-          this.taskIndicator(app.id, app.latestAsset?.bundleName ?? '', '', featured)
+          this.taskIndicator(app.id, (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName ?? '', '', featured)
         }.width(74).padding({ top: 2, bottom: 2 })
           .onClick(() => { this.currentTab = Index.TAB_MANAGE; })
       } else if (this.enqueuingAppIds.includes(app.id)) {
-        Column() { this.taskIndicator(app.id, app.latestAsset?.bundleName ?? '', '', featured) }.width(74)
+        Column() { this.taskIndicator(app.id, (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName ?? '', '', featured) }.width(74)
+      } else if (app.channelUnavailable) {
+        Button('暂无预览版').width(94).height(44).fontSize(12)
+          .fontColor(featured ? '#DAE6FF' : this.colors().textTertiary)
+          .backgroundColor(featured ? '#22FFFFFF' : this.colors().fill).borderRadius(22).enabled(false)
       } else if (this.installedBundleOf(app.id).length > 0) {
         if (this.updateForApp(app.id) !== undefined) {
           Button('更新')
@@ -2074,7 +2136,7 @@ struct Index {
    */
   private async installFromCatalog(app: CatalogApp, selected?: HapAsset): Promise<void> {
     if (this.enqueuingAppIds.includes(app.id) ||
-      this.taskPending(app.id, selected?.bundleName ?? app.latestAsset?.bundleName ?? '')) return;
+      this.taskPending(app.id, selected?.bundleName ?? (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName ?? '')) return;
     // ForEach 的点击闭包可能还持有上一轮卡片；与「更新」判断使用同一份当前目录。
     const asset = selected ?? this.catalogApp(app.id)?.latestAsset;
     if (asset === undefined || !/^https:\/\//.test(asset.url)) {
@@ -2128,20 +2190,28 @@ struct Index {
     const next = new Map<number, number>();
     const unresolved = new Set<string>();
     const versions = new Map<string, number>();
+    const display = new Map(this.installedDisplay);
     let systemKnown = 0;
     for (const app of this.updateApps()) {
-      const candidates = this.latestAssets(app).concat(app.latestAsset === undefined ? [] : [app.latestAsset]);
+      const candidates = this.installedAssets(app);
       for (const candidate of candidates) {
         if (candidate.bundleName.length === 0 || versions.has(candidate.bundleName)) continue;
         const live = LocalBundles.liveInstalledVersion(candidate.bundleName);
         if (LocalBundles.isKnown(live)) systemKnown++;
         const version = LocalBundles.isKnown(live) ? live : InstalledAppRegistry.version(candidate.bundleName);
         versions.set(candidate.bundleName, version);
+        if (LocalBundles.isKnown(version)) {
+          const entry = new VersionCacheEntry(); entry.version = version; entry.at = Date.now();
+          entry.versionName = version > 0 ? (LocalBundles.isKnown(live) ?
+            LocalBundles.installedVersionName(candidate.bundleName, version) :
+            InstalledAppRegistry.versionName(candidate.bundleName, version)) : '';
+          display.set(candidate.bundleName, entry);
+        }
         if (!LocalBundles.isKnown(live) && (rescanInstalled || !LocalBundles.isKnown(version))) {
           unresolved.add(candidate.bundleName);
         }
       }
-      const asset = app.latestAsset;
+      const asset = app.latestAsset ?? this.installedAssets(app)[0];
       if (asset === undefined || asset.bundleName.length === 0) continue;
       const version = versions.get(asset.bundleName) ?? -1;
       if (version > 0) {
@@ -2155,6 +2225,7 @@ struct Index {
         next.set(app.id, 0);
       }
     }
+    this.installedDisplay = display;
     this.installedVersions = next;
     this.syncDetectedInstalled();
     this.checkInstalledUpdates();
@@ -2297,9 +2368,13 @@ struct Index {
 
   private applyDetectedCatalogVersion(bundleName: string, version: number): void {
     const next = new Map(this.installedVersions);
+    const display = new Map(this.installedDisplay);
+    const entry = new VersionCacheEntry(); entry.version = version; entry.at = Date.now();
+    entry.versionName = InstalledAppRegistry.versionName(bundleName, version);
+    display.set(bundleName, entry); this.installedDisplay = display;
     let wasInstalled = false;
     for (const app of this.updateApps()) {
-      if (app.latestAsset?.bundleName === bundleName) {
+      if ((app.latestAsset ?? this.installedAssets(app)[0])?.bundleName === bundleName) {
         if ((next.get(app.id) ?? 0) > 0) wasInstalled = true;
         next.set(app.id, version);
       }
@@ -2318,10 +2393,10 @@ struct Index {
       this.storeInstalled.filter((job: InstallJob) => job.bundleName !== bundleName);
     const seen = new Set<string>();
     for (const app of this.updateApps()) {
-      for (const asset of this.latestAssets(app)) {
+      for (const asset of this.installedAssets(app)) {
         if (bundleName.length > 0 && asset.bundleName !== bundleName) continue;
         if (asset.bundleName.length === 0 || seen.has(asset.bundleName)) continue;
-        const detected = LocalBundles.installedVersion(asset.bundleName);
+        const detected = this.displayInstalledVersion(asset.bundleName);
         const version = LocalBundles.isKnown(detected) ? detected :
           (app.latestAsset?.bundleName === asset.bundleName ? this.installedVersions.get(app.id) ?? -1 : -1);
         if (version <= 0) continue;
@@ -2364,16 +2439,21 @@ struct Index {
 
   /** 完整目录可用后，不再让搜索结果或第一页决定管理页的更新来源。 */
   private updateApps(): CatalogApp[] {
-    return this.updateCatalogReady ? this.updateCatalog : this.apps;
+    return (this.updateCatalogReady ? this.updateCatalog : this.apps)
+      .map((app: CatalogApp) => ReleaseChannelRegistry.apply(app));
   }
 
   private catalogApp(appId: number): CatalogApp | undefined {
-    const management = this.updateApps().find((app: CatalogApp) => app.id === appId);
+    const management = (this.updateCatalogReady ? this.updateCatalog : this.apps)
+      .find((app: CatalogApp) => app.id === appId);
     const visible = this.apps.find((app: CatalogApp) => app.id === appId);
-    if (management === undefined) return visible;
-    if (visible === undefined) return management;
-    return (visible.latestAsset?.versionCode ?? 0) >
-      (management.latestAsset?.versionCode ?? 0) ? visible : management;
+    const app = management === undefined ? visible : visible === undefined ? management :
+      ((visible.latestAsset?.versionCode ?? 0) > (management.latestAsset?.versionCode ?? 0) ? visible : management);
+    return app === undefined ? undefined : ReleaseChannelRegistry.apply(app);
+  }
+
+  private installedAssets(app: CatalogApp): HapAsset[] {
+    return app.knownAssets !== undefined && app.knownAssets.length > 0 ? app.knownAssets : this.latestAssets(app);
   }
 
   private latestAssets(app: CatalogApp): HapAsset[] {
@@ -2393,7 +2473,7 @@ struct Index {
   private catalogForJob(job: InstallJob): CatalogApp | undefined {
     if (job.bundleName.length === 0) return undefined;
     const matches = this.updateApps().filter((app: CatalogApp) =>
-      this.latestAssets(app).some((asset: HapAsset) => asset.bundleName === job.bundleName));
+      this.installedAssets(app).some((asset: HapAsset) => asset.bundleName === job.bundleName));
     if (job.appId > 0) return matches.find((app: CatalogApp) => app.id === job.appId);
     // 首屏只有部分目录，不能据此认定同包名来源唯一。
     return this.updateCatalogReady && matches.length === 1 ? matches[0] : undefined;
@@ -2417,10 +2497,11 @@ struct Index {
    * 用 `slice()` 复制再排，别就地改 `this.apps` —— 那个数组还带着分页状态。
    */
   private displayApps(): CatalogApp[] {
-    const starred = this.apps.filter((app: CatalogApp) => app.stars > Index.STARRED_MIN_STARS)
+    const apps = this.apps.map((app: CatalogApp) => ReleaseChannelRegistry.apply(app));
+    const starred = apps.filter((app: CatalogApp) => app.stars > Index.STARRED_MIN_STARS)
       .sort((a: CatalogApp, b: CatalogApp) =>
         b.stars !== a.stars ? b.stars - a.stars : a.id - b.id);
-    const rest = this.apps.filter((app: CatalogApp) => app.stars <= Index.STARRED_MIN_STARS);
+    const rest = apps.filter((app: CatalogApp) => app.stars <= Index.STARRED_MIN_STARS);
     return starred.concat(rest);
   }
 
@@ -2455,6 +2536,7 @@ struct Index {
       this.updateCatalog = collected;
       this.updateCatalogReady = true;
       this.updateCatalogError = '';
+      ReleaseChannelRegistry.refreshTargets(getContext(this) as common.UIAbilityContext, collected);
       this.refreshCatalogInstallState();
     } catch (error) {
       this.updateCatalogError = '更新检查未完成：' + errorText(error);
@@ -2465,9 +2547,10 @@ struct Index {
 
   /** 按真实包名关联本地安装，不能拿 appId=0 或显示名称当身份。 */
   private installedVersionOf(appId: number): number {
-    const bundleName = this.catalogApp(appId)?.latestAsset?.bundleName ?? '';
+    const app = this.catalogApp(appId);
+    const bundleName = (app?.latestAsset ?? (app === undefined ? undefined : this.installedAssets(app)[0]))?.bundleName ?? '';
     if (bundleName.length === 0) return -1;
-    const local = LocalBundles.installedVersion(bundleName);
+    const local = this.displayInstalledVersion(bundleName);
     if (LocalBundles.isKnown(local)) return local;
     const detected = this.installedVersions.get(appId);
     if (detected !== undefined && detected >= 0) return detected;
@@ -2477,7 +2560,8 @@ struct Index {
 
   private installedBundleOf(appId: number): string {
     if (this.installedVersionOf(appId) <= 0) return '';
-    return this.catalogApp(appId)?.latestAsset?.bundleName ?? '';
+    const app = this.catalogApp(appId);
+    return (app?.latestAsset ?? (app === undefined ? undefined : this.installedAssets(app)[0]))?.bundleName ?? '';
   }
 
   private installedJobFor(appId: number): InstallJob | undefined {
@@ -2493,7 +2577,7 @@ struct Index {
     if (app === undefined) return undefined;
     const asset = bundleName.length > 0 ? this.assetForBundle(app, bundleName, preferredName) : app.latestAsset;
     if (asset === undefined) return undefined;
-    const deviceVersion = LocalBundles.installedVersion(asset.bundleName);
+    const deviceVersion = this.displayInstalledVersion(asset.bundleName);
     const recorded = this.allInstalledJobs().find((job: InstallJob) => job.bundleName === asset.bundleName);
     const installed = LocalBundles.isKnown(deviceVersion) ? deviceVersion :
       (recorded?.versionCode ?? (bundleName.length === 0 ? this.installedVersionOf(appId) : -1));
@@ -2962,37 +3046,8 @@ struct Index {
   }
 
   @Builder
-  private discoverSearchSpace() {
-    Row().width('100%').height(70).hitTestBehavior(HitTestMode.None)
-      .accessibilityLevel('no-hide-descendants')
-  }
-
-  @Builder
-  private discoverSearchHeader() {
-    Stack({ alignContent: Alignment.Top }) {
-      // 材质直接作用在搜索框上，避免空 HdsTabs 的胶囊边缘与外层圆角叠成两层。
-      // 组件级沉浸材质从 API 26 起提供；6.1 使用系统薄磨砂，不创建多余导航容器。
-      if (deviceInfo.sdkApiVersion >= 26 && uiMaterial.isImmersiveMaterialSupported()) {
-        Stack() { this.discoverSearchInput() }
-          .width('calc(100% - ' + (this.pageInset() * 2) + 'vp)').constraintSize({ maxWidth: StoreLayout.contentWidth }).height(46).margin({ top: 8 })
-          .borderRadius(23).clip(true)
-          .systemMaterial(new uiMaterial.ImmersiveMaterial({
-            style: uiMaterial.ImmersiveStyle.THIN,
-            colorInvert: true,
-            applyShadow: true,
-            lightEffect: { color: this.colors().surface }
-          }))
-      } else {
-        Stack() { this.discoverSearchInput() }
-          .width('calc(100% - ' + (this.pageInset() * 2) + 'vp)').constraintSize({ maxWidth: StoreLayout.contentWidth }).height(46).margin({ top: 8 })
-          .borderRadius(23).clip(true)
-          .backgroundBlurStyle(BlurStyle.COMPONENT_THIN, {
-            colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT
-          })
-      }
-    }.width('100%').height(70)
-      .position({ x: 0, y: this.statusBarInset + Math.max(0, this.discoverTitleHeight - this.discoverScrollOffset) })
-      .hitTestBehavior(HitTestMode.Transparent)
+  private silentRefreshHeader() {
+    Row().width('100%').height(0).hitTestBehavior(HitTestMode.None)
   }
 
   @Builder
@@ -3010,36 +3065,39 @@ struct Index {
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
         .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
         .width('100%').height('100%')
-      this.discoverSearchHeader()
+      DiscoverRefreshIndicator({ motion: this.discoverMotion, refreshing: this.catalogRefreshing,
+        statusInset: this.statusBarInset, titleHeight: this.discoverTitleHeight })
+      DiscoverHeader({ motion: this.discoverMotion, darkMode: this.darkMode,
+        statusInset: this.statusBarInset, inset: this.pageInset(), titleHeight: this.discoverTitleHeight,
+        onTitleSize: (height: number): void => {
+          // 收起时子组件会受裁切视口约束；不能把此时的高度保存成标题自然高度。
+          if (this.discoverMotion.scrollOffset === 0 && Number.isFinite(height) && height > 0 &&
+            Math.abs(height - this.discoverTitleHeight) > 0.5) {
+            this.discoverTitleHeight = height;
+          }
+        }, searchContent: (): void => this.discoverSearchInput() })
+      if (this.discoverShowTop) {
+        StoreIconButton({ symbol: $r('sys.symbol.arrow_up'), label: '回到顶部',
+          action: () => this.backToDiscoverTop() })
+          .backgroundColor(this.colors().surface).borderRadius(22)
+          .border({ width: 1, color: this.colors().border, radius: 22 })
+          .position({ right: this.pageInset(), bottom: 116 })
+      }
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
 
   @Builder
   private discoverList() {
     Column() {
-      // Refresh 放在最外层：嵌在 if/else 里时下拉手势不会被它接管。
+      // Refresh 保持稳定，标题和搜索组件位于其外部。
       // 加载态与错误态改为列表项，列表本身始终存在。
-      Refresh({ refreshing: $$this.catalogRefreshing }) {
+      Refresh({ refreshing: $$this.catalogRefreshing, builder: this.silentRefreshHeader }) {
         List({ space: 0, scroller: this.discoverScroller }) {
-            // 大标题随列表滚出；组头保留搜索框的空间，上层搜索框随实际偏移吸顶。
+            // 占位随列表滚出；实际标题和搜索框在 Refresh 外，下拉时保持原位。
             ListItem() {
-              Row() {
-                Column({ space: 5 }) {
-                  Text('HARMONYOS').fontSize(11).fontWeight(FontWeight.Bold)
-                    .fontColor(this.colors().accent).letterSpacing(2)
-                  // 副标题与大标题同行、下对齐
-                  Row({ space: 9 }) {
-                    Text('发现').fontSize(30).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
-                    Text('值得安装的应用').fontSize(12).fontColor(this.colors().textSecondary)
-                      .padding({ bottom: 5 })
-                  }.alignItems(VerticalAlign.Bottom)
-                }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-              }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth }).padding({ top: 20, bottom: 14 })
-            }.width('100%').padding({ left: this.pageInset(), right: this.pageInset() })
-              .onSizeChange((_old: SizeOptions, size: SizeOptions) => {
-                this.discoverTitleHeight = Number(size.height);
-              })
-            ListItemGroup({ header: this.discoverSearchSpace }) {
+              Row().width('100%').height(this.discoverTitleHeight + 70)
+                .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+            }
             if (this.activeQuery.length > 0) {
               ListItem() {
                 Text('搜索「' + this.activeQuery + '」· ' + this.catalogTotal + ' 个结果')
@@ -3190,22 +3248,18 @@ struct Index {
             ListItem() {
               Row().width('100%').height(110)
             }
-            }
         }.width('100%')
           // 留白属于滚动内容；列表视口一直延伸到透明状态栏下。
           .contentStartOffset(this.statusBarInset)
-          .sticky(StickyStyle.Header)
           .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
-          .onDidScroll(() => {
-            const offset = this.discoverScroller.currentOffset().yOffset;
-            // contentStartOffset 使初始 yOffset 为负安全区高度，先归一化，
-            // 否则初始搜索框会多偏移一段状态栏高度，遮住第一张卡片。
-            this.discoverScrollOffset = offset + this.statusBarInset;
-          })
+          .onDidScroll(() => this.syncDiscoverScroll())
+          .onReachStart(() => this.revealDiscoverTop())
           .onReachEnd(() => this.loadMoreApps())
         }
-        // 只给 layoutWeight(1)：标题与搜索已移进列表，这里撑满 Column 剩余高度即可。
+        // 下拉容器撑满列表视口，顶部仅保留不响应触摸的占位。
         .width('100%').layoutWeight(1)
+        .pullToRefresh(this.discoverCanRefresh)
+        .onOffsetChange((offset: number) => this.discoverMotion.pull(offset))
         .onRefreshing(() => this.pullRefreshCatalog())
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }

@@ -20,7 +20,7 @@ function page(file, names, globals) {
     assert.notEqual(start, -1, name);
     return source.slice(start, source.indexOf('\n  }', start) + 4);
   });
-  const sandbox = { ...globals };
+  const sandbox = { VersionCacheEntry: class {}, ...globals };
   vm.runInNewContext(ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, sandbox);
@@ -38,7 +38,7 @@ function fixture() {
     Curve: { EaseOut: 'ease-out' },
     getContext: () => ({}),
     InstalledAppRegistry: {
-      hasCatalogSnapshot: () => f.snapshot,
+      versionName: () => '', hasCatalogSnapshot: () => f.snapshot,
       async markCatalogSnapshot() { f.snapshot = true; f.snapshots++; }
     },
     HdcDeviceBridge: class {
@@ -51,7 +51,7 @@ function fixture() {
   });
   Object.assign(ui, { apps: [{ id: 1, latestAsset: { bundleName: 'com.example.one' } }],
     getUIContext: () => ({ animateTo: (_options, change) => change() }),
-    installedJobs: [], forgetInstalledVersions() {}, installedVersions: new Map(), catalogProbeNames: [], catalogProbeBusy: false, catalogProbePending: [],
+    installedAssets(app) { return app.knownAssets?.length ? app.knownAssets : (app.latestAssets?.length ? app.latestAssets : (app.latestAsset ? [app.latestAsset] : [])); }, installedDisplay: new Map(), installedJobs: [], forgetInstalledVersions() {}, installedVersions: new Map(), catalogProbeNames: [], catalogProbeBusy: false, catalogProbePending: [],
     updateCatalogReady: true, accountChecked: true, signedIn: true,
     initialScanDismissed: false, showReconnect: false, showSubmit: false, showAppConfig: false,
     activeJobId: '', pendingJobs: [], reconnectBusy: false,

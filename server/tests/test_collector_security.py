@@ -25,7 +25,7 @@ class CollectorSecurityTest(unittest.TestCase):
             releases = collector.fetch_releases("o/r", token="private-token")
         self.assertEqual(releases[0]["assets"][0]["sha256"], digest)
         self.assertEqual(get.call_args.args[0],
-                         "https://api.github.com/repos/o/r/releases?per_page=30")
+                         "https://api.github.com/repos/o/r/releases?per_page=100")
         self.assertEqual(get.call_args.kwargs["token"], "private-token")
 
     def test_malformed_github_digest_is_not_published(self):

@@ -9,7 +9,7 @@ import { image } from '@kit.ImageKit';
 import { CatalogApp } from '../data/CatalogApp';
 import { StoreClient } from '../data/StoreClient';
 import { ReleaseInfo, HapAsset } from '../data/ReleaseInfo';
-import { ReleaseChannelPreference } from '../data/ReleaseChannelPreference';
+import { ReleaseChannelRegistry } from '../data/ReleaseChannelRegistry';
 import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
 import { JobStore } from '../jobs/JobStore';
 import { JobScheduler } from '../jobs/JobScheduler';
@@ -196,6 +196,9 @@ struct Detail {
   }
 
   private currentInstallTask(): InstallTaskSnapshot | undefined {
+    const active = InstallTaskState.activeForApp(this.installTasks, this.detailAppId,
+      this.selectedAsset.bundleName || this.app?.latestAsset?.bundleName || '');
+    if (active !== undefined) return active;
     if (this.selectedAsset.name.length > 0) {
       return InstallTaskState.forAsset(this.installTasks, this.detailAppId,
         this.selectedAsset.bundleName, this.selectedAsset.name,
@@ -242,6 +245,10 @@ struct Detail {
     if (row !== undefined && row.running) return InstallTaskState.label(row);
     if (row !== undefined && isPending(row.job.stage)) return InstallTaskState.label(row) + ' · 继续';
     if (this.downloadBusy) return '准备中';
+    if (this.selectedAsset.name.length === 0) {
+      return this.showPreviewReleases ? '暂无预览版本' : '暂无安装包';
+    }
+    if (this.selectedDowngrade()) return '版本较低，无法降级';
     if (this.installedUnknown && this.installedForApp() === undefined) return '安装/更新';
     return !this.installedForApp() ? '安装应用' :
       (this.updateAvailable() ? '更新到 ' + this.selectedVersionLabel() : '打开应用');
@@ -278,7 +285,7 @@ struct Detail {
    * 由 `installedForApp` 决定是否回退到设备查询。
    */
   private refreshInstalledVersion(): void {
-    const bundleName = this.selectedAsset.bundleName;
+    const bundleName = this.selectedAsset.bundleName || this.app?.latestAsset?.bundleName || '';
     if (bundleName.length === 0) {
       this.installedVersion = 0;
       this.installedUnknown = false;
@@ -301,7 +308,7 @@ struct Detail {
       const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
       const version = await bridge.installedVersion(bundleName);
       // 期间用户可能已经切到别的附件，只认仍然对得上的结果。
-      if (this.selectedAsset.bundleName !== bundleName) return;
+      if ((this.selectedAsset.bundleName || this.app?.latestAsset?.bundleName || '') !== bundleName) return;
       if (version >= 0) {
         this.installedVersion = version;
         this.installedUnknown = false;
@@ -313,7 +320,7 @@ struct Detail {
 
   /** 本机是否装了这个应用：记录或系统查询任一命中即可。 */
   private installedForApp(): InstallJob | undefined {
-    const bundleName = this.selectedAsset.bundleName;
+    const bundleName = this.selectedAsset.bundleName || this.app?.latestAsset?.bundleName || '';
     if (bundleName.length === 0) return undefined;
     const record = this.installedJobs.find((job: InstallJob) =>
       job.bundleName === bundleName);
@@ -344,6 +351,22 @@ struct Detail {
     }
     if (this.installedVersion <= 0 && this.installedForApp() === undefined) return false;
     return this.selectedAsset.versionCode > this.installedVersion;
+  }
+
+  private selectedDowngrade(): boolean {
+    const installed = this.installedUnknown ? this.installedForApp()?.versionCode ?? 0 : this.installedVersion;
+    const latest = this.releases.find((release: ReleaseInfo) => release.prerelease === this.showPreviewReleases &&
+      release.assets.some((asset: HapAsset) => asset.bundleName === this.selectedAsset.bundleName))
+      ?.assets.find((asset: HapAsset) => asset.bundleName === this.selectedAsset.bundleName);
+    // 已装构建高于当前频道最新包时应打开应用；手动选择更旧历史包才提示降级。
+    return this.selectedAsset.versionCode > 0 && installed > this.selectedAsset.versionCode &&
+      (latest?.versionCode ?? 0) > this.selectedAsset.versionCode;
+  }
+
+  private installButtonEnabled(): boolean {
+    const row = this.currentInstallTask();
+    if (row !== undefined && (row.running || isPending(row.job.stage))) return true;
+    return this.selectedAsset.name.length > 0 && !this.selectedDowngrade();
   }
 
   /** 展示实际版本名；缺失时先用 Release 标签，再退回构建号。 */
@@ -414,6 +437,8 @@ struct Detail {
       const previousTags = this.releases.map((release: ReleaseInfo) => release.tag).join(',');
       const selectedUrl = this.selectedAsset.url;
       const selectedName = this.selectedAsset.name;
+      await ReleaseChannelRegistry.select(getContext(this) as common.UIAbilityContext,
+        this.app.id, this.showPreviewReleases, releases.items);
       this.releases = releases.items;
       this.releasePage = releases.page;
       this.releaseTotal = releases.total;
@@ -592,8 +617,8 @@ struct Detail {
       this.reconcileSelectedAsset(selectedUrl, selectedName);
       this.refreshInstalledVersion();
       this.releaseMessage = '';
-      await ReleaseChannelPreference.save(getContext(this) as common.UIAbilityContext,
-        this.app.id, next);
+      await ReleaseChannelRegistry.select(getContext(this) as common.UIAbilityContext,
+        this.app.id, next, result.items);
     } catch (error) {
       this.animateOverlay(() => { this.showPreviewReleases = previous; });
       this.releaseMessage = '无法读取版本：' + errorText(error);
@@ -678,11 +703,13 @@ struct Detail {
       if (id <= 0) throw new Error('应用编号无效');
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
       this.app = await client.appDetail(id);
-      this.showPreviewReleases = await ReleaseChannelPreference.load(
-        getContext(this) as common.UIAbilityContext, id);
+      await ReleaseChannelRegistry.restore(getContext(this) as common.UIAbilityContext);
+      this.showPreviewReleases = ReleaseChannelRegistry.preview(id);
       this.appIcon = await client.appIcon(this.app) ?? null;
       const releases = await client.listReleases(id, 1, Detail.RELEASES_PER_PAGE,
         this.showPreviewReleases);
+      await ReleaseChannelRegistry.select(getContext(this) as common.UIAbilityContext,
+        this.app.id, this.showPreviewReleases, releases.items);
       this.releases = releases.items;
       this.releasePage = releases.page;
       this.releaseTotal = releases.total;
@@ -796,6 +823,7 @@ struct Detail {
 
   private async downloadSelected(): Promise<void> {
     if (this.downloadBusy || this.currentInstallTask()?.running) return;
+    if (!this.installButtonEnabled()) return;
     const asset = this.selectedAsset;
     if (!/^https:\/\//.test(asset.url)) {
       this.notify('该附件缺少 HTTPS 下载地址，暂不能下载');
@@ -1022,7 +1050,9 @@ struct Detail {
                     Text(this.app.displayName).fontSize(25).fontWeight(FontWeight.Bold)
                       .fontColor(this.colors().text).maxLines(2)
                     Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(6) } }) {
-                      Text('版本 ' + this.selectedVersionLabel()).fontSize(11).fontWeight(FontWeight.Medium)
+                      Text(this.selectedAsset.name.length === 0 ?
+                        (this.showPreviewReleases ? '暂无预览版本' : '暂无安装包') :
+                        '版本 ' + this.selectedVersionLabel()).fontSize(11).fontWeight(FontWeight.Medium)
                         .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
                         .backgroundColor(this.colors().surface).borderRadius(8).maxLines(1)
                       Text(this.app.category).fontSize(11).fontWeight(FontWeight.Medium)
@@ -1322,6 +1352,7 @@ struct Detail {
               .width('100%').height(52)
             }
             .width('100%').height(52).padding(0)
+            .enabled(this.installButtonEnabled())
             .stateEffect(true).accessibilityText(this.installButtonLabel())
             .backgroundColor(this.colors().accent)
             .borderRadius(18).clip(true)
@@ -1336,6 +1367,7 @@ struct Detail {
                 this.resumeInstall(task.job.id);
                 return;
               }
+              if (!this.installButtonEnabled()) return;
               const installed = this.installedForApp();
               // 已装且没有更新可装：打开；否则安装或更新
               if (installed !== undefined && !this.updateAvailable()) this.openInstalled(installed);

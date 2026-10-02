@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
-const names = ['latestAssets', 'assetForBundle', 'updateApps', 'catalogApp', 'catalogForJob', 'openJobDetails', 'loadUpdateCatalog',
+const names = ['displayInstalledVersion', 'installedAssets', 'latestAssets', 'assetForBundle', 'updateApps', 'catalogApp', 'catalogForJob', 'openJobDetails', 'loadUpdateCatalog',
   'installedVersionOf', 'installedBundleOf', 'installedJobFor', 'updateForApp',
   'installFromCatalog', 'checkInstalledUpdates', 'updateFor', 'allInstalledJobs', 'currentInstalledView',
   'recentInstalledJobs', 'startUpdate', 'versionLabel'];
@@ -35,14 +35,14 @@ function fixture() {
     f.enqueues.push(args); f.lastJob = { id: 'online', appId: args[0], stage: 'QUEUED' };
     return f.lastJob;
   } };
-  const sandbox = {
+  const sandbox = { ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {},
     StoreClient: class { listApps(...args) { f.requests.push(args); return f.fetch(...args); } },
     InstallStage: { QUEUED: 'QUEUED', DOWNLOADING: 'DOWNLOADING', WAITING_NETWORK: 'WAITING_NETWORK',
       INSTALLED: 'INSTALLED' },
     UpdateTarget: class {}, LocalBundles: { isKnown: v => v !== -1,
       installedVersion: () => f.actual, liveInstalledVersion: () => f.actual,
       installedVersionName: () => f.versionName ?? '' },
-    InstalledAppRegistry: { versionName: () => f.observedName ?? '' },
+    InstalledAppRegistry: { version: () => f.actual, versionName: () => f.observedName ?? '' },
     router: { pushUrl: value => f.routes.push(value) }, getContext: () => ({}),
     errorText: e => e.message, JobStore: { open: async () => store },
     JobScheduler: { runDownload: async (_, __, job) => f.downloads.push(job) }
@@ -52,7 +52,7 @@ function fixture() {
   Object.assign(f.ui, { apps: [], updateCatalog: [], updateCatalogReady: false,
     updateCatalogBusy: false, updateCatalogError: '', installedJobs: [local()],
     enqueuingAppIds: [], signedIn: true, taskPending: () => false, loadJobs: async () => {},
-    storeInstalled: [], installedVersions: new Map(), updates: [], activeJobId: '',
+    installedDisplay: { get: () => f.actual >= 0 ? { version: f.actual, versionName: f.versionName ?? f.observedName ?? '' } : undefined }, storeInstalled: [], installedVersions: new Map(), updates: [], activeJobId: '',
     refreshCatalogInstallState() { this.checkInstalledUpdates(); }, jobRunning: () => false,
     forgetInstalledVersions() {}, drainInstallQueue() { f.downloads.push(f.lastJob); f.continued = f.lastJob; } });
   return f;

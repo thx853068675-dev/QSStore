@@ -12,7 +12,7 @@ function fixture() {
   const method = source.slice(start, source.indexOf('\n  }', start) + 4);
   const f = { requests: [], reconciled: [], saved: [], probes: 0 };
   const sandbox = { getContext: () => ({}), errorText: error => error.message,
-    ReleaseChannelPreference: { save: async (_context, id, preview) => f.saved.push([id, preview]) },
+    ReleaseChannelRegistry: { select: async (_context, id, preview) => f.saved.push([id, preview]) },
     StoreClient: class {
       listReleases(...args) {
         const work = {};
@@ -67,7 +67,7 @@ test('restoring the app preference happens before the first release request', as
   const method = source.slice(start, source.indexOf('\n  }', start) + 4);
   const calls = [], sandbox = { getContext: () => ({}), errorText: error => error.message,
     router: { getParams: () => ({ id: 42 }) },
-    ReleaseChannelPreference: { load: async (_context, id) => { calls.push(['load', id]); return true; } },
+    ReleaseChannelRegistry: { restore: async () => {}, preview: id => { calls.push(['load', id]); return true; }, select: async () => {} },
     StoreClient: class {
       async appDetail(id) { return { id }; }
       async appIcon() { return null; }

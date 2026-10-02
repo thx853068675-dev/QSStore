@@ -445,6 +445,26 @@ class StoreFeaturesTest(unittest.TestCase):
         self.assertEqual(latest["bundle_name"], "com.example.app")
         self.assertEqual(latest["version_code"], 42)
 
+    def test_verified_legacy_preview_keeps_its_actual_bundle_after_the_stable_bundle_changed(self):
+        app_id = db.upsert_app('owner/repo')
+        db.set_app_selection(app_id, 'stable.hap', 'com.current.app')
+        stable = self._release('v2', ('stable.hap',))
+        stable['assets'][0].update(bundle_name='com.current.app', version_code=2)
+        preview = self._release('v1-beta', ('old-beta.hap',))
+        preview['prerelease'] = True
+        preview['assets'][0].update(bundle_name='com.legacy.app', version_code=1)
+        unrelated = self._release('other', ('other.hap',))
+        unrelated['assets'][0].update(bundle_name='com.other.app', version_code=3)
+        unverified = self._release('unverified-beta', ('unknown.hap',))
+        unverified['prerelease'] = True
+        with patch.object(collector, 'fetch_app_metadata', return_value={}), \
+             patch.object(collector, 'fetch_releases', return_value=[stable, preview, unrelated, unverified]):
+            collector.sync_app('owner/repo', with_metadata=False)
+        rows = db.list_releases(app_id, include_prerelease=True)['items']
+        self.assertEqual(next(r for r in rows if r['tag'] == 'v1-beta')['assets'][0]['bundle_name'], 'com.legacy.app')
+        self.assertEqual(next(r for r in rows if r['tag'] == 'other')['assets'], [])
+        self.assertEqual(next(r for r in rows if r['tag'] == 'unverified-beta')['assets'], [])
+
     def test_hap_display_name_uses_label_id_in_compiled_resources(self):
         name = "轻启·安装器".encode("utf-8")
         index = bytearray(156)

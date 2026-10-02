@@ -18,6 +18,21 @@ export class CatalogApp {
   latestAsset: HapAsset | undefined = undefined;
   latestAssets: HapAsset[] = [];
 
+  /** 仅用于本机选中的版本频道，不写入服务端目录缓存。 */
+  previewChannel: boolean = false;
+  channelUnavailable: boolean = false;
+  knownAssets: HapAsset[] = [];
+
+  static copy(app: CatalogApp): CatalogApp {
+    const copy = new CatalogApp();
+    copy.id = app.id; copy.displayName = app.displayName; copy.repo = app.repo;
+    copy.summary = app.summary; copy.category = app.category; copy.publisherName = app.publisherName;
+    copy.stars = app.stars; copy.iconUrl = app.iconUrl; copy.iconRev = app.iconRev;
+    copy.latestName = app.latestName; copy.latestAsset = app.latestAsset; copy.latestAssets = app.latestAssets;
+    copy.ratingAverage = app.ratingAverage; copy.ratingCount = app.ratingCount;
+    return copy;
+  }
+
   static fromJson(row: Record<string, Object>): CatalogApp {
     const app = new CatalogApp();
     app.id = Number(row['id'] ?? 0);

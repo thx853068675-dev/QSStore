@@ -389,6 +389,11 @@ export class NativeJobRuntime implements JobRuntime {
 
   async install(job: InstallJob): Promise<void> {
     JobCancellation.assertActive(job.id);
+    // 排队期间本机可能已通过其他来源升级。用解析出的内部编号复核，
+    // 在线更新不能因签名不兼容而误走卸载后降级的路线。
+    if (job.appId > 0 && await this.installedVersion(job.bundleName) > job.versionCode) {
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, '所选版本低于已安装版本，无法降级安装');
+    }
     if ((job.stagedTicket ?? '').length > 0) {
       if (!await this.device.discardStaged(job.stagedTicket)) {
         throw new JobFailure(FailureKind.DEVICE, '请连接无线调试，清理上次传输后继续安装');

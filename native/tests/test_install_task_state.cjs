@@ -57,11 +57,11 @@ function pages(f) {
   index.observeInstallTasks();
   function detail() {
     const ui = pageClass('Detail', ['observeInstallTasks', 'currentInstallTask', 'syncInstallTask',
-      'installButtonLabel', 'updateAvailable'], globals);
+      'installButtonLabel', 'updateAvailable', 'selectedDowngrade', 'installButtonEnabled'], globals);
     Object.assign(ui, { installSubscription: -1, detailAppId: 42,
       selectedAsset: { name: 'app.hap', sha256: 'a'.repeat(64),
         bundleName: 'test.bundle', versionCode: 2 },
-      installTasks: [], installedJobs: [], downloadBusy: false, downloadPercent: 0,
+      releases: [], showPreviewReleases: false, installTasks: [], installedJobs: [], downloadBusy: false, downloadPercent: 0,
       paintInstallButton() {}, refreshInstalledVersion() {}, installedForApp() { return this.installedJobs[0]; },
       selectedVersionLabel: () => '2' });
     ui.observeInstallTasks(); return ui;
@@ -548,15 +548,15 @@ test('late native progress cannot revive a completed or canceled task', async ()
 });
 
 
-test('switching between selected packages resets unrelated progress then restores the matching live task', async () => {
+test('switching the channel keeps the active task visible', async () => {
   const f = fixture(), { detail } = pages(f), d = detail();
   f.job.stage = f.InstallStage.DOWNLOADING; await f.store.save(f.job);
   f.state.setRunning(f.job.id, true); f.state.downloadProgress(f.job.id, 35, 100);
   assert.equal(d.downloadBusy, true); assert.equal(d.downloadPercent, 35);
   const original = d.selectedAsset;
   d.selectedAsset = { ...original, name: 'other.app', bundleName: 'com.other.app' };
-  d.syncInstallTask(); assert.equal(d.downloadBusy, false); assert.equal(d.downloadPercent, 0);
-  assert.equal(d.activeInstallId, '');
+  d.syncInstallTask(); assert.equal(d.downloadBusy, true); assert.equal(d.downloadPercent, 35);
+  assert.equal(d.activeInstallId, f.job.id);
   d.selectedAsset = original; d.syncInstallTask();
   assert.equal(d.downloadBusy, true); assert.equal(d.downloadPercent, 35);
 });
@@ -571,7 +571,7 @@ test('Detail submits another selected package to the shared FIFO without startin
     errorText: e => e.message
   });
   Object.assign(d, { selectedAsset: { name: 'other.hap', url: 'https://example.com/other.hap' }, app: { id: 42 },
-    currentInstallTask: () => undefined, notify() {}, syncInstallTask() {},
+    currentInstallTask: () => undefined, installButtonEnabled: () => true, notify() {}, syncInstallTask() {},
     resumeInstall: () => { throw Error('parallel installation'); } });
   await d.downloadSelected(); assert.equal(queued, 1); assert.equal(downloaded, 0);
 });
@@ -596,4 +596,28 @@ test('completed cache eviction journals files, retains install identity, and ski
   assert.equal(saved[0].bundleName, f.job.bundleName);
   assert.equal(recent.cachePath, '/sandbox/install-jobs/new.hap');
   assert.equal(pending.cachePath, '/sandbox/install-jobs/old.hap');
+});
+
+test('an empty preview disables installation even when the app is already installed', () => {
+  const f = fixture(), d = pages(f).detail();
+  d.showPreviewReleases = true; d.selectedAsset = { name: '', bundleName: '', versionCode: 0 };
+  d.installedJobs = [{ bundleName: 'test.bundle', versionCode: 9 }];
+  assert.equal(d.installButtonLabel(), '暂无预览版本'); assert.equal(d.installButtonEnabled(), false);
+});
+test('channel changes allow higher builds and open installed builds at or above the channel latest', () => {
+  const f = fixture(), d = pages(f).detail();
+  d.installedVersion = 10; d.installedUnknown = false;
+  d.installedJobs = [{ bundleName: 'test.bundle', versionCode: 8 }];
+  for (const preview of [false, true]) {
+    d.showPreviewReleases = preview;
+    d.selectedAsset.versionCode = 11; assert.equal(d.updateAvailable(), true);
+    assert.equal(d.installButtonEnabled(), true); assert.equal(d.installButtonLabel(), '更新到 2');
+    d.selectedAsset.versionCode = 10; assert.equal(d.installButtonLabel(), '打开应用');
+    assert.equal(d.installButtonEnabled(), true);
+    d.selectedAsset.versionCode = 9; assert.equal(d.installButtonLabel(), '打开应用');
+    assert.equal(d.installButtonEnabled(), true); assert.equal(d.updateAvailable(), false);
+  }
+  d.installedUnknown = true; d.selectedAsset.versionCode = 7;
+  d.releases = [{ prerelease: true, assets: [{ bundleName: 'test.bundle', versionCode: 9 }] }];
+  assert.equal(d.installButtonEnabled(), false, 'unknown system state falls back to the recorded internal build');
 });

@@ -1,3 +1,4 @@
+import { isPending } from './RecoveryPlanner';
 import { InstallReconnect } from './InstallReconnect';
 import { InstallJob, InstallStage } from './InstallJob';
 
@@ -158,6 +159,16 @@ export class InstallTaskState {
       (appId > 0 && row.job.appId === appId) ||
       (bundleName.length > 0 && row.job.bundleName === bundleName));
     return matches.find((row: InstallTaskSnapshot) => row.running) ?? matches[0];
+  }
+
+  /** 活动任务按应用归属展示，切换频道不能使正在安装的任务消失。 */
+  static activeForApp(rows: InstallTaskSnapshot[], appId: number, bundleName: string = ''):
+    InstallTaskSnapshot | undefined {
+    const active = rows.filter((row: InstallTaskSnapshot) =>
+      ((appId > 0 && row.job.appId === appId) ||
+        (bundleName.length > 0 && row.job.bundleName === bundleName)) &&
+      (row.running || row.finishing || isPending(row.job.stage)));
+    return active.find((row: InstallTaskSnapshot) => row.running || row.finishing) ?? active[0];
   }
 
   /** 当前选中的 Release 附件；旧版本或被重新上传的失败任务不能劫持新按钮。 */

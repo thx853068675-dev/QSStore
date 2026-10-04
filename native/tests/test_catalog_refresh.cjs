@@ -29,7 +29,7 @@ const code = ts.transpileModule(`class Index {
   static STAR_FIELD_COUNT = 46;
   static STARRED_MIN_STARS = 100;
   ${['catalogHasMore', 'loadMoreApps', 'prefetchCatalog', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
-    'latestAssets', 'installedAssets', 'assetForBundle', 'refreshCatalogInstallState', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion',
+    'latestAssets', 'installedAssets', 'assetForBundle', 'refreshCatalogInstallState', 'runCatalogStateRefreshes', 'readCatalogInstallState', 'cancelResumeMaintenance', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion',
     'displayApps', 'featuredTier', 'featuredColors']
     .map(method).join('\n')}
 }; globalThis.Page = Index;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
@@ -55,7 +55,9 @@ function fixture() {
   const f2 = {};
   f2.localBundles = { installedVersion: () => f.localVersion,
     liveInstalledVersion: () => f.localVersion, installedVersionName: () => '',
-    isKnown: (v) => v !== -1, UNKNOWN: -1 };
+    isKnown: (v) => v !== -1, UNKNOWN: -1,
+    liveInstalledState: async name => { const versionCode = f.localBundles.liveInstalledVersion(name);
+      return { versionCode, versionName: f.localBundles.installedVersionName(name, versionCode) }; } };
   f2.bridgeClass = class {
     async connected() { calls.push('connected'); return f.deviceConnected; }
     async isInstalled(bundleName) {
@@ -86,7 +88,7 @@ function fixture() {
   f2.deviceUnparsable = false;
   f2.deviceVersions = {};
   f2.knownBundles = [];
-  const sandbox = { ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {}, setTimeout, clearTimeout, console, Curve: { EaseOut: 'ease-out' },
+  const sandbox = { ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {}, InstalledBundleState: class { versionCode = -1; versionName = ''; }, setTimeout, clearTimeout, console, Curve: { EaseOut: 'ease-out' },
     InstallReconnect: { clear() {}, deactivate() {} }, InstallConfirmation: { deactivate() {} }, InstallCoordinator: { conditionReady() {} }, InstallStage: { WAITING_DEVICE: 'waiting-device' },
     StoreClient: class {
       listApps(number, size, sort, query) {
@@ -112,7 +114,7 @@ function fixture() {
   vm.runInNewContext(code, sandbox);
   sandbox.Page.REFRESH_MIN_VISIBLE_MS = 20;
   const ui = new sandbox.Page();
-  Object.assign(ui, { catalogToken: 0, activeQuery: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
+  Object.assign(ui, { resumeMaintenanceTimer: -1, catalogStatePending: false, catalogStateRescan: false, catalogToken: 0, activeQuery: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
     catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false, catalogMoreError: '',
     catalogRefreshing: false, catalogRefreshBusy: false, catalogError: '',
     getUIContext: () => ({ animateTo: (_options, change) => change() }),
@@ -372,6 +374,7 @@ test('appending a page only probes newly added apps and preserves earlier instal
   const run = ui.loadApps(false);
   f.requests[0].resolve(page([{ id: 2, latestAsset: { bundleName: 'app.new' } }], 60));
   await run;
+  await ui.catalogStateFlight;
   assert.deepEqual(queried, ['app.new']);
   assert.equal(ui.installedVersions.get(1), 200);
   assert.equal(ui.installedVersions.get(2), 0);
@@ -452,7 +455,7 @@ test('pull refresh waits for device recognition but leaves icon downloads in the
   assert.equal(f.savedIcons[0][0].id, '1');
 });
 
-test('dispatcher deduplicates variant bundle names and only sends system-unknown packages to wireless', () => {
+test('dispatcher deduplicates variant bundle names and only sends system-unknown packages to wireless', async () => {
   const f = fixture(), ui = f.ui, nativeQueries = [], scans = [];
   const asset = bundleName => ({ bundleName });
   ui.apps = [{ id: 1, latestAsset: asset('app.known'), latestAssets: [asset('app.known'), asset('app.known')] },
@@ -462,7 +465,7 @@ test('dispatcher deduplicates variant bundle names and only sends system-unknown
   };
   delete ui.refreshCatalogInstallState;
   ui.confirmCatalogVersionsViaDevice = names => scans.push([...names]);
-  ui.refreshCatalogInstallState(true);
+  await ui.refreshCatalogInstallState(true);
   assert.deepEqual(nativeQueries, ['app.known', 'app.unknown']);
   assert.deepEqual(scans, [['app.unknown']]);
   assert.equal(ui.installedVersions.get(1), 9);
@@ -616,4 +619,33 @@ test('opening wireless settings preserves the pending refresh while ordinary nav
   const cancelled = ui.waitForRefreshConnection(); ui.onPageHide();
   assert.equal(await cancelled, false);
   assert.equal(ui.showReconnect, false);
+});
+
+test('overlapping system refreshes discard the stale snapshot and share completion of the newest catalog', async () => {
+  const f = fixture(), ui = f.ui, old = deferred(), newer = deferred();
+  ui.apps = [{ id: 1, latestAsset: { bundleName: 'app.old' } }];
+  delete ui.refreshCatalogInstallState;
+  const queried = [];
+  f.localBundles.liveInstalledState = name => {
+    queried.push(name); return name === 'app.old' ? old.promise : newer.promise;
+  };
+  const first = ui.refreshCatalogInstallState();
+  ui.apps = [{ id: 2, latestAsset: { bundleName: 'app.new' } }];
+  const joined = ui.refreshCatalogInstallState(true);
+  assert.equal(first, joined);
+  old.resolve({ versionCode: 1, versionName: 'old' }); await tick();
+  assert.equal(ui.installedVersions.has(1), false);
+  assert.deepEqual(queried, ['app.old', 'app.new']);
+  newer.resolve({ versionCode: 2, versionName: 'new' }); await joined;
+  assert.equal(ui.installedVersions.get(2), 2); assert.equal(ui.installedVersions.has(1), false);
+});
+test('the asynchronous dispatcher limits system queries to four outstanding calls', async () => {
+  const f = fixture(), ui = f.ui, gates = [], names = [];
+  ui.apps = Array.from({ length: 9 }, (_, id) => ({ id, latestAsset: { bundleName: 'app.n' + id } }));
+  delete ui.refreshCatalogInstallState;
+  f.localBundles.liveInstalledState = name => { names.push(name); const gate = deferred(); gates.push(gate); return gate.promise; };
+  const work = ui.refreshCatalogInstallState(); assert.equal(names.length, 4);
+  gates[0].resolve({ versionCode: 1, versionName: '1' }); await tick(); assert.equal(names.length, 5);
+  for (let i = 1; i < 9; i++) { gates[i].resolve({ versionCode: 1, versionName: '1' }); await tick(); }
+  await work; assert.equal(ui.installedVersions.size, 9);
 });

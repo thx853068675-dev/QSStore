@@ -1,5 +1,6 @@
 #include "zip_reader.h"
 #include "signing_block.h"
+#include "install_archive.h"
 
 #include <napi/native_api.h>
 
@@ -707,6 +708,55 @@ std::string StringArg(napi_env env, napi_value value) {
   std::vector<char> buffer(length + 1); napi_get_value_string_utf8(env,value,buffer.data(),buffer.size(),&length); std::string result(buffer.data(),length);
   if (result.find('\0') != std::string::npos) throw std::runtime_error("Invalid archive argument"); return result;
 }
+struct InstallArchiveWork {
+  std::string input, prefix, original, error;
+  std::vector<qingqi::hap::ImportedArchiveEntry> entries;
+  napi_deferred deferred = nullptr; napi_async_work work = nullptr;
+};
+napi_value ImportArchive(napi_env env, napi_callback_info info) {
+  size_t argc = 3; napi_value args[3]{};
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  auto* task = new InstallArchiveWork();
+  try {
+    if (argc != 3) throw std::runtime_error("Expected archive, output prefix and original filename");
+    task->input = StringArg(env, args[0]); task->prefix = StringArg(env, args[1]); task->original = StringArg(env, args[2]);
+  } catch (const std::exception& e) { delete task; napi_throw_error(env, "PACKAGE_ARCHIVE", e.what()); return nullptr; }
+  napi_value promise = nullptr, name = nullptr;
+  if (napi_create_promise(env, &task->deferred, &promise) != napi_ok ||
+      napi_create_string_utf8(env, "importInstallArchive", NAPI_AUTO_LENGTH, &name) != napi_ok) {
+    delete task; napi_throw_error(env, "PACKAGE_ARCHIVE", "Cannot create archive task"); return nullptr;
+  }
+  if (napi_create_async_work(env, nullptr, name, [](napi_env, void* value) {
+    auto* t = static_cast<InstallArchiveWork*>(value);
+    try { t->entries = qingqi::hap::ExtractInstallArchive(t->input, t->prefix, t->original); }
+    catch (const std::exception& e) { t->error = e.what(); }
+  }, [](napi_env env, napi_status status, void* value) {
+    auto* t = static_cast<InstallArchiveWork*>(value); napi_value result = nullptr;
+    if (status == napi_ok && t->error.empty()) {
+      napi_create_array_with_length(env, t->entries.size(), &result);
+      for (size_t i = 0; i < t->entries.size(); ++i) {
+        napi_value row, name, path, size;
+        napi_create_object(env, &row);
+        napi_create_string_utf8(env, t->entries[i].name.c_str(), NAPI_AUTO_LENGTH, &name);
+        napi_create_string_utf8(env, t->entries[i].path.c_str(), NAPI_AUTO_LENGTH, &path);
+        napi_create_double(env, static_cast<double>(t->entries[i].size), &size);
+        napi_set_named_property(env, row, "name", name); napi_set_named_property(env, row, "path", path);
+        napi_set_named_property(env, row, "size", size); napi_set_element(env, result, i, row);
+      }
+      napi_resolve_deferred(env, t->deferred, result);
+    } else {
+      for (const auto& entry : t->entries) std::remove(entry.path.c_str());
+      napi_value message;
+      napi_create_string_utf8(env, t->error.empty() ? "Archive import failed" : t->error.c_str(), NAPI_AUTO_LENGTH, &message);
+      napi_create_error(env, nullptr, message, &result); napi_reject_deferred(env, t->deferred, result);
+    }
+    napi_delete_async_work(env, t->work); delete t;
+  }, task, &task->work) != napi_ok || napi_queue_async_work(env, task->work) != napi_ok) {
+    if (task->work) napi_delete_async_work(env, task->work);
+    delete task; napi_throw_error(env, "PACKAGE_ARCHIVE", "Cannot queue archive import"); return nullptr;
+  }
+  return promise;
+}
 napi_value Rewrite(napi_env env, napi_callback_info info) {
   size_t argc = 6; napi_value args[6]{}; napi_get_cb_info(env,info,&argc,args,nullptr,nullptr);
   auto* task = new ArchiveWork();
@@ -798,6 +848,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"readArchiveFile", nullptr, ReadArchiveFile, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"rewriteArchive", nullptr, Rewrite, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"extractPackageEntry", nullptr, ExtractPackage, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"extractInstallArchive", nullptr, ImportArchive, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readModuleJson", nullptr, ReadModule, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readInstallPermissions", nullptr, ReadInstallPermissions, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readPackInfo", nullptr, ReadPack, nullptr, nullptr, nullptr, napi_default, nullptr},

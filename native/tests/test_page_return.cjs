@@ -11,16 +11,21 @@ function method(name) {
 }
 function fixture() {
   const f = { viewed: [], icons: [], scans: 0, myAppsCalls: 0, myAppsFetch: async () => [] };
-  const box = { StoreClient: class {
+  const timers = new Map(); let nextTimer = 0;
+  f.flushResume = () => { for (const [id, fn] of timers) { timers.delete(id); fn(); } };
+  f.timers = timers;
+  const box = { setTimeout: fn => { timers.set(++nextTimer, fn); return nextTimer; },
+    clearTimeout: id => timers.delete(id), StoreClient: class {
     static consumeViewedApps() { const rows = f.viewed; f.viewed = []; return rows; }
     myApps() { f.myAppsCalls++; return f.myAppsFetch(); }
   }, getContext: () => ({}), errorText: error => error.message };
   vm.runInNewContext(ts.transpileModule(`class Index { static TAB_MANAGE = 2;
-    ${['onPageShow', 'onPageHide', 'syncViewedCatalog', 'loadMyApps'].map(method).join('\n')} }; globalThis.Page = Index;`, {
+    ${['onPageShow', 'onPageHide', 'cancelResumeMaintenance', 'syncViewedCatalog', 'loadMyApps'].map(method).join('\n')} }; globalThis.Page = Index;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
   box.InstallConfirmation = { deactivate() {} }; box.InstallReconnect = { deactivate() {} };
   const ui = new box.Page(); Object.assign(ui, { pageVisible: false, topActionEpoch: 3,
+    resumeMaintenanceTimer: -1, resumeNeedsRescan: false,
     currentTab: 0, signedIn: true, account: {}, myApps: [{ id: 1, category: '工具' }], syncManagementIcons() {},
     myAppsLoaded: true, myAppsBusy: false, myAppsRefreshing: false, myAppsMessage: '',
     apps: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
@@ -45,12 +50,20 @@ test('return from detail preserves discovery pagination, scroll and icons, and r
 test('return to Management merges only viewed changes, leaving other rows and old icon pixels until replacement', () => {
   const f = fixture(), ui = f.ui; ui.currentTab = 2;
   const untouched = ui.apps[1]; f.viewed = [{ id: 1, iconRev: 'new', category: '工具' }];
-  ui.onPageShow(); assert.equal(f.scans, 1); assert.equal(ui.apps.length, 2);
+  ui.onPageShow(); assert.equal(f.scans, 0); f.flushResume(); assert.equal(f.scans, 1); assert.equal(ui.apps.length, 2);
   assert.equal(ui.apps[1], untouched); assert.equal(ui.apps[0].category, '工具');
   assert.equal(ui.updateCatalog[0].iconRev, 'new'); assert.equal(f.icons.length, 1);
   assert.equal(ui.appIcons[0].pixels, 'original pixels'); assert.equal(ui.catalogPage, 4);
-  const apps = ui.apps; f.viewed = [{ ...ui.apps[0] }]; ui.onPageShow();
+  const apps = ui.apps; f.viewed = [{ ...ui.apps[0] }]; ui.onPageShow(); f.flushResume();
   assert.equal(ui.apps, apps, 'unchanged detail data must not replace list state');
+});
+test('rapid background transitions cancel stale resume maintenance and preserve the visible list', () => {
+  const f = fixture(), ui = f.ui, apps = ui.apps;
+  ui.currentTab = 2;
+  ui.onPageShow(); ui.onPageHide(); f.flushResume();
+  assert.equal(f.scans, 0); assert.equal(ui.apps, apps);
+  ui.onPageShow(); ui.onPageShow(); assert.equal(f.timers.size, 1);
+  f.flushResume(); assert.equal(f.scans, 1);
 });
 test('automatic refresh retains published rows throughout a delayed request and does not replace identical data', async () => {
   const f = fixture(), ui = f.ui, before = ui.myApps;

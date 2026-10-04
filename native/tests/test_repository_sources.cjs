@@ -19,7 +19,7 @@ function page(file,names,globals={}) {
     const start=source.search(new RegExp('^  private (?:async )?'+name+'\\(', 'm'));
     assert.ok(start>=0,name);return source.slice(start,source.indexOf('\n  }',start)+4);
   });
-  const box={...globals};vm.runInNewContext(ts.transpileModule('class Page { '+methods.join('\n')+' };globalThis.Page=Page;',{
+  const box={displayVersion:load('data/DisplayVersion').displayVersion,...globals};vm.runInNewContext(ts.transpileModule('class Page { '+methods.join('\n')+' };globalThis.Page=Page;',{
     compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);return new box.Page();
 }
 const row=(repo,kind)=>release.ReleaseInfo.fromJson({tag:'v2',name:'2.0',source_repo:repo,source_kind:kind,

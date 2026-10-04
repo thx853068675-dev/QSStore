@@ -10,6 +10,7 @@ import { AgcProfileLease } from './AgcProfileLease';
 import { AgcManagedProfile } from './AgcManagedProfile';
 import { DeveloperAccount } from './DeveloperAccount';
 import { LocalSigningIdentity, SigningIdentityRecovery } from './SigningIdentity';
+import { isMissingCertificate } from './CertificateRejection';
 
 // Match the existing client's AGC allowlist. Normal HAP permissions must not
 // be sent as ACLs; unknown privileged permissions need explicit review.
@@ -140,6 +141,21 @@ export class AgcProfile {
     return Number.isFinite(expiry) && expiry > 0 ? Math.floor(expiry) : 0;
   }
 
+  /** Ordinary installs keep valid local Profiles; renewal requires a useful extension and a young Profile. */
+  static reusableForRenewal(path: string, certificateExpiry: number, minimumExpiry: number): boolean {
+    try {
+      const profile = JSON.parse(readSignedProfile(path)) as Record<string, Object>;
+      const validity = profile['validity'] as Record<string, Object> | undefined;
+      const before = Number(validity?.['not-before'] ?? 0);
+      const after = Number(validity?.['not-after'] ?? 0);
+      const now = Date.now() / 1000;
+      return Number.isFinite(before) && before > 0 && Number.isFinite(after) && after > before &&
+        Number.isFinite(certificateExpiry) && certificateExpiry > 0 &&
+        before <= now && now < before + (after - before) / 2 &&
+        Math.floor(Math.min(after, certificateExpiry)) > minimumExpiry;
+    } catch (_) { return false; }
+  }
+
   static effectiveAcls(requested: string[]): string[] {
     return requested.filter((name: string, index: number) =>
       GRANTABLE_ACLS.includes(name) && requested.indexOf(name) === index).sort();
@@ -249,7 +265,7 @@ export class AgcProfile {
         !file.startsWith(prefix + '-p-')) continue;
       if (!file.endsWith('.p7b') ||
         !AgcProfile.valid(candidate, bundleName, udid, identity.certificatePath, acls)) continue;
-      if (refresh && AgcProfile.effectiveExpiry(candidate, identity.certExpiry) <= refresh.minimumExpiry) continue;
+      if (refresh && !AgcProfile.reusableForRenewal(candidate, identity.certExpiry, refresh.minimumExpiry)) continue;
       const expiry = AgcProfile.profileExpiry(candidate);
       if (expiry > selectedExpiry) { selected = candidate; selectedExpiry = expiry; }
     }
@@ -274,22 +290,26 @@ export class AgcProfile {
     let managed = false;
     const valid = (candidate: string): boolean =>
       AgcProfile.valid(candidate, bundleName, udid, identity.certificatePath, acls) &&
-      (!refresh || AgcProfile.effectiveExpiry(candidate, identity.certExpiry) > refresh.minimumExpiry);
+      (!refresh || AgcProfile.reusableForRenewal(candidate, identity.certExpiry, refresh.minimumExpiry));
     try {
       try {
         if (AgcManagedProfile.automaticLimited(context, account)) {
-          await AgcManagedProfile.obtain(agc, account, identity.certId, ids, acls, bundleName, temporary, valid, udid);
+          await AgcManagedProfile.obtain(agc, account, identity.certId, ids, acls, bundleName, temporary, valid, udid,
+            refresh?.requestId ?? '');
           managed = true;
         } else created = await agc.createProfile(name, identity.certId, ids, acls, bundleName);
       }
       catch (error) {
+        // 设备登记刷新解决不了证书失效，由任务层恢复身份后继续签发。
+        if (isMissingCertificate(error as Error)) throw error as Error;
         if (AgcProfile.isAutomaticLimit(error as Error)) {
           // Huawei's FAQ defines a rolling 150 requests / 30 days limit.
           // Deleting a Profile does not reset that usage counter, so neither
           // cleanup nor certificate rotation justifies retrying this request.
           // https://developer.huawei.com/consumer/cn/doc/doccenter-tools-faq/faqs-app-debugging-4
           AgcManagedProfile.rememberLimit(context, account);
-          await AgcManagedProfile.obtain(agc, account, identity.certId, ids, acls, bundleName, temporary, valid, udid);
+          await AgcManagedProfile.obtain(agc, account, identity.certId, ids, acls, bundleName, temporary, valid, udid,
+            refresh?.requestId ?? '');
           managed = true;
         } else {
           // An ordinary Profile failure must not retry the exhausted IDE path.
@@ -306,7 +326,8 @@ export class AgcProfile {
           catch (retryError) {
             if (!AgcProfile.isAutomaticLimit(retryError as Error)) throw retryError as Error;
             AgcManagedProfile.rememberLimit(context, account);
-            await AgcManagedProfile.obtain(agc, account, identity.certId, ids, acls, bundleName, temporary, valid, udid);
+            await AgcManagedProfile.obtain(agc, account, identity.certId, ids, acls, bundleName, temporary, valid, udid,
+              refresh?.requestId ?? '');
             managed = true;
           }
         }
@@ -321,9 +342,9 @@ export class AgcProfile {
       if (!AgcProfile.valid(temporary, bundleName, udid, identity.certificatePath, acls)) {
         throw new Error('AGC 返回的设备授权与应用、设备或证书不匹配');
       }
-      if (refresh && AgcProfile.effectiveExpiry(temporary, identity.certExpiry) <= refresh.minimumExpiry) {
+      if (refresh && !AgcProfile.reusableForRenewal(temporary, identity.certExpiry, refresh.minimumExpiry)) {
         throw new ServiceFailure(FailureKind.INVALID_PACKAGE,
-          '新的授权有效期未延长，已保留旧应用。请核对证书有效期后再续签');
+          '新的授权有效期未延长或已经过半，已保留旧应用。请核对授权与证书有效期后再续签');
       }
       const archived = await AgcProfile.retain(temporary, dir + '/' + prefix);
       const registration = new DeviceRegistration();

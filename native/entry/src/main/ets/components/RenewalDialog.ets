@@ -12,6 +12,7 @@ import { StoreRenewal, RenewalTarget } from '../jobs/StoreRenewal';
 import { LocalInstallTimeline, LocalTimelineView, LocalTimelineStep } from '../jobs/LocalInstallTimeline';
 import { errorText } from '../jobs/ErrorText';
 import { Palette } from '../theme/Palette';
+import { displayVersion } from '../data/DisplayVersion';
 import { StoreIconButton, StoreLayout } from '../theme/StoreDesign';
 
 /** Closing this view never cancels the process-owned renewal job. */
@@ -166,7 +167,7 @@ export struct RenewalDialog {
             if (this.icon) { Image(this.icon).width(46).height(46).borderRadius(13) }
             Column({ space: 5 }) {
               Text(this.title).fontSize(18).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
-              Text(this.target.versionName || String(this.target.versionCode)).fontSize(12).fontColor(this.colors().textSecondary)
+              Text(displayVersion(this.target.versionName || String(this.target.versionCode), this.title)).fontSize(12).fontColor(this.colors().textSecondary)
             }.alignItems(HorizontalAlign.Start).layoutWeight(1)
           }.width('100%')
           if (this.selectedId) {

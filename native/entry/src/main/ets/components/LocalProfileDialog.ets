@@ -14,6 +14,8 @@ export struct LocalProfileDialog {
   @State private loading: boolean = true;
   @State private deleting: string = '';
   @State private message: string = '';
+  @State private listHeight: number = 64;
+  private rowHeights: Map<string, number> = new Map();
   private disposed: boolean = false;
   private colors(): Palette { return Palette.forMode(this.darkMode); }
 
@@ -23,9 +25,15 @@ export struct LocalProfileDialog {
   private async load(): Promise<void> {
     try {
       const rows = await LocalProfileStore.list(getContext(this) as common.UIAbilityContext);
-      if (!this.disposed) this.rows = rows;
+      if (!this.disposed) { this.rows = rows; this.measureList(); }
     } catch (error) { if (!this.disposed) this.message = errorText(error); }
     finally { if (!this.disposed) this.loading = false; }
+  }
+
+  private measureList(): void {
+    const height = this.rows.length === 0 ? 64 : this.rows.reduce((total: number, row: LocalProfileGroup) =>
+      total + (this.rowHeights.get(row.key) ?? 86), 0) + Math.max(0, this.rows.length - 1) * 12;
+    if (this.listHeight !== height) this.listHeight = height;
   }
 
   private title(row: LocalProfileGroup): string {
@@ -95,15 +103,20 @@ export struct LocalProfileDialog {
                   Text(this.summary(row)).fontSize(11).fontColor(this.colors().textTertiary).width('100%')
                 }.alignItems(HorizontalAlign.Start).width('100%').padding(14)
                   .backgroundColor(this.colors().fill).borderRadius(16)
+                  .onSizeChange((_old: SizeOptions, size: SizeOptions) => {
+                    const height = Number(size.height);
+                    if (height > 0 && this.rowHeights.get(row.key) !== height) {
+                      this.rowHeights.set(row.key, height); this.measureList();
+                    }
+                  })
               }.swipeAction({ end: { builder: () => { this.deleteAction(row) }, actionAreaDistance: 72 },
                 edgeEffect: SwipeEdgeEffect.Spring })
             }, (row: LocalProfileGroup) => row.key)
           }
           }.width('100%').layoutWeight(1).scrollBar(BarState.Off)
           if (this.message) { Text(this.message).fontSize(12).fontColor(this.colors().danger).width('100%') }
-          Text('正在安装使用的授权会受到保护。仅管理本机文件。').fontSize(11).fontColor(this.colors().textTertiary).width('100%')
       }.alignItems(HorizontalAlign.Start).width('calc(100% - 40vp)').padding(22)
-        .height(this.rows.length > 3 ? '80%' : this.rows.length * 110 + 180)
+        .height(this.rows.length > 3 ? '80%' : this.listHeight + 106 + (this.message ? 32 : 0))
         .constraintSize({ maxWidth: StoreLayout.sheetWidth, maxHeight: '80%' })
         .backgroundColor(this.colors().surface).borderRadius(26).clip(true)
     }.width('100%').height('100%')

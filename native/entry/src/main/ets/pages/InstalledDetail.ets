@@ -1,3 +1,4 @@
+import { displayVersion } from '../data/DisplayVersion';
 import { router, promptAction, uiMaterial } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { pasteboard, deviceInfo } from '@kit.BasicServicesKit';
@@ -132,7 +133,7 @@ struct InstalledDetail {
         if(!this.query){
         Column({space:12}){
           if(this.pixels){Image(this.pixels).width(80).height(80).borderRadius(22);}else{Text(this.info.title.substring(0,1)||'应').fontSize(32).fontColor(this.colors().accent).textAlign(TextAlign.Center).width(80).height(80).backgroundColor(this.colors().accentSoft).borderRadius(22);}
-          Row({space:5}){Text(this.info.title).fontSize(23).fontWeight(FontWeight.Bold).fontColor(this.colors().text).textAlign(TextAlign.Center).maxLines(2).constraintSize({maxWidth:'58%'}).onClick(()=>this.copy(this.info.title));Text(this.info.versionName||String(this.info.versionCode)).fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.colors().surface).backgroundColor(this.colors().text).height(22).padding({left:5,right:5}).borderRadius(4).maxLines(1).textOverflow({overflow:TextOverflow.Ellipsis}).constraintSize({maxWidth:'38%'}).onClick(()=>this.copy(this.info.versionName||String(this.info.versionCode)));}.width('100%').justifyContent(FlexAlign.Center).alignItems(VerticalAlign.Center);
+          Row({space:5}){Text(this.info.title).fontSize(23).fontWeight(FontWeight.Bold).fontColor(this.colors().text).textAlign(TextAlign.Center).maxLines(2).constraintSize({maxWidth:'58%'}).onClick(()=>this.copy(this.info.title));Text(displayVersion(this.info.versionName||String(this.info.versionCode),this.info.title)).fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.colors().surface).backgroundColor(this.colors().text).height(22).padding({left:5,right:5}).borderRadius(4).maxLines(1).textOverflow({overflow:TextOverflow.Ellipsis}).constraintSize({maxWidth:'38%'}).onClick(()=>this.copy(this.info.versionName||String(this.info.versionCode)));}.width('100%').justifyContent(FlexAlign.Center).alignItems(VerticalAlign.Center);
           Button({type:ButtonType.Normal}){Row({space:6}){Text(this.info.bundleName).fontSize(11).fontColor(this.colors().textTertiary).maxLines(2).textAlign(TextAlign.Center);}}.backgroundColor(Color.Transparent).padding(4).id('installed-copy-bundle').onClick(()=>this.copy(this.info.bundleName));
           Text(this.renewalExpiry||InstalledSigningExpiry.label(0,0,
             InstalledAppRegistry.installationTime(this.info.bundleName,this.info.versionCode)||this.info.updatedAt))

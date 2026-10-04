@@ -4,7 +4,7 @@ import { fileIo, hash, picker } from '@kit.CoreFileKit';
 import { InstallJob, InstallStage } from './InstallJob';
 import { JobStore } from './JobStore';
 import { PackageArchive } from './PackageArchive';
-import { listPackageEntries } from 'libhap_core.so';
+import { extractInstallArchive } from 'libhap_core.so';
 
 // Copies a picker URI into the app sandbox before the temporary grant expires.
 // The source is never modified and the working file is promoted only after
@@ -25,10 +25,22 @@ export class LocalImport {
   static async pickPreviews(context: common.UIAbilityContext): Promise<InstallJob[]> {
     const chooser = new picker.DocumentViewPicker(context);
     const selection = await chooser.select({
-      fileSuffixFilters: ['HarmonyOS 安装包|.hap,.app,.zip'],
+      fileSuffixFilters: ['安装包与压缩包|.hap,.app,.zip,.7z,.rar,.tar,.gz,.tgz,.bz2,.tbz,.tbz2,.xz,.txz,.lzma'],
       maxSelectNumber: 1
     });
     if (selection.length !== 1) throw new Error('未选择安装文件');
+    return LocalImport.previewsFromUri(context, selection[0]);
+  }
+
+  static supportsName(name: string): boolean {
+    return /\.(hap|app|zip|7z|rar|tar|gz|tgz|bz2|tbz|tbz2|xz|txz|lzma)$/i.test(name);
+  }
+
+  /** Picker and system FileOpen use the same read-only, preview-only import. */
+  static async previewsFromUri(context: common.UIAbilityContext, uri: string): Promise<InstallJob[]> {
+    const decoded = decodeURIComponent(uri.split('?')[0]);
+    const filename = decoded.substring(decoded.lastIndexOf('/') + 1);
+    if (!LocalImport.supportsName(filename)) throw new Error('请选择 HAP、APP 或支持的压缩文件');
 
     const dir = context.cacheDir + '/local-hap-previews';
     if (!fileIo.accessSync(dir)) fileIo.mkdirSync(dir, true);
@@ -37,7 +49,7 @@ export class LocalImport {
     const previews: InstallJob[] = [];
     const staged: string[] = [];
     try {
-      const source = fileIo.openSync(selection[0], fileIo.OpenMode.READ_ONLY);
+      const source = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
       try {
         const size = fileIo.statSync(source.fd).size;
         if (size <= 0 || size > 2 * 1024 * 1024 * 1024) throw new Error('安装文件大小无效（上限 2 GB）');
@@ -47,26 +59,21 @@ export class LocalImport {
       finally { fileIo.closeSync(source); }
       const size = fileIo.statSync(temporary).size;
       if (size <= 0 || size > 2 * 1024 * 1024 * 1024) throw new Error('安装文件大小无效（上限 2 GB）');
-      const decoded = decodeURIComponent(selection[0].split('?')[0]);
-      const filename = decoded.substring(decoded.lastIndexOf('/') + 1);
-      if (/\.zip$/i.test(filename)) {
-        const entries = listPackageEntries(temporary);
-        if (!entries.length) throw new Error('ZIP 中没有找到 APP 或 HAP 安装包');
+      if (!/\.(hap|app)$/i.test(filename)) {
+        const entries = await extractInstallArchive(temporary, temporary.replace(/\.part$/, ''), filename);
+        staged.push(...entries.map((entry) => entry.path));
         let invalid = 0;
         for (let i = 0; i < entries.length; i++) {
-          const output = temporary.replace(/\.part$/, '-' + i + PackageArchive.extension(entries[i].name));
-          staged.push(output);
+          const output = entries[i].path;
           try {
-            await PackageArchive.extractSelected(temporary, entries[i].name, output);
             previews.push(await LocalImport.preview(output, entries[i].name));
           } catch (_) {
             invalid++;
             if (fileIo.accessSync(output)) fileIo.unlinkSync(output);
           }
         }
-        if (!previews.length) throw new Error('ZIP 中的 ' + invalid + ' 个安装包均无效');
+        if (!previews.length) throw new Error('压缩包中的 ' + invalid + ' 个安装包均无效');
       } else {
-        if (!/\.(hap|app)$/i.test(filename)) throw new Error('请选择 HAP、APP 或 ZIP 文件');
         const output = temporary.replace(/\.part$/, PackageArchive.extension(filename));
         staged.push(output);
         fileIo.renameSync(temporary, output);

@@ -53,7 +53,7 @@ test('title measurement is reused when only version or available width changes',
   const exports = {};
   vm.runInNewContext(ts.transpileModule(`class Title { ${source.slice(start, end)} }; exports.Title=Title;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
-  }).outputText, { exports, FontWeight: { Bold: 'bold' }, fitVersionBadge: (version, available, measure) => {
+  }).outputText, { exports, displayVersion: (version) => version, FontWeight: { Bold: 'bold' }, fitVersionBadge: (version, available, measure) => {
     const width = measure(version); return { text: version, width: Math.min(available, width) };
   } });
   const ui = new exports.Title(), measured = [];

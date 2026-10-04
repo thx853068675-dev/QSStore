@@ -1,3 +1,4 @@
+import { displayVersion } from '../data/DisplayVersion';
 import { router,promptAction } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { picker,fileIo } from '@kit.CoreFileKit';
@@ -34,7 +35,7 @@ struct PackageEditCard {
           }.width(18).height(18).backgroundColor('#B8'+this.colors().surface.substring(1)).borderRadius(9)
             .border({width:0.5,color:this.colors().border}).offset({x:-3,y:-3})
         }.width(48).height(48).enabled(!this.busy&&!this.draft.row.status.startsWith('读取失败')).id('editor-icon-'+this.draft.row.path).accessibilityText('更换应用图标').onClick(()=>this.chooseIcon())
-        Column({space:5}){Text(this.draft.name.trim()||this.draft.row.identity.displayName||this.draft.row.filename).fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.colors().text).maxLines(2);Text((this.draft.row.identity.versionName||'未知版本')+' · '+(this.draft.row.bytes/1048576).toFixed(1)+' MB').fontSize(11).fontColor(this.colors().textTertiary);}.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        Column({space:5}){Text(this.draft.name.trim()||this.draft.row.identity.displayName||this.draft.row.filename).fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.colors().text).maxLines(2);Text(displayVersion(this.draft.row.identity.versionName||'未知版本',this.draft.row.identity.displayName)+' · '+(this.draft.row.bytes/1048576).toFixed(1)+' MB').fontSize(11).fontColor(this.colors().textTertiary);}.layoutWeight(1).alignItems(HorizontalAlign.Start)
         StoreIconButton({symbol:$r('sys.symbol.info_circle'),label:'查看包信息',action:()=>this.inspect()});
       }.width('100%')
       if(this.draft.row.identity.bundleName&&!this.draft.row.status.startsWith('读取失败')){

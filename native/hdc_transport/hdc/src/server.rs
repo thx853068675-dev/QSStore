@@ -2626,51 +2626,20 @@ async fn handle_server_file_send(
             crate::report_observed_file_progress(&local_path, offset, file_size);
         }
 
-        // Step 4: Send FileFinish and wait for daemon completion
-        let file_finish = TaskMessage {
+        // The writer initiates FINISH[1] after its final write/fsync/close.
+        // Sending it from the reader here closes the daemon fd while queued
+        // writes are still running, causing truncated files and checksum differs.
+        if offset != file_size {
+            return Err(Error::new(ErrorKind::InvalidData, "Source file size changed during transfer"));
+        }
+        wait_for_file_write(&mut rx, std::time::Duration::from_secs(30)).await?;
+        let acknowledgement = TaskMessage {
             channel_id,
             command: HdcCommand::FileFinish,
-            payload: vec![1],
+            payload: vec![0],
         };
-        let data = concat_pack(&file_finish);
-        send_to_session(tcp_map, usb_map, session_id, &data).await?;
-
-        // Daemon may send FileFinish payload=[1] first (write completion notify),
-        // then FileFinish payload=[0] (reply to our FileFinish). Wait for the final one.
-        let timeout = tokio::time::Duration::from_secs(30);
-        let result = tokio::time::timeout(timeout, async {
-            loop {
-                match rx.recv().await {
-                    Some(task) => {
-                        match task.command {
-                            HdcCommand::FileFinish => {
-                                if task.payload.is_empty() || task.payload[0] == 0 {
-                                    return Ok::<_, io::Error>("FileTransfer finish\r\n");
-                                }
-                                // payload=[1] is daemon's write completion, keep waiting
-                            }
-                            HdcCommand::KernelChannelClose => {
-                                return Ok("FileTransfer finish\r\n");
-                            }
-                            _ => {}
-                        }
-                    }
-                    None => return Err(Error::new(ErrorKind::ConnectionAborted, "Response channel closed")),
-                }
-            }
-        }).await;
-
-        match result {
-            Ok(Ok(msg)) => {
-                tcp_map.send_channel_message(channel_id, msg.as_bytes()).await?;
-            }
-            Ok(Err(e)) => {
-                tcp_map.send_channel_message(channel_id, format!("[Fail]FileTransfer failed: {e}\r\n").as_bytes()).await?;
-            }
-            Err(_) => {
-                tcp_map.send_channel_message(channel_id, b"[Fail]FileTransfer timeout\r\n").await?;
-            }
-        }
+        send_to_session(tcp_map, usb_map, session_id, &concat_pack(&acknowledgement)).await?;
+        tcp_map.send_channel_message(channel_id, b"FileTransfer finish\r\n").await?;
         maybe_end_channel(tcp_map, channel_id).await;
         Ok(())
     }.await;
@@ -2853,6 +2822,39 @@ fn app_install_succeeded(status: u8, message: &str) -> bool {
     let text = message.to_ascii_lowercase();
     status <= 1 && !text.contains("error:") && !text.contains("failed") &&
         !text.contains("[fail]") && text.contains("install bundle successfully")
+}
+
+/// Only the receiver's write-completion receipt proves a file was persisted.
+async fn wait_for_file_write(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<TaskMessage>,
+    timeout: std::time::Duration,
+) -> io::Result<()> {
+    let mut detail = String::new();
+    tokio::time::timeout(timeout, async {
+        while let Some(task) = rx.recv().await {
+            match task.command {
+                HdcCommand::FileFinish if task.payload.as_slice() == [1] => return Ok(()),
+                HdcCommand::KernelWakeupSlavetask => {},
+                HdcCommand::KernelEcho | HdcCommand::KernelEchoRaw => {
+                    let bytes = if task.command == HdcCommand::KernelEcho {
+                        task.payload.get(1..).unwrap_or_default()
+                    } else { &task.payload };
+                    detail = String::from_utf8_lossy(bytes).chars().take(1024).collect();
+                    if task.command == HdcCommand::KernelEcho &&
+                        task.payload.first() == Some(&(MessageLevel::Fail as u8)) {
+                        return Err(Error::other(format!("File transfer write failed: {}", detail.trim())));
+                    }
+                },
+                HdcCommand::KernelChannelClose => return Err(Error::new(ErrorKind::ConnectionAborted,
+                    format!("Channel closed before file write completed: {}", detail.trim()))),
+                other => return Err(Error::new(ErrorKind::InvalidData,
+                    format!("Expected file write completion, got {other:?}: {}", detail.trim()))),
+            }
+        }
+        Err(Error::new(ErrorKind::ConnectionAborted,
+            format!("Response channel closed before file write completed: {}", detail.trim())))
+    }).await.map_err(|_| Error::new(ErrorKind::TimedOut,
+        format!("Timeout waiting for file write completion: {}", detail.trim())))?
 }
 
 async fn wait_for_app_begin(
@@ -4821,6 +4823,46 @@ async fn start_usb_session(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn file_send_waits_for_delayed_receiver_write_receipt() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let delayed = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tx.send(TaskMessage { channel_id: 1, command: HdcCommand::FileFinish, payload: vec![1] }).unwrap();
+        });
+        super::wait_for_file_write(&mut rx, std::time::Duration::from_millis(100)).await.unwrap();
+        delayed.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_send_never_accepts_close_or_reader_ack_as_write_success() {
+        for (command, payload) in [(HdcCommand::KernelChannelClose, vec![]),
+            (HdcCommand::FileFinish, vec![0]), (HdcCommand::FileFinish, vec![])] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            tx.send(TaskMessage { channel_id: 1, command, payload }).unwrap();
+            assert!(super::wait_for_file_write(&mut rx, std::time::Duration::from_millis(50)).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn file_send_preserves_storage_errors_even_if_a_receipt_follows() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(TaskMessage { channel_id: 1, command: HdcCommand::KernelEcho,
+            payload: b"\x00No space left on device".to_vec() }).unwrap();
+        tx.send(TaskMessage { channel_id: 1, command: HdcCommand::FileFinish, payload: vec![1] }).unwrap();
+        let error = super::wait_for_file_write(&mut rx, std::time::Duration::from_millis(50)).await.unwrap_err();
+        assert!(error.to_string().contains("No space left on device"));
+    }
+
+    #[tokio::test]
+    async fn file_send_information_does_not_extend_write_deadline() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(TaskMessage { channel_id: 1, command: HdcCommand::KernelEchoRaw,
+            payload: b"writing file".to_vec() }).unwrap();
+        let error = super::wait_for_file_write(&mut rx, std::time::Duration::from_millis(5)).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
     #[tokio::test]
     async fn app_preparation_allows_information_before_begin() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

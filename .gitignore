@@ -41,3 +41,6 @@ app/plugins/ohos_adapter/example/
 
 # Keep only the final release artifact, added explicitly.
 dist/
+
+# Technical documents stay in the private repository.
+/docs/

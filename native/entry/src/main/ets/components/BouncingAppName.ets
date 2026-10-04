@@ -12,6 +12,7 @@ export struct BouncingAppName {
   private timer:number=-1;
   private epoch:number=0;
   private disposed:boolean=false;
+  private moving:boolean=false;
 
   aboutToDisappear():void{this.disposed=true;this.halt();}
 
@@ -25,7 +26,10 @@ export struct BouncingAppName {
     this.halt();
     if(this.disposed)return;
     // duration=0 同时结束旧的位移动画，避免滚出屏幕后继续消耗绘制资源。
-    this.getUIContext().animateTo({duration:0},()=>{this.titleOffset=0;});
+    if(this.moving||this.titleOffset!==0){
+      this.getUIContext().animateTo({duration:0},()=>{this.titleOffset=0;});
+      this.moving=false;
+    }
     if(!this.active||!this.visible||this.viewportWidth<=0||this.textWidth-this.viewportWidth<=1)return;
     const token=this.epoch;
     this.timer=setTimeout(()=>{this.timer=-1;this.advance(token,true);},1100);
@@ -35,9 +39,11 @@ export struct BouncingAppName {
     if(this.disposed||!this.active||!this.visible||token!==this.epoch)return;
     const distance=Math.max(0,this.textWidth-this.viewportWidth);
     if(distance<=1)return;
+    this.moving=true;
     this.getUIContext().animateTo({duration:Math.max(240,Math.round(distance/32*1000)),curve:Curve.Linear,
       onFinish:()=>{
         if(this.disposed||!this.active||!this.visible||token!==this.epoch)return;
+        this.moving=false;
         this.timer=setTimeout(()=>{this.timer=-1;this.advance(token,!toEnd);},1100);
       }},()=>{this.titleOffset=toEnd?-distance:0;});
   }

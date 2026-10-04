@@ -6,6 +6,8 @@ import { DeveloperAccount } from './DeveloperAccount';
 import { BackedUpIdentity, StoreClient } from './StoreClient';
 import { AgcClient } from './AgcClient';
 import { DeviceIdentity, DeviceKeyMaterial } from './DeviceIdentity';
+import { ServiceFailure, ClassifiedFailure } from './ServiceFailure';
+import { FailureKind } from '../jobs/InstallJob';
 
 const INDEX_NAME = 'signing-identity';
 
@@ -35,6 +37,8 @@ export class EnrollmentOptions {
   refreshCertificate: boolean = false;
   /** 用户主动续期时，跳过此时间之前到期的证书。 */
   renewBeforeSeconds: number = 0;
+  /** AGC 签发明确拒绝的证书；核对列表后才能恢复，不能再次直接复用。 */
+  rejectedCertId: string = '';
 }
 
 // Login only restores material; an installation or manual enrollment can prepare a certificate.
@@ -415,7 +419,7 @@ export class SigningIdentityRecovery {
   static async enroll(context: common.UIAbilityContext, account: DeveloperAccount,
     options: EnrollmentOptions = new EnrollmentOptions()): Promise<EnrollmentResult> {
     const scope = JSON.stringify([context.filesDir, account.userId, account.teamId,
-      options.renewBeforeSeconds, options.refreshCertificate]);
+      options.renewBeforeSeconds, options.refreshCertificate, options.rejectedCertId]);
     const pending = SigningIdentityRecovery.enrollment;
     if (pending !== undefined) {
       if (SigningIdentityRecovery.enrollmentScope === scope) return await pending;
@@ -455,6 +459,16 @@ export class SigningIdentityRecovery {
     return (await SigningIdentityRecovery.enroll(context, account, options)).identity;
   }
 
+  static async recoverRejectedCertificate(context: common.UIAbilityContext,
+    account: DeveloperAccount, certId: string, minimumExpiry: number = 0): Promise<LocalSigningIdentity> {
+    if (!/^\d{1,64}$/.test(certId)) throw new Error('签名证书编号无效');
+    const options = new EnrollmentOptions();
+    options.refreshCertificate = true;
+    options.rejectedCertId = certId;
+    options.renewBeforeSeconds = minimumExpiry;
+    return (await SigningIdentityRecovery.enroll(context, account, options)).identity;
+  }
+
   private static async enrollLocked(context: common.UIAbilityContext,
     account: DeveloperAccount, options: EnrollmentOptions): Promise<EnrollmentResult> {
     // 「确认没有身份」和「暂时核实不了」必须分开：后者接着往下走就会申请新证书，
@@ -463,8 +477,14 @@ export class SigningIdentityRecovery {
     try {
       reusable = await SigningIdentityRecovery.restore(context, account, options.refreshCertificate);
     } catch (error) {
+      // 网络/登录分类需保留，才能进入原有等待与自动重试流程。
+      if ((error as ClassifiedFailure).failureKind !== undefined) throw error as Error;
       throw new Error('暂时无法核实本机签名身份（' + String(error) +
         '）。为避免重复占用调试证书槽位，本次不申请新证书，请稍后重试。');
+    }
+    if (options.rejectedCertId && reusable?.certId === options.rejectedCertId) {
+      throw new ServiceFailure(FailureKind.TRANSIENT,
+        'AGC 证书列表与签发状态尚未同步，已保留签名材料，稍后自动重试');
     }
     if (reusable && (options.renewBeforeSeconds <= 0 || reusable.certExpiry <= 0 ||
       reusable.certExpiry > options.renewBeforeSeconds)) {
@@ -497,6 +517,11 @@ export class SigningIdentityRecovery {
 
     const agc = new AgcClient(account);
     const rows = await agc.certificates();
+    if (options.rejectedCertId && rows.some((row: Record<string, Object>) =>
+      String(row['id'] ?? '') === options.rejectedCertId)) {
+      throw new ServiceFailure(FailureKind.TRANSIENT,
+        'AGC 证书列表与签发状态尚未同步，已保留签名材料，稍后自动重试');
+    }
     const valid = SigningIdentityRecovery.validDebugCerts(rows);
     const index = await preferences.getPreferences(context, INDEX_NAME);
     let deletion = await index.get('deleting-cert', '') as string;

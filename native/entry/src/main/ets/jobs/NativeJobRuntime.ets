@@ -1,4 +1,5 @@
 import { ClassifiedFailure } from '../data/ServiceFailure';
+import { isMissingCertificate } from '../data/CertificateRejection';
 import { StorageBudget } from './StorageBudget';
 import { PackageArchive } from './PackageArchive';
 import { LocalBundles } from './LocalBundles';
@@ -286,8 +287,11 @@ export class NativeJobRuntime implements JobRuntime {
             (previous !== job && previous.stage !== InstallStage.INSTALLED) || !previous.profilePath) continue;
           try {
             if (await AgcProfile.signingFingerprint(previous.profilePath) !== renewalInstalled.fingerprint) continue;
+            // The leaf certificate may end before the Profile's advertised
+            // date. Compare the verified effective deadline, otherwise renewal
+            // needlessly rotates a perfectly usable certificate.
             job.renewalPreviousExpiry = Math.max(job.renewalPreviousExpiry,
-              AgcProfile.profileExpiry(previous.profilePath));
+              await InstalledSigningExpiry.profileExpiry(previous));
           } catch (_) { /* 其他工具的 Profile 可能不可读取，不能虚构原有效期。 */ }
         }
         await this.store.save(job);
@@ -309,6 +313,7 @@ export class NativeJobRuntime implements JobRuntime {
       selected = await SigningIdentityRecovery.ensureForRenewal(this.context, this.account, minimumExpiry);
     }
     selected = await SigningIdentityRecovery.pinForJob(this.context, selected);
+    JobCancellation.assertActive(job.id);
     job.signingCertId = selected.certId;
     let refresh: ProfileRefreshOptions | undefined;
     if (job.renewalRequestedAt > 0) {
@@ -316,8 +321,28 @@ export class NativeJobRuntime implements JobRuntime {
       refresh.requestId = job.renewalRequestedAt.toString(36);
       refresh.minimumExpiry = minimumExpiry;
     }
-    job.profilePath = await AgcProfile.ensure(this.context, this.account, selected,
-      job.bundleName, udid, await PackageArchive.permissions(await this.packagePath(job)), refresh);
+    const permissions = await PackageArchive.permissions(await this.packagePath(job));
+    try {
+      job.profilePath = await AgcProfile.ensure(this.context, this.account, selected,
+        job.bundleName, udid, permissions, refresh);
+    } catch (error) {
+      if (!isMissingCertificate(error as Error)) throw error as Error;
+      JobCancellation.assertActive(job.id);
+      selected = await SigningIdentityRecovery.recoverRejectedCertificate(this.context, this.account,
+        selected.certId, job.renewalRequestedAt > 0 ? minimumExpiry : 0);
+      JobCancellation.assertActive(job.id);
+      selected = await SigningIdentityRecovery.pinForJob(this.context, selected);
+      JobCancellation.assertActive(job.id);
+      // 只清除这条任务的派生引用。下载包、旧私钥、其他应用的本地 Profile 均保留。
+      job.signingCertId = selected.certId;
+      job.profilePath = ''; job.profileSha256 = ''; job.signedProfileSha256 = '';
+      job.renewalPreparedAt = 0;
+      await this.store.save(job);
+      JobCancellation.assertActive(job.id);
+      // 每次准备仅恢复一次；再次拒绝交给既有的等待/错误处理，不递归申请。
+      job.profilePath = await AgcProfile.ensure(this.context, this.account, selected,
+        job.bundleName, udid, permissions, refresh);
+    }
     job.deviceUdid = udid;
     job.profileSha256 = (await hash.hash(job.profilePath, 'sha256')).toLowerCase();
     if (job.renewalRequestedAt > 0) {

@@ -7,6 +7,7 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 
 function loadRuntime(mocks) {
+  mocks['../data/CertificateRejection']=rejectionExports;
   mocks['./InstallTaskState'] = { InstallTaskState: { installProgress: () => {} } };
   const file = path.join(__dirname, '../entry/src/main/ets/jobs/NativeJobRuntime.ets');
   const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
@@ -19,13 +20,17 @@ function loadRuntime(mocks) {
   return exports.NativeJobRuntime;
 }
 
+const rejectionExports={};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/data/CertificateRejection.ets'),'utf8'),{
+ compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,{
+ exports:rejectionExports,require:()=>({FailureKind:{NETWORK:'network',ACCOUNT:'account'}})});
 function fixture(installedVersion = 0, selfUpdate = false,
   matchingIdentity = false, matchingAppIdentifier = false, installedIdentity = undefined,
   alternateCertificate = false, backupFails = false) {
   const calls = { hapHashes: 0, profileHashes: 0, nativeSigns: 0,
     nativeVerifies: 0, installedPath: '', uninstalls: 0, selfStaged: '',
     selectedCertId: '', identityBackups: 0, identityPrepares: 0, order: [], stagedCleanup: 0, installs: 0,
-    profiles: [], renewals: [], previousJobs: [], saved: [], now: Date.now() };
+    profileCertificates:[],identityRecoveries:[],profiles: [], renewals: [], previousJobs: [], saved: [], now: Date.now() };
   let deviceVersion = installedVersion;
   const job = {
     sourceUrl: 'local', assetName: 'installer-signed.hap',
@@ -39,6 +44,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
   const mocks = {
     __now: () => calls.now,
     './InstalledSigningExpiry': { InstalledSigningExpiry: {
+      profileExpiry: async () => calls.effectivePreviousExpiry ?? calls.previousExpiry ?? 0,
       capture: async (value, installed) => {
         calls.capturedIdentity={...installed};value.authorizationExpiresAt=1900000000;
         value.installedUpdateTime=installed.updateTime;value.installedFingerprint=installed.fingerprint;
@@ -72,6 +78,9 @@ function fixture(installedVersion = 0, selfUpdate = false,
       ensure: async (_context, _account, identity, _bundle, _udid, _permissions, refresh) => {
         calls.selectedCertId = identity.certId;
         calls.profiles.push(refresh && { ...refresh });
+        calls.profileCertificates.push(identity.certId);
+        const failure=calls.profileErrors?.shift();
+        if(failure){const e=new Error(failure);if(calls.profileErrorKind)e.failureKind=calls.profileErrorKind;throw e;}
         return '/private/profile.p7b';
       }
     } },
@@ -98,6 +107,13 @@ function fixture(installedVersion = 0, selfUpdate = false,
         return { certId: calls.missingIdentity ? '3' : '1', certExpiry: calls.certExpiry ?? Date.now() / 1000 + 365 * 86400,
           privateKeyPath: '/private/key', certificatePath: '/private/cert' };
       },
+      recoverRejectedCertificate: async (_context,_account,certId,minimum)=>{
+        calls.identityRecoveries.push({certId,minimum});
+        if(calls.recoveryError)throw calls.recoveryError;
+        if(calls.cancelDuringRecovery)calls.cancelled=true;
+        return {certId:'5',certExpiry:minimum+365*86400+Date.now()/1000,
+          privateKeyPath:'/private/key',certificatePath:'/private/cert-5'};
+      },
       ensureForRenewal: async (_context, _account, minimum) => {
         calls.renewals.push(minimum);
         return { certId: '4', certExpiry: minimum + 365 * 86400,
@@ -109,7 +125,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
       matchingInstalledCertificate: async () => alternateCertificate ?
         { certId: '2', certExpiry: calls.certExpiry ?? Date.now() / 1000 + 365 * 86400,
           privateKeyPath: '/private/key', certificatePath: '/private/cert-2' } : undefined,
-      pinForJob: async (_context, identity) => identity
+      pinForJob: async (_context, identity) => {if(calls.cancelAfterReplacementPin&&identity.certId==='5')calls.cancelled=true;return identity;}
     } },
     '../data/StoreClient': { StoreClient: class {
       async publishSigningIdentity() {
@@ -213,6 +229,17 @@ test('same-version renewal prepares a fresh authorization and submits without un
   assert.equal(await f.runtime.confirmRenewal(f.job), false, 'same version alone is not a completion proof');
   f.installed.updateTime++;
   assert.equal(await f.runtime.confirmRenewal(f.job), true);
+});
+test('renewal uses the old effective deadline rather than rotating for a certificate-capped Profile date', async () => {
+  const f = renewalFixture({ alternateCertificate: true });
+  f.calls.previousExpiry = Date.now() / 1000 + 2 * 365 * 86400;
+  f.calls.effectivePreviousExpiry = Date.now() / 1000 + 7200;
+  await f.runtime.ensureProfile(f.job);
+  assert.equal(f.job.renewalPreviousExpiry, f.calls.effectivePreviousExpiry);
+  assert.equal(f.job.signingCertId, '2', 'retain the matching installed certificate');
+  assert.equal(f.calls.renewals.length, 0, 'Profile refresh needs no new certificate');
+  assert.equal(f.calls.profiles[0].minimumExpiry, f.calls.effectivePreviousExpiry);
+  assert.ok(f.job.renewalExpiresAt > f.job.renewalPreviousExpiry);
 });
 test('renewal rejects missing, mismatched or unidentifiable targets before certificate preparation', async () => {
   for (const change of [i => { i.versionCode = 0; }, i => { i.versionCode++; },
@@ -707,4 +734,61 @@ test('an unreadable installation result stops recovery instead of submitting bli
   runtime.installedVersion = async () => { throw new Error('status query unavailable'); };
   await assert.rejects(runtime.install(job), /Response channel closed/);
   assert.equal(calls.installs, 1);
+});
+
+test('missing certificate recovery resumes the same install with fresh Profile and no repeated download',async()=>{
+ const f=fixture();f.calls.profileErrors=['AGC 拒绝请求：cert not exist.'];
+ f.job.signedProfileSha256='old-profile';
+ await f.runtime.ensureProfile(f.job);await f.runtime.sign(f.job);await f.runtime.verifySignature(f.job);await f.runtime.install(f.job);
+ assert.deepEqual(f.calls.profileCertificates,['1','5']);assert.equal(f.calls.identityRecoveries.length,1);
+ assert.equal(f.job.signingCertId,'5');assert.equal(f.job.cachePath,'/private/source.hap');
+ assert.equal(f.calls.nativeSigns,1);assert.equal(f.calls.installs,1);assert.equal(f.calls.uninstalls,0);
+ assert.ok(f.calls.saved.some(j=>j.signingCertId==='5'&&j.profilePath===''&&j.signedProfileSha256===''));
+});
+test('a second certificate rejection stops after one recovery',async()=>{
+ const f=fixture();f.calls.profileErrors=['cert not exist','certificate not found'];
+ await assert.rejects(f.runtime.ensureProfile(f.job),/certificate not found/);
+ assert.equal(f.calls.profiles.length,2);assert.equal(f.calls.identityRecoveries.length,1);
+ assert.equal(f.calls.nativeSigns,0);assert.equal(f.calls.uninstalls,0);
+});
+test('unrelated AGC, login and network errors never rebuild signing identity',async()=>{
+ for(const [message,kind] of [['quota exceeded','internal'],['AGC 权限不足','internal'],['cert not exist','network'],['cert not exist','account']]){
+  const f=fixture();f.calls.profileErrors=[message];f.calls.profileErrorKind=kind;
+  await assert.rejects(f.runtime.ensureProfile(f.job));
+  assert.equal(f.calls.identityRecoveries.length,0);assert.equal(f.calls.profiles.length,1);
+ }
+});
+test('cancelling during certificate recovery prevents a new Profile or device installation',async()=>{
+ const f=fixture();f.calls.profileErrors=['cert not exist'];f.calls.cancelDuringRecovery=true;
+ await assert.rejects(f.runtime.ensureProfile(f.job),/取消/);
+ assert.equal(f.calls.profiles.length,1);assert.equal(f.calls.nativeSigns,0);assert.equal(f.calls.installs,0);
+});
+test('replacement certificate retains the normal data-loss confirmation gate',async()=>{
+ const installed={versionCode:6,fingerprint:'A'.repeat(64),appIdentifier:'installed-app-id',updateTime:1700000000000};
+ const f=fixture(6,false,false,false,installed);f.calls.profileErrors=['cert not exist'];
+ await assert.rejects(f.runtime.ensureProfile(f.job),e=>e.kind==='confirmation');
+ assert.equal(f.calls.identityRecoveries.length,1);assert.equal(f.calls.uninstalls,0);assert.equal(f.calls.installs,0);
+});
+test('certificate replacement preserves the same renewal request and required extension',async()=>{
+ const f=renewalFixture();f.calls.profileErrors=['cert not exist'];
+ f.calls.previousExpiry=Date.now()/1000+7200;
+ await f.runtime.ensureProfile(f.job);
+ assert.equal(f.calls.identityRecoveries[0].minimum,f.calls.previousExpiry);
+ assert.deepEqual(f.calls.profiles[0],f.calls.profiles[1]);
+ assert.equal(f.job.renewalPreparedAt,f.job.renewalRequestedAt);assert.equal(f.job.signingCertId,'5');
+});
+
+test('certificate recovery reaching the AGC quota propagates the existing certificate-dialog classification',async()=>{
+ const f=fixture();f.calls.profileErrors=['cert not exist'];
+ const error=Object.assign(new Error('请选择证书释放名额'),{failureKind:'certificate_limit'});
+ f.calls.recoveryError=error;
+ await assert.rejects(f.runtime.ensureProfile(f.job),e=>e===error&&e.failureKind==='certificate_limit');
+ assert.equal(f.calls.profiles.length,1);assert.equal(f.calls.uninstalls,0);assert.equal(f.job.cachePath,'/private/source.hap');
+});
+
+test('cancellation while pinning the replacement cannot resurrect a cancelled journal',async()=>{
+ const f=fixture();f.calls.profileErrors=['cert not exist'];f.calls.cancelAfterReplacementPin=true;
+ await assert.rejects(f.runtime.ensureProfile(f.job),/取消/);
+ assert.equal(f.calls.profiles.length,1);assert.equal(f.job.signingCertId,'1');
+ assert.ok(!f.calls.saved.some(j=>j.signingCertId==='5'));assert.equal(f.calls.installs,0);
 });

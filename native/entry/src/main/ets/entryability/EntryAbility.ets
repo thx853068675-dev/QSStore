@@ -3,6 +3,7 @@ import { WirelessDebugLifecycle } from '../jobs/WirelessDebugLifecycle';
 import { UIAbility, Want, AbilityConstant, Configuration, ConfigurationConstant } from '@kit.AbilityKit';
 import { window, display } from '@kit.ArkUI';
 import { BackgroundInstallTask } from '../jobs/BackgroundInstallTask';
+import { ExternalInstallOpen } from '../jobs/ExternalInstallOpen';
 
 // 背景交给页面连续绘制，系统栏仅按主题切换文字颜色。
 const BARS_LIGHT: window.SystemBarProperties = {
@@ -20,6 +21,8 @@ const BARS_DARK: window.SystemBarProperties = {
 
 export default class EntryAbility extends UIAbility {
   private mainWindow?: window.Window;
+  private backgroundWindow?: window.Window;
+  private contentReady: boolean = false;
   private onAvoidAreaChange = (options: window.AvoidAreaOptions): void => {
     if (options.type === window.AvoidAreaType.TYPE_SYSTEM ||
       options.type === window.AvoidAreaType.TYPE_CUTOUT) this.syncStatusBarInset();
@@ -34,7 +37,10 @@ export default class EntryAbility extends UIAbility {
       const top = Math.max(system.topRect.height, cutout.topRect.height);
       // onForeground / 避让回调可早于 loadContent，不能提前取得 UIContext。
       const screen = display.getDisplayByIdSync(mainWindow.getWindowProperties().displayId);
-      AppStorage.setOrCreate<number>('statusBarInset', top / screen.densityPixels);
+      const inset = top / screen.densityPixels;
+      if (AppStorage.get<number>('statusBarInset') !== inset) {
+        AppStorage.setOrCreate<number>('statusBarInset', inset);
+      }
     } catch (_) {
       // 窗口切换或销毁中的暂态保留上一次安全区，下一次前台/避让回调重新读取。
     }
@@ -47,11 +53,15 @@ export default class EntryAbility extends UIAbility {
   private applyAppearance(): Promise<void> {
     const dark = this.isDark();
     // 页面据此切换调色板（theme/Palette.ets）。
-    AppStorage.setOrCreate<boolean>('darkMode', dark);
+    if (AppStorage.get<boolean>('darkMode') !== dark) AppStorage.setOrCreate<boolean>('darkMode', dark);
     const mainWindow = this.mainWindow;
     if (!mainWindow) return Promise.resolve();
     try {
-      mainWindow.setWindowBackgroundColor('#00000000');
+      // 重复设置窗口背景会触发原生渲染节点更新；同一窗口仅初始化一次。
+      if (this.backgroundWindow !== mainWindow) {
+        mainWindow.setWindowBackgroundColor('#00000000');
+        this.backgroundWindow = mainWindow;
+      }
     } catch (error) {
       console.warn('Unable to clear window background: ' + JSON.stringify(error));
     }
@@ -64,11 +74,16 @@ export default class EntryAbility extends UIAbility {
       });
   }
 
-  onCreate(_want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+  onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
     BackgroundInstallTask.configure(this.context);
     InstallCoordinator.configure(this.context);
     WirelessDebugLifecycle.configure(this.context);
     AppStorage.setOrCreate<string>('qingqiFilesDir', this.context.filesDir);
+    ExternalInstallOpen.receive(want);
+  }
+
+  onNewWant(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+    if (ExternalInstallOpen.receive(want) && this.contentReady) ExternalInstallOpen.openPending();
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
@@ -89,13 +104,18 @@ export default class EntryAbility extends UIAbility {
         // 页面加载后再同步，覆盖组件初始化和系统主题切换的窗口默认值。
         this.applyAppearance();
         this.syncStatusBarInset();
+        this.contentReady = true;
+        ExternalInstallOpen.openPending();
       });
     });
   }
 
   onWindowStageDestroy(): void {
+    ExternalInstallOpen.suspendRouting();
     this.mainWindow?.off('avoidAreaChange', this.onAvoidAreaChange);
     this.mainWindow = undefined;
+    this.backgroundWindow = undefined;
+    this.contentReady = false;
   }
 
   onConfigurationUpdate(config: Configuration): void {

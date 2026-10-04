@@ -1,4 +1,6 @@
 export interface PackageEntry { name: string; size: number; }
+export interface ImportedArchiveEntry { name: string; path: string; size: number; }
+export const extractInstallArchive: (path: string, outputPrefix: string, originalName: string) => Promise<ImportedArchiveEntry[]>;
 export const listProfileEntries: (path: string) => PackageEntry[];
 export const listPackageEntries: (path: string) => PackageEntry[];
 export const extractPackageEntry: (path: string, entry: string, output: string) => Promise<void>;

@@ -1,4 +1,5 @@
 import { fitVersionBadge } from '../data/VersionBadgeLayout';
+import { displayVersion } from '../data/DisplayVersion';
 import { BouncingAppName } from './BouncingAppName';
 
 /** Size the inverse background to the visible version, including its ellipsis. */
@@ -22,7 +23,7 @@ export struct CatalogAppTitle {
 
   private updateBadge(): void {
     const context = this.getUIContext();
-    const layout = fitVersionBadge(this.version, this.rowWidth * 0.4,
+    const layout = fitVersionBadge(displayVersion(this.version, this.title), this.rowWidth * 0.4,
       (text: string): number => context.px2vp(context.getMeasureUtils().measureText({
         textContent: text, fontSize: this.titleSize * 11 / 17, fontWeight: FontWeight.Bold
       })));

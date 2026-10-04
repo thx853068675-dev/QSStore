@@ -63,8 +63,13 @@ export class AgcManagedProfile {
     }
   }
 
-  private static async profileName(appId: string, certId: string, deviceIds: string[], acls: string[]): Promise<string> {
-    const content = JSON.stringify([appId, certId, deviceIds.slice().sort(), acls.slice().sort()]);
+  private static async profileName(appId: string, certId: string, deviceIds: string[], acls: string[],
+    renewalRequest: string): Promise<string> {
+    const material: Object[] = [appId, certId, deviceIds.slice().sort(), acls.slice().sort()];
+    // An old managed Profile's deterministic name must not block renewal. A
+    // request-specific name still reconciles timeouts/retries without new POSTs.
+    if (renewalRequest) material.push(renewalRequest);
+    const content = JSON.stringify(material);
     const md = cryptoFramework.createMd('SHA256');
     await md.update({ data: new util.TextEncoder().encodeInto(content) });
     const bytes = (await md.digest()).data;
@@ -75,9 +80,10 @@ export class AgcManagedProfile {
 
   static async obtain(agc: AgcClient, account: DeveloperAccount, certId: string, deviceIds: string[],
     acls: string[], bundleName: string, temporary: string, valid: (path: string) => boolean,
-    udid: string = ''): Promise<void> {
+    udid: string = '', renewalRequest: string = ''): Promise<void> {
+    if (renewalRequest && !/^[a-z0-9]{1,24}$/.test(renewalRequest)) throw new Error('续签请求信息无效');
     const appId = await AgcManagedProfile.appId(agc, bundleName, account);
-    const name = await AgcManagedProfile.profileName(appId, certId, deviceIds, acls);
+    const name = await AgcManagedProfile.profileName(appId, certId, deviceIds, acls, renewalRequest);
     const profiles = await agc.managedProfiles(appId);
     let existingName = false;
     for (const row of profiles) {

@@ -1,7 +1,10 @@
+import { displayVersion } from '../data/DisplayVersion';
 import { router,promptAction } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
+import { pasteboard } from '@kit.BasicServicesKit';
+import { ExternalInstallOpen } from '../jobs/ExternalInstallOpen';
 import { LocalImport } from '../jobs/LocalImport';
 import { PackageArchive } from '../jobs/PackageArchive';
 import { JobStore } from '../jobs/JobStore';
@@ -20,13 +23,14 @@ import { StoreImmersiveIconButton,StoreLayout,StorePageHeader } from '../theme/S
 import { errorText } from '../jobs/ErrorText';
 import { StoreRenewal, RenewalTarget } from '../jobs/StoreRenewal';
 
-interface LocalInstallParams { preview?:InstallJob; direct?:boolean; renewal?:boolean; renewBundleName?:string; renewVersionCode?:number; renewAppId?:number; renewTitle?:string; }
+interface LocalInstallParams { preview?:InstallJob; direct?:boolean; external?:boolean; renewal?:boolean; renewBundleName?:string; renewVersionCode?:number; renewAppId?:number; renewTitle?:string; }
 
 @Entry
 @Component
 struct LocalInstall {
   @StorageProp('darkMode') darkMode:boolean=false;
   @StorageProp('statusBarInset') statusBarInset:number=0;
+  @StorageProp('externalFileOpenRevision') @Watch('onExternalFileOpen') externalRevision:number=0;
   @State private choices:InstallJob[]=[];
   @State private selected:InstallJob=new InstallJob();
   @State private preview:boolean=false;
@@ -44,7 +48,6 @@ struct LocalInstall {
   @State private certificatePromptDismiss:number=0;
   @State private promptDismiss:number=0;
   @State private renewal:boolean=false;
-  @State private canRenew:boolean=false;
   @State private storeRenewal:boolean=false;
   private renewBundleName:string=''; private renewVersionCode:number=0;
   private remoteJobId:string='';
@@ -63,13 +66,14 @@ struct LocalInstall {
     // Take ownership now, including a back action before the timer fires.
     if(params?.preview){this.choices=[params.preview];this.preview=true;}
     this.pickerTimer=setTimeout(()=>{
-      if(this.disposed)return;
+      this.pickerTimer=-1;if(this.disposed)return;
       if(this.storeRenewal)this.renewFromStore(params.renewAppId??0);
       else if(params?.preview){this.choose(params.preview);if(params.direct)this.install();}
+      else if(params?.external)this.onExternalFileOpen();
       else this.pick();
     },80);
   }
-  onPageShow():void{this.pageActive=true;if(!this.disposed&&!this.returning)this.headerVisible=true;}
+  onPageShow():void{this.pageActive=true;if(!this.disposed&&!this.returning){this.headerVisible=true;if(this.pickerTimer===-1)this.onExternalFileOpen();}}
   onPageHide():void{this.pageActive=false;this.headerVisible=false;}
   aboutToDisappear():void{this.disposed=true;this.headerVisible=false;this.pageActive=false;clearTimeout(this.pickerTimer);clearTimeout(this.backTimer);InstallTaskState.unsubscribe(this.subscription);this.discard();this.pixels?.release();this.pixels=null;}
   onBackPress():boolean{if(this.showCertificatePrompt){this.certificatePromptDismiss++;return true;}if(this.showReconnect){this.promptDismiss++;return true;}if(this.busy&&!this.storeRenewal){promptAction.showToast({message:'正在读取文件，请稍候'});return true;}this.back();return true;}
@@ -90,7 +94,7 @@ struct LocalInstall {
       if(job.stage===InstallStage.QUEUED)InstallCoordinator.recovered(context).catch((error:Error)=>{if(!this.disposed)this.message=errorText(error);});
       else if(job.stage!==InstallStage.WAITING_ACCOUNT)InstallCoordinator.run(context,job.id).catch((error:Error)=>{if(!this.disposed)this.message=errorText(error);});
     }catch(error){if(!this.disposed)this.message=errorText(error);}
-    finally{if(!this.disposed)this.busy=false;}
+    finally{this.busy=false;if(!this.disposed)this.onExternalFileOpen();}
   }
   private observeTasks():void{
     this.subscription=InstallTaskState.subscribe((tasks:InstallTaskSnapshot[])=>{
@@ -106,11 +110,31 @@ struct LocalInstall {
     if(this.renewal&&this.remoteJobId&&JobScheduler.isRunning(this.remoteJobId)){promptAction.showToast({message:'续签正在执行，请完成后再选包，或在管理中取消'});return;}
     this.storeRenewal=false;this.busy=true;this.message='';
     try{const choices=await LocalImport.pickPreviews(getContext(this) as common.UIAbilityContext);if(this.disposed){for(const job of choices)LocalImport.discardPreview(getContext(this) as common.UIAbilityContext,job);return;}this.discard();this.choices=choices;this.preview=true;this.timeline=new LocalTimelineView();await this.choose(choices[0]);}
-    catch(error){if(!String(error).includes('未选择安装文件'))this.message=errorText(error);}finally{this.busy=false;}
+    catch(error){if(!String(error).includes('未选择安装文件'))this.message=errorText(error);}finally{this.busy=false;if(!this.disposed)this.onExternalFileOpen();}
+  }
+  onExternalFileOpen():void{
+    if(!this.pageActive||this.returning||this.busy||this.disposed)return;
+    const uri=ExternalInstallOpen.take();
+    if(uri)this.importExternal(uri);
+  }
+  private async importExternal(uri:string):Promise<void>{
+    this.busy=true;this.message='';this.storeRenewal=false;this.renewal=false;
+    try{
+      const context=getContext(this) as common.UIAbilityContext;
+      const choices=await LocalImport.previewsFromUri(context,uri);
+      if(this.disposed){for(const job of choices)LocalImport.discardPreview(context,job);return;}
+      this.discard();this.choices=choices;this.preview=true;this.timeline=new LocalTimelineView();
+      await this.choose(choices[0]);
+    }catch(error){if(!this.disposed)this.message=errorText(error);}
+    finally{this.busy=false;if(!this.disposed)this.onExternalFileOpen();}
+  }
+  private async copy(value:string):Promise<void>{
+    if(!value)return;
+    try{await pasteboard.getSystemPasteboard().setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN,value));promptAction.showToast({message:'已复制：'+value,duration:2500});}
+    catch(_){promptAction.showToast({message:'暂时无法复制，请重试'});}
   }
   private async choose(job:InstallJob):Promise<void>{
     const token=++this.reading;this.selected=job;this.title=job.assetName;this.fileSize='';this.pixels?.release();this.pixels=null;
-    this.canRenew=LocalBundles.liveInstalledVersion(job.bundleName)===job.versionCode;
     try{this.fileSize=(fileIo.statSync(job.cachePath).size/1048576).toFixed(1)+' MB';const identity=await PackageArchive.inspect(job.cachePath);if(token!==this.reading||this.disposed)return;this.title=identity.displayName||job.assetName;const bytes=await PackageArchive.icon(job.cachePath);if(!bytes)return;await InstalledIconCache.save(getContext(this) as common.UIAbilityContext,job.bundleName,job.versionCode,bytes);const source=image.createImageSource(bytes);try{const pixels=await source.createPixelMap({desiredSize:{width:144,height:144}});if(token===this.reading&&!this.disposed)this.pixels=pixels;else pixels.release();}finally{source.release();}}catch(_){}
   }
   private async install(renewal:boolean=this.renewal):Promise<void>{
@@ -141,7 +165,7 @@ struct LocalInstall {
       }
       this.refreshTimeline();
     }
-    catch(error){this.message=errorText(error);}finally{this.busy=false;}
+    catch(error){this.message=errorText(error);}finally{this.busy=false;if(!this.disposed)this.onExternalFileOpen();}
   }
   private resume(id:string):void{InstallCoordinator.run(getContext(this) as common.UIAbilityContext,id).catch((error:Error)=>{if(!this.disposed&&!String(error).includes('安装任务已取消'))this.message=errorText(error);});}
   private retry():void{
@@ -174,14 +198,20 @@ struct LocalInstall {
         Scroll(){Column({space:18}){
           Column({space:14}){
             if(this.pixels){Image(this.pixels).width(72).height(72).borderRadius(20);}else{SymbolGlyph($r('sys.symbol.square_and_arrow_down')).fontSize(34).fontColor([this.colors().accent]);}
-            Text(this.title||'选择安装文件').fontSize(21).fontWeight(FontWeight.Bold).fontColor(this.colors().text).maxLines(2).textAlign(TextAlign.Center)
-            if(this.selected.id){Text((this.selected.versionName||String(this.selected.versionCode))+(this.fileSize?' · '+this.fileSize:'')).fontSize(12).fontColor(this.colors().textSecondary);Text(this.selected.bundleName).fontSize(11).fontColor(this.colors().textTertiary).wordBreak(WordBreak.BREAK_ALL).textAlign(TextAlign.Center);}
-            else{Text(this.storeRenewal&&this.busy?'正在查找同版本原包…':this.renewal?'选择已安装应用的同版本 HAP / APP / ZIP':'HAP / APP / ZIP · 预览后再安装').fontSize(12).fontColor(this.colors().textSecondary);}
+            Text(this.title||'选择安装文件').fontSize(21).fontWeight(FontWeight.Bold).fontColor(this.colors().text).maxLines(2).textAlign(TextAlign.Center).onClick(()=>{if(this.selected.id)this.copy(this.title);})
+            if(this.selected.id){
+              Text(displayVersion(this.selected.versionName||String(this.selected.versionCode),this.title)+(this.fileSize?' · '+this.fileSize:'')).fontSize(12).fontColor(this.colors().textSecondary);
+              Row({space:5}){
+                Text(this.selected.bundleName).fontSize(11).fontColor(this.colors().textTertiary).wordBreak(WordBreak.BREAK_ALL).textAlign(TextAlign.Center).constraintSize({maxWidth:'88%'});
+                SymbolGlyph($r('sys.symbol.square_on_square_fill')).fontSize(12).fontColor([this.colors().textTertiary]);
+              }.width('100%').justifyContent(FlexAlign.Center).alignItems(VerticalAlign.Center)
+                .id('local-copy-bundle').accessibilityText('复制包名 '+this.selected.bundleName).onClick(()=>this.copy(this.selected.bundleName));
+            }
+            else{Text(this.storeRenewal&&this.busy?'正在查找同版本原包…':this.renewal?'选择已安装应用的同版本安装包':'HAP / APP / 压缩包 · 预览后再安装').fontSize(12).fontColor(this.colors().textSecondary);}
             if(this.renewal&&this.preview){Text('刷新授权后覆盖签装，保留应用数据。').fontSize(12).fontColor(this.colors().textSecondary).textAlign(TextAlign.Center);}
             if(this.preview&&this.choices.length>1){Select(this.choices.map((job:InstallJob)=>({value:job.assetName} as SelectOption))).selected(this.choices.findIndex((job:InstallJob)=>job.id===this.selected.id)).value(this.selected.assetName).width('100%').height(44).fontColor(this.colors().text).optionFontColor(this.colors().text).optionBgColor(this.colors().surface).selectedOptionBgColor(this.colors().accentSoft).selectedOptionFontColor(this.colors().accent).menuBackgroundColor(this.colors().surface).backgroundColor(this.colors().fill).onSelect((index:number)=>this.choose(this.choices[index]));}
             if(this.preview||(!this.selected.id&&!this.busy)){Row({space:12}){
               Button(this.preview?(this.renewal?'续签':'安装'):'选择安装文件').layoutWeight(1).height(48).fontSize(15).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent).enabled(!this.busy).id('local-install-primary').onClick(()=>{if(this.preview)this.install();else this.pick();});
-              if(this.preview&&this.canRenew&&!this.renewal){Button('续签').layoutWeight(1).height(48).fontSize(15).backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent).enabled(!this.busy).id('local-renew-primary').onClick(()=>this.install(true));}
             }.width('100%');}
           }.width('100%').padding(24).backgroundColor(this.colors().surface).borderRadius(22)
           if(this.message){Text(this.message).width('100%').fontSize(12).fontColor(this.colors().danger);}

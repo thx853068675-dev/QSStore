@@ -13,6 +13,25 @@ export class StoreLayout {
   static inset(width: number): number { return width > 0 && width < 360 ? 16 : 24; }
 }
 
+/** 6.1 浮动栏的系统材质可能恢复为空，背景放在内容之上、原生页签之下。 */
+@Component
+export struct StoreTabBarBackdrop {
+  @StorageProp('darkMode') private darkMode: boolean = false;
+  build() {
+    Column() {
+      Column().width('calc(100% - 24vp)').constraintSize({ maxWidth: 328 }).height(56)
+        .backgroundColor('#B3' + Palette.forMode(this.darkMode).surface.substring(1))
+        .backgroundEffect({ radius: 24, saturation: 1.1, brightness: 1,
+          color: '#66' + Palette.forMode(this.darkMode).surface.substring(1),
+          policy: BlurStyleActivePolicy.ALWAYS_ACTIVE }, { disableSystemAdaptation: true })
+        .borderRadius(28).clip(true)
+        .border({ width: 0.5, color: Palette.forMode(this.darkMode).border, radius: 28 })
+        .margin({ bottom: 20 })
+    }.width('100%').height('100%').justifyContent(FlexAlign.End)
+      .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+  }
+}
+
 /** Single source for native HDS title bars and the shared top-glass component. */
 export class StoreTopStyle {
   static readonly height: number = 55;

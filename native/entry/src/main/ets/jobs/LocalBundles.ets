@@ -31,7 +31,46 @@ import { image } from '@kit.ImageKit';
  *     -1    → 无法核实（权限不足等），调用方应回退到 HDC 查询，
  *             并且在拿到确定答案前不要把状态显示成「未安装」
  */
+export class InstalledBundleState {
+  versionCode: number = -1;
+  versionName: string = '';
+}
+
 export class LocalBundles {
+  private static selfInfoFlight: Promise<bundleManager.BundleInfo> | undefined = undefined;
+
+  /** 页面扫描不在 UI 线程逐包做同步 IPC；一次查询同时取得编号和名称。 */
+  static async liveInstalledState(bundleName: string): Promise<InstalledBundleState> {
+    const result = new InstalledBundleState();
+    if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) {
+      result.versionCode = 0;
+      return result;
+    }
+    try {
+      if (LocalBundles.selfInfoFlight === undefined) {
+        LocalBundles.selfInfoFlight = bundleManager.getBundleInfoForSelf(
+          bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      }
+      const own = await LocalBundles.selfInfoFlight;
+      if (own.name === bundleName && own.versionCode > 0) {
+        result.versionCode = own.versionCode;
+        result.versionName = String(own.versionName ?? '').trim();
+        return result;
+      }
+    } catch (_) { LocalBundles.selfInfoFlight = undefined; }
+    try {
+      const info = await bundleManager.getBundleInfo(bundleName,
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      const code = Number(info.versionCode);
+      if (Number.isInteger(code) && code > 0) {
+        result.versionCode = code;
+        result.versionName = String(info.versionName ?? '').trim();
+      }
+    } catch (error) {
+      result.versionCode = LocalBundles.notInstalledError(error) ? 0 : LocalBundles.UNKNOWN;
+    }
+    return result;
+  }
   /** 普通 GET_BUNDLE_INFO 下可用的官方图标接口；权限被拒时保持占位，不阻塞识别。 */
   static async installedIcon(context: common.UIAbilityContext, bundleName: string,
     abilityName: string): Promise<image.PixelMap | undefined> {
@@ -56,6 +95,14 @@ export class LocalBundles {
     } catch (_) {
       return false;
     }
+  }
+
+  /** Read the installed build, including preview names; never display a catalog version here. */
+  static selfVersionName(): string {
+    try {
+      return String(bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT).versionName ?? '').trim();
+    } catch (_) { return ''; }
   }
 
   /** 当前安装器的签名证书指纹；覆盖安装必须沿用这张证书。 */

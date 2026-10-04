@@ -1,0 +1,36 @@
+{
+  "UniformDataTypeDeclarations": [
+    {
+      "TypeId": "com.tonghongxiang.hapstore.app",
+      "BelongingToTypes": [
+        "general.archive"
+      ],
+      "FilenameExtensions": [
+        ".app"
+      ],
+      "MIMETypes": [
+        "application/vnd.harmonyos.app"
+      ],
+      "Description": "HarmonyOS APP安装包"
+    },
+    {
+      "TypeId": "com.tonghongxiang.hapstore.extra-archive",
+      "BelongingToTypes": [
+        "general.archive"
+      ],
+      "FilenameExtensions": [
+        ".xz",
+        ".txz",
+        ".lzma",
+        ".tbz",
+        ".tbz2"
+      ],
+      "MIMETypes": [
+        "application/x-xz",
+        "application/x-lzma",
+        "application/x-bzip-compressed-tar"
+      ],
+      "Description": "安装包压缩文件"
+    }
+  ]
+}

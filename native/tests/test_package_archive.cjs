@@ -25,6 +25,18 @@ const native = {
   listPackageEntries: p => execFileSync(cli, [p, 'list'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean).map(line => {
     const [size,name] = line.split('\t'); return { size: Number(size), name }; }),
   extractPackageEntry: async (p,n,o) => { execFileSync(cli,[p,'extract',n,o]); },
+  extractInstallArchive: async (p,prefix) => {
+    const result=[];
+    try {
+      for (const entry of native.listPackageEntries(p).filter(e => /\.(hap|app)$/i.test(e.name))) {
+        if(!entry.name || entry.name.split('/').some(part=>!part||part==='.'||part==='..') || /[\\:]/.test(entry.name)) throw Error('unsafe archive path');
+        const output=prefix+'-'+result.length+path.extname(entry.name).toLowerCase();
+        await native.extractPackageEntry(p,entry.name,output);result.push({name:entry.name,path:output,size:entry.size});
+      }
+      if(!result.length)throw Error('no packages');
+      return result;
+    }catch(error){for(const entry of result)fs.rmSync(entry.path,{force:true});throw error;}
+  },
   readModuleJson: p => execFileSync(cli,[p], {encoding:'utf8'}),
   readPackInfo: p => execFileSync(cli,[p,'pack'], {encoding:'utf8'}), readHapIcon: () => new Uint8Array()
 };

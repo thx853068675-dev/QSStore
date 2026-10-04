@@ -139,7 +139,7 @@ test('discarding a preview cannot delete files in the committed installation dir
 function page(names, globals) {
   const source = fs.readFileSync(path.join(root, 'pages/LocalInstall.ets'), 'utf8');
   const methods = names.map(name => {
-    const start = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
+    const start = source.search(new RegExp(`^  (?:private )?(?:async )?${name}\\(`, 'm'));
     assert.notEqual(start, -1, name);
     return source.slice(start, source.indexOf('\n  }', start) + 4);
   });
@@ -147,7 +147,7 @@ function page(names, globals) {
   vm.runInNewContext(ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
-  return new box.Page();
+  const instance = new box.Page(); if (!instance.onExternalFileOpen) instance.onExternalFileOpen = () => {}; return instance;
 }
 test('the local installation page selection action only previews, never starts installation', async () => {
   const preview = { id: 'local:hash', cachePath: '/preview.hap', versionName: '1.2.0' };
@@ -264,4 +264,18 @@ test('edited preview rejects external paths and cleans invalid metadata copies',
   const dir=f.context.cacheDir+'/package-editor';fs.mkdirSync(dir,{recursive:true});const source=dir+'/bad.app';fs.writeFileSync(source,'bad metadata');
   await assert.rejects(f.LocalImport.editedPreview(f.context,source,'bad.app'));
   assert.equal(fs.existsSync(source),true);assert.deepEqual(fs.readdirSync(f.context.cacheDir+'/local-hap-previews'),[]);
+});
+
+for(const reason of ['hidden','busy','returning','disposed'])test('FileOpen retains the pending grant while local preview is '+reason,()=>{
+ let takes=0;
+ const ui=page(['onExternalFileOpen'],{ExternalInstallOpen:{take(){takes++;return 'file://docs/new.hap';}}});
+ Object.assign(ui,{pageActive:true,busy:false,returning:false,disposed:false,importExternal(){assert.fail('must retain pending selection');}});
+ if(reason==='hidden')ui.pageActive=false;else ui[reason]=true;
+ ui.onExternalFileOpen();assert.equal(takes,0);
+});
+test('FileOpen consumes the pending selection once when the local page is visible and idle',()=>{
+ let takes=0,imports=[];
+ const ui=page(['onExternalFileOpen'],{ExternalInstallOpen:{take(){takes++;return takes===1?'file://docs/new.hap':'';}}});
+ Object.assign(ui,{pageActive:true,busy:false,returning:false,disposed:false,importExternal(uri){imports.push(uri);}});
+ ui.onExternalFileOpen();ui.onExternalFileOpen();assert.deepEqual(imports,['file://docs/new.hap']);
 });

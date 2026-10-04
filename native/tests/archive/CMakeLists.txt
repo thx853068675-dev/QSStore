@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.18)
+project(qingqi_archive_tests LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 17)
+add_subdirectory("../../third_party/archive" "vendor")
+add_executable(install_archive_cli install_archive_cli.cpp ../../entry/src/main/cpp/hap_core/install_archive.cpp)
+target_include_directories(install_archive_cli PRIVATE ../../entry/src/main/cpp/hap_core)
+target_link_libraries(install_archive_cli PRIVATE archive_static)
+target_compile_options(install_archive_cli PRIVATE -Wall -Wextra -Werror)

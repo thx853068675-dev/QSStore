@@ -1,3 +1,4 @@
+import { displayVersion } from '../data/DisplayVersion';
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
 import { InstallCertificatePrompt } from '../components/InstallCertificatePrompt';
 import { CatalogInstallIdentity } from '../jobs/CatalogInstallIdentity';
@@ -553,7 +554,7 @@ struct Detail {
     const release = this.currentRelease();
     if (release === undefined) return '选择版本';
     return (release.prerelease ? '预览版 · ' : '') +
-      (release.name.length > 0 ? release.name : release.tag) +
+      displayVersion(release.name.length > 0 ? release.name : release.tag, this.app.displayName) +
       (this.app.secondaryRepo.trim() ? ' · ' + release.sourceLabel() : '') +
       (release.publishedAt.length >= 10 ? '  ·  ' + release.publishedAt.substring(0, 10) : '');
   }
@@ -561,7 +562,7 @@ struct Detail {
   private releaseOptions(): SelectOption[] {
     const options = this.releases.map((release: ReleaseInfo) => {
       const label = (release.prerelease ? '预览版 · ' : '') +
-        (release.name.length > 0 ? release.name : release.tag) +
+        displayVersion(release.name.length > 0 ? release.name : release.tag, this.app.displayName) +
         (this.app.secondaryRepo.trim() ? ' · ' + release.sourceLabel() : '') +
         (release.publishedAt.length >= 10 ? '  ·  ' + release.publishedAt.substring(0, 10) : '');
       return { value: label } as SelectOption;
@@ -1222,11 +1223,11 @@ struct Detail {
                   .width('100%').padding({ top: 8, bottom: 12 })
               }
               if (this.currentRelease()) {
+                // 独立选择框与更新说明卡片同宽，主题由 StoreSelect 统一处理。
+                StoreSelect({ options: this.releaseOptions(), selectedIndex: this.selectedReleaseIndex,
+                  selectedValue: this.currentReleaseLabel(), controlId: 'release-history-select',
+                  action: (index: number) => this.selectRelease(index) }).width('100%')
                 Column({ space: 11 }) {
-                  // 版本下拉全宽：发布时间并进下拉标签，收起时也能看到
-                  StoreSelect({ options: this.releaseOptions(), selectedIndex: this.selectedReleaseIndex,
-                    selectedValue: this.currentReleaseLabel(), controlId: 'release-history-select',
-                    action: (index: number) => this.selectRelease(index) })
                   if (this.currentRelease()!.notes.length > 0) {
                     Text(this.displayNotes(this.currentRelease()!.notes, this.currentRelease()!.name))
                       .fontSize(11).fontColor(this.colors().textBody)

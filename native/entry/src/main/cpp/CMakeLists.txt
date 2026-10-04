@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.12)
-project(qingqi_hap_core LANGUAGES CXX)
+project(qingqi_hap_core LANGUAGES C CXX)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/archive" "${CMAKE_CURRENT_BINARY_DIR}/archive-codecs")
 
 find_program(QINGQI_CARGO cargo PATHS /opt/homebrew/opt/rustup/bin REQUIRED)
 get_filename_component(QINGQI_CARGO_DIR "${QINGQI_CARGO}" DIRECTORY)
@@ -23,9 +24,10 @@ add_custom_target(qingqi_rust_signer
 
 add_library(hap_core SHARED
   hap_core/zip_reader.cpp
+  hap_core/install_archive.cpp
   hap_core/signing_block.cpp
   hap_core/napi_bridge.cpp)
 add_dependencies(hap_core qingqi_rust_signer)
 target_compile_features(hap_core PRIVATE cxx_std_17)
 target_compile_options(hap_core PRIVATE -Wall -Wextra)
-target_link_libraries(hap_core PRIVATE "${QINGQI_RUST_LIB}" libace_napi.z.so z)
+target_link_libraries(hap_core PRIVATE "${QINGQI_RUST_LIB}" libace_napi.z.so z archive_static)

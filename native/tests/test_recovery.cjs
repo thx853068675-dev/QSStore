@@ -16,6 +16,8 @@ function load(file, mocks = {}, globals = {}) {
   }).outputText;
   vm.runInNewContext(code, { exports, require: n => mocks[n] || (n === './InstallTaskState' ?
     load('jobs/InstallTaskState.ets', { './InstallJob': load('jobs/InstallJob.ets') }) :
+    n === './ServiceFailure' ? load('data/ServiceFailure.ets') :
+    n === '../jobs/InstallJob' ? load('jobs/InstallJob.ets') :
     n === './JobCancellation' ? load('jobs/JobCancellation.ets') :
     n === './BackgroundInstallTask' ? load('jobs/BackgroundInstallTask.ets') : {}),
     setTimeout, clearTimeout, console, AppStorage: { get: () => 0, setOrCreate() {} }, ...globals });
@@ -60,7 +62,7 @@ async function fixture({ expiry = 1, backup = true, key = true,
       state.backup = { certId, privateKeyPem: pem, revision: 1 }; }
   }
   class AgcClient {
-    async certificates() { return state.rows; }
+    async certificates() { if(state.listError)throw state.listError;return state.rows; }
     async certificateUrl(id) { return id; }
     async download(id) { if (state.downloadError) throw Error('offline'); return id; }
     async createCertificate(_csr, name) {
@@ -496,4 +498,42 @@ test('a failed shared recovery is released so the same process can retry', async
   f.state.cloudError = false;
   assert.equal((await f.R.ensureForInstall(f.context, f.account)).certId, '100');
   assert.equal(f.state.creates, 0);
+});
+
+test('a remotely deleted cached certificate is automatically replaced with the original private key',async()=>{
+ const f=await fixture({expiry:4102444800});f.state.rows=[];f.state.cloudError=true;
+ assert.equal((await f.R.load(f.context,f.account)).certId,'100');
+ const identity=await f.R.recoverRejectedCertificate(f.context,f.account,'100');
+ assert.equal(identity.certId,'102');assert.equal(f.files.get(f.keyPath),KEY);
+ assert.equal(f.state.generated,0);assert.equal(f.state.creates,1);assert.equal(f.state.cloudReads,0);
+ assert.equal((await f.R.load(f.context,f.account)).certId,'102');
+});
+test('missing certificate recovery reuses a matching surviving certificate before applying for one',async()=>{
+ const f=await fixture({expiry:4102444800});
+ f.state.rows=[{id:'101',certType:1,expireTime:4102444800,certObjectId:'cert101'}];
+ const identity=await f.R.recoverRejectedCertificate(f.context,f.account,'100');
+ assert.equal(identity.certId,'101');assert.equal(f.state.creates,0);assert.equal(f.state.generated,0);
+ assert.equal(f.files.get(f.keyPath),KEY);
+});
+test('simultaneous missing certificate recoveries share one replacement',async()=>{
+ const f=await fixture({expiry:4102444800});f.state.rows=[];
+ const rows=await Promise.all([1,2,3].map(()=>f.R.recoverRejectedCertificate(f.context,f.account,'100')));
+ assert.ok(rows.every(r=>r.certId==='102'));assert.equal(f.state.creates,1);assert.equal(f.state.generated,0);
+ const again=await f.R.recoverRejectedCertificate(f.context,f.account,'100');
+ assert.equal(again.certId,'102');assert.equal(f.state.creates,1);
+});
+test('a contradictory AGC list never allocates a replacement or overwrites the key',async()=>{
+ const f=await fixture({expiry:4102444800});
+ await assert.rejects(f.R.recoverRejectedCertificate(f.context,f.account,'100'),e=>e.failureKind==='transient');
+ assert.equal(f.state.creates,0);assert.equal(f.state.generated,0);assert.equal(f.files.get(f.keyPath),KEY);
+});
+test('recovery preserves network and certificate-quota classifications without losing material',async()=>{
+ const {ServiceFailure}=load('data/ServiceFailure.ets');
+ for(const field of ['listError','createError']){
+  const f=await fixture({expiry:4102444800});f.state.rows=[];
+  const kind=field==='listError'?'network':'certificate_limit';
+  f.state[field]=new ServiceFailure(kind,'temporary failure',999);
+  await assert.rejects(f.R.recoverRejectedCertificate(f.context,f.account,'100'),e=>e.failureKind===kind);
+  assert.equal(f.state.creates,0);assert.equal(f.state.generated,0);assert.equal(f.files.get(f.keyPath),KEY);
+ }
 });

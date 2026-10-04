@@ -10,6 +10,10 @@ const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/data/
 const code = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
 }).outputText;
+const rejectionExports={};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/data/CertificateRejection.ets'),'utf8'),{
+ compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,{
+ exports:rejectionExports,require:()=>({FailureKind:{NETWORK:'network',ACCOUNT:'account'}})});
 function fixture() {
   const f = { now: 1800000000000, files: new Map(), reads: 0, posts: [], rows: [],
     deviceId: 'device-1', error: '', errorStatus: 0, omitAcl: false, releases: [], recovery: 0, recoveryCalls: 0, limited: false, limits: 0, managedCalls: 0, managedWorks: false };
@@ -20,12 +24,12 @@ function fixture() {
   class AgcClient {
     async devices() { f.reads++; return [{ id: f.deviceId, udid: f.udid }]; }
     async registerDevice() { throw Error('already registered'); }
-    async createProfile(name, _cert, ids, acls, bundle) {
-      f.posts.push({ name, ids: [...ids], acls: [...acls], bundle });
+    async createProfile(name, certId, ids, acls, bundle) {
+      f.posts.push({ name, certId, ids: [...ids], acls: [...acls], bundle });
       if (f.error) { const error = Error(f.error); error.status = f.errorStatus; throw error; }
       if (ids[0] !== f.deviceId) throw Error('device not exist');
       return { id: f.noReceipt ? '' : String(f.posts.length), downloadUrl: JSON.stringify({ type: 'debug', 'bundle-info': { 'bundle-name': bundle },
-        validity: { 'not-before': f.now / 1000 - 60, 'not-after': f.responseExpiry ?? f.now / 1000 + 86400 },
+        validity: { 'not-before': f.responseNotBefore ?? f.now / 1000 - 60, 'not-after': f.responseExpiry ?? f.now / 1000 + 86400 },
         'debug-info': { 'device-ids': [f.udid] },
         acls: { 'allowed-acls': f.omitAcl ? [] : [...acls] } }) };
     }
@@ -34,10 +38,12 @@ function fixture() {
   const exports = {};
   vm.runInNewContext(code, { exports, Error, Date: class extends Date { static now() { return f.now; } },
     require: name => ({
+      './CertificateRejection':rejectionExports,
       './AgcManagedProfile': { AgcManagedProfile: { automaticLimited: () => f.limited,
         rememberLimit: () => { f.limited = true; f.limits++; },
-        obtain: async (_agc, _account, _cert, _ids, acls, bundle, p, valid) => {
+        obtain: async (_agc, _account, _cert, _ids, acls, bundle, p, valid, _udid, renewalRequest) => {
           f.managedCalls++;
+          (f.managedRequests ??= []).push(renewalRequest);
           if (!f.managedWorks) { const e = Error('最近 30 天最多 150 次；删除授权不会恢复次数'); e.status = 205389938; throw e; }
           f.files.set(p, JSON.stringify({ type: 'debug', 'bundle-info': { 'bundle-name': bundle },
             validity: { 'not-before': f.now/1000-60, 'not-after': f.now/1000+86400 },
@@ -102,8 +108,8 @@ test('a deleted registration is refreshed and only its replacement ID is retried
 test('a certificate error is not turned into repeated Profile creation with unchanged device IDs', async () => {
   const f = fixture(); await f.ensure('com.example.first'); f.error = 'cert not exist';
   await assert.rejects(() => f.ensure('com.example.second'), /cert not exist/);
-  assert.equal(f.posts.length, 2); assert.equal(f.reads, 2);
-  f.error = ''; await f.ensure('com.example.third'); assert.equal(f.reads, 3);
+  assert.equal(f.posts.length, 2); assert.equal(f.reads, 1);
+  f.error = ''; await f.ensure('com.example.third'); assert.equal(f.reads, 2);
 });
 test('cached device registration never bypasses the returned Profile ACL validation', async () => {
   const f = fixture(); await f.ensure('com.example.first'); f.omitAcl = true;
@@ -170,6 +176,68 @@ test('a newer verified local Profile satisfies a new renewal request without ano
   assert.equal(newer, retry, 'renewal journals reuse the same immutable material');
   assert.equal(f.files.get(newer), f.files.get(retry));
   assert.equal(f.posts.length, 2);
+});
+test('a Profile past half its validity is replaced for renewal while retaining the same certificate and old bytes', async () => {
+  const f = fixture(), bundle = 'com.example.first', old = await f.ensure(bundle);
+  const bytes = f.files.get(old);
+  f.now += 13 * 3600000;
+  const request = f.refresh('halfpassed', f.now / 1000 + 3600);
+  const renewed = await f.ensure(bundle, [], request);
+  assert.notEqual(renewed, old);
+  assert.ok(f.profile.profileExpiry(renewed) > f.profile.profileExpiry(old));
+  assert.equal(f.files.get(old), bytes);
+  assert.deepEqual(f.posts.map(row => row.certId), ['123', '123']);
+  assert.equal(await f.ensure(bundle, [], request), renewed);
+  assert.equal(f.posts.length, 2, 'retry reuses the verified fresh authorization');
+});
+test('halfway is measured from signed validity, with the exact midpoint requiring a fresh renewal', async () => {
+  const f = fixture(), bundle = 'com.example.first', old = await f.ensure(bundle);
+  const validity = JSON.parse(f.files.get(old)).validity;
+  const midpoint = (validity['not-before'] + validity['not-after']) / 2;
+  f.now = (midpoint - 1) * 1000;
+  assert.equal(await f.ensure(bundle, [], f.refresh('beforehalf', f.now / 1000 + 3600)), old);
+  assert.equal(f.posts.length, 1);
+  f.now = midpoint * 1000;
+  assert.notEqual(await f.ensure(bundle, [], f.refresh('athalf', f.now / 1000 + 3600)), old);
+  assert.equal(f.posts.length, 2);
+});
+test('ordinary install continues reusing an aged valid Profile when cloud quota is exhausted', async () => {
+  const f = fixture(), bundle = 'com.example.first', old = await f.ensure(bundle);
+  f.now += 13 * 3600000; f.error = 'Sign ide test provision number exceeds limit.';
+  assert.equal(await f.ensure(bundle), old);
+  assert.equal(f.posts.length, 1);
+  assert.equal(f.managedCalls, 0);
+});
+test('a returned aged authorization is rejected for renewal without damaging the installed material', async () => {
+  const f = fixture(), bundle = 'com.example.first', old = await f.ensure(bundle);
+  const bytes = f.files.get(old), validity = JSON.parse(bytes).validity;
+  f.now += 13 * 3600000;
+  f.responseNotBefore = validity['not-before']; f.responseExpiry = validity['not-after'];
+  await assert.rejects(() => f.ensure(bundle, [], f.refresh('agedresponse', f.now / 1000 + 3600)), /已经过半/);
+  assert.equal(f.files.get(old), bytes);
+  assert.equal(f.posts.length, 2);
+  assert.deepEqual(f.releases, ['1', '2']);
+  assert.equal([...f.files.keys()].some(p => p.endsWith('.part')), false);
+});
+test('aged renewal at the automatic quota limit passes its stable request to the managed Profile path', async () => {
+  const f = fixture(), bundle = 'com.example.first', old = await f.ensure(bundle);
+  f.now += 13 * 3600000;
+  f.error = 'automatic limit'; f.errorStatus = 205389938; f.managedWorks = true;
+  const request = f.refresh('halfmanaged', f.now / 1000 + 3600);
+  const renewed = await f.ensure(bundle, [], request);
+  assert.notEqual(renewed, old);
+  assert.deepEqual(f.managedRequests, ['halfmanaged']);
+  assert.equal(await f.ensure(bundle, [], request), renewed);
+  assert.equal(f.managedCalls, 1); assert.equal(f.posts.length, 2);
+});
+test('missing or malformed issuance time is never treated as a young renewal authorization', async () => {
+  for (const notBefore of [undefined, 'invalid', Infinity, 0]) {
+    const f = fixture(), bundle = 'com.example.first', old = await f.ensure(bundle);
+    const data = JSON.parse(f.files.get(old));
+    data.validity['not-before'] = notBefore;
+    f.files.set(old, JSON.stringify(data));
+    assert.equal(f.profile.reusableForRenewal(old, f.identity.certExpiry, f.now / 1000 + 3600), false);
+  }
 });
 test('a rejected returned Profile still releases its created cloud record', async () => {
   const f = fixture(); f.omitAcl = true;

@@ -9,7 +9,7 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
 function fixture() {
   const storage = new Map(), handlers = new Map(), state = {
     top: 144, cutout: 100, density: 3, unavailable: false, loaded: false, uiReads: 0,
-    events: [], failFullscreen: false, enabledBars: {}
+    events: [], backgroundWrites: 0, storageWrites: 0, failFullscreen: false, enabledBars: {}
   };
   const win = {
     on: (name, callback) => handlers.set(name, callback),
@@ -26,7 +26,7 @@ function fixture() {
       // Restoring system navigation can restore its default opaque background.
       if(enabled)state.bars={navigationBarColor:'#FFFFFFFF'};
     },
-    setWindowBackgroundColor: color => { state.backgroundColor = color; },
+    setWindowBackgroundColor: color => { state.backgroundWrites++; state.backgroundColor = color; },
     setWindowSystemBarProperties: async bars => { state.events.push('bars'); state.bars = bars; },
     setWindowLayoutFullScreen: async enabled => {
       state.fullscreen = enabled;
@@ -45,12 +45,12 @@ function fixture() {
   vm.runInNewContext(ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText, {
-    exports, AppStorage: { setOrCreate: (key, value) => storage.set(key, value) },
+    exports, AppStorage: { get: key => storage.get(key), setOrCreate: (key, value) => { state.storageWrites++; storage.set(key, value); } },
     require: name => name === '../jobs/BackgroundInstallTask' ? {
       BackgroundInstallTask: { configure: () => {}, onForeground: () => {} }
     } : name === '../jobs/WirelessDebugLifecycle' ? {
       WirelessDebugLifecycle: { configure() {}, onForeground() {}, onBackground() {} }
-    } : name === '@kit.AbilityKit' ? {
+    } : name === '../jobs/ExternalInstallOpen' ? { ExternalInstallOpen: { receive: () => false, openPending() {}, suspendRouting() {} } } : name === '@kit.AbilityKit' ? {
       UIAbility: class {}, ConfigurationConstant: { ColorMode: { COLOR_MODE_DARK: 1 } }
     } : {
       window: { AvoidAreaType: { TYPE_SYSTEM: 0, TYPE_CUTOUT: 1 } },
@@ -145,4 +145,12 @@ test('returning from settings retains the gesture indicator and clears the backg
   assert.equal(f.state.enabledBars.navigation, true);
   assert.equal(f.state.enabledBars.navigationIndicator, true);
   assert.deepEqual(f.state.events.slice(-3), ['navigation', 'navigationIndicator', 'bars']);
+});
+
+test('warm foreground keeps the same window background and avoids unchanged theme/inset notifications', async () => {
+  const f = fixture(); f.ability.onWindowStageCreate(f.stage); await new Promise(setImmediate);
+  const storageWrites = f.state.storageWrites;
+  for (let i = 0; i < 3; i++) { f.ability.onForeground(); await new Promise(setImmediate); }
+  assert.equal(f.state.backgroundWrites, 1); assert.equal(f.state.storageWrites, storageWrites);
+  assert.equal(f.state.enabledBars.navigation, true); assert.equal(f.state.bars.navigationBarColor, '#00000000');
 });

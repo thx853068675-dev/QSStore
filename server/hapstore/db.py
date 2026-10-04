@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS release (
     prerelease    INTEGER NOT NULL DEFAULT 0,
     html_url      TEXT NOT NULL DEFAULT '',
     etag          TEXT NOT NULL DEFAULT '',
+    github_downloads INTEGER,                    -- NULL means not collected yet
     fetched_at    INTEGER NOT NULL DEFAULT 0,
     UNIQUE(app_id, tag)
 );
@@ -211,6 +212,37 @@ CREATE TABLE IF NOT EXISTS refresh_task (
 CREATE TABLE IF NOT EXISTS github_http_cache (
  cache_key TEXT PRIMARY KEY, etag TEXT NOT NULL, payload BLOB NOT NULL, updated_at INTEGER NOT NULL
 );
+-- A source repository is stored once, even when several listings reference it.
+-- Its raw stars/releases remain independent of the listing's presentation.
+CREATE TABLE IF NOT EXISTS app_source (
+ app_id INTEGER PRIMARY KEY REFERENCES app(id) ON DELETE CASCADE,
+ source_app_id INTEGER NOT NULL REFERENCES app(id) ON DELETE CASCADE,
+ bundle_names_json TEXT NOT NULL,
+ updated_at INTEGER NOT NULL,
+ CHECK(app_id<>source_app_id)
+);
+CREATE INDEX IF NOT EXISTS idx_app_source_repo ON app_source(source_app_id);
+CREATE VIEW IF NOT EXISTS catalog_repository AS
+ SELECT id AS app_id,id AS repository_id,'primary' AS source_kind FROM app
+ UNION ALL
+ SELECT app_id,source_app_id,'secondary' FROM app_source;
+CREATE VIEW IF NOT EXISTS catalog_asset AS
+ SELECT a.*,m.app_id AS catalog_app_id,m.source_kind,p.repo_full_name AS source_repo
+ FROM catalog_repository m JOIN release r ON r.app_id=m.repository_id
+ JOIN app p ON p.id=m.repository_id JOIN asset a ON a.release_id=r.id
+ WHERE m.source_kind='primary' OR (
+   a.bundle_name<>'' AND a.version_code>0 AND EXISTS (
+     SELECT 1 FROM app_source s,json_each(s.bundle_names_json) b
+     WHERE s.app_id=m.app_id AND b.value=a.bundle_name)
+   AND EXISTS (SELECT 1 FROM release pr JOIN asset pa ON pa.release_id=pr.id
+     WHERE pr.app_id=m.app_id AND pa.bundle_name=a.bundle_name));
+CREATE VIEW IF NOT EXISTS catalog_release AS
+ SELECT r.id,m.app_id,r.tag,r.name,r.body,r.published_at,r.prerelease,r.html_url,
+   r.github_downloads,r.fetched_at,m.source_kind,p.repo_full_name AS source_repo
+ FROM catalog_repository m JOIN release r ON r.app_id=m.repository_id
+ JOIN app p ON p.id=m.repository_id
+ WHERE m.source_kind='primary' OR EXISTS (SELECT 1 FROM catalog_asset a
+   WHERE a.catalog_app_id=m.app_id AND a.release_id=r.id);
 """
 
 _local = threading.local()
@@ -238,6 +270,8 @@ def init_db() -> None:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         conn = connect()
         conn.executescript(SCHEMA)
+        if 'github_downloads' not in {row['name'] for row in conn.execute('PRAGMA table_info(release)')}:
+            conn.execute('ALTER TABLE release ADD COLUMN github_downloads INTEGER')
         if 'prepared_json' not in {row['name'] for row in conn.execute('PRAGMA table_info(submit_draft)')}:
             conn.execute("ALTER TABLE submit_draft ADD COLUMN prepared_json TEXT NOT NULL DEFAULT '{}'")
         if 'completed_app_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(submit_draft)')}:
@@ -290,6 +324,8 @@ def init_db() -> None:
 
 
 def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True, related: dict | None = None) -> dict[str, Any]:
+    if related is None and with_counts:
+        related = _app_related([row])
     icon = (related['icons'].get(row['id']) if related is not None else
             connect().execute("SELECT digest FROM app_icon WHERE app_id=?", (row['id'],)).fetchone())
     app = {
@@ -305,6 +341,7 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True, related: dict | N
         "category": row["category"],
         "tags": json.loads(row["tags_json"] or "[]"),
         "stars": row["stars"],
+        "github_downloads": None,
         "license": row["license"],
         "homepage": row["homepage"],
         "verified": bool(row["verified"]),
@@ -314,52 +351,58 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True, related: dict | N
         "synced_at": row["synced_at"],
         "sync_error": row["sync_error"],
     }
+    source = related['sources'].get(row['id']) if related is not None else None
+    app['secondary_repo'] = source['repo'] if source else ''
+    if source:
+        app['stars'] += source['stars']
     publisher = (related['publishers'].get(row['id']) if related is not None else connect().execute(
         "SELECT display_name FROM publisher WHERE app_id=?", (row["id"],)
     ).fetchone())
     app["publisher_name"] = publisher["display_name"] if publisher else ""
     if with_counts and related is not None:
         app['releases_count'] = related['counts'].get(row['id'], 0)
+        app['github_downloads'] = related['github_downloads'].get(row['id'])
         app['latest'] = related['latest'].get(row['id'])
         app['latest_assets'] = related['assets'].get(row['id'], [])
         app['latest_asset'] = app['latest_assets'][0] if app['latest_assets'] else None
-    elif with_counts:
-        c = connect()
-        n = c.execute(
-            "SELECT COUNT(*) AS n FROM release WHERE app_id=? AND prerelease=0", (row["id"],)
-        ).fetchone()["n"]
-        latest = c.execute(
-            """SELECT tag, name, published_at, prerelease FROM release
-               WHERE app_id=? AND prerelease=0 ORDER BY published_at DESC LIMIT 1""",
-            (row["id"],),
-        ).fetchone()
-        app["releases_count"] = n
-        app["latest"] = dict(latest) if latest else None
-        app["latest_assets"] = latest_assets(c, row["id"])
-        app["latest_asset"] = app["latest_assets"][0] if app["latest_assets"] else None
     return app
 
 
 def _app_related(rows) -> dict:
-    out = {name: {} for name in ('icons', 'publishers', 'counts', 'latest', 'assets')}
+    out = {name: {} for name in ('icons', 'publishers', 'counts', 'github_downloads', 'latest', 'assets', 'sources')}
     ids = [row['id'] for row in rows]
     if not ids:
         return out
     c, marks = connect(), ','.join('?' for _ in ids)
     out['icons'] = {r['app_id']: dict(r) for r in c.execute(f'SELECT app_id,digest FROM app_icon WHERE app_id IN ({marks})', ids)}
     out['publishers'] = {r['app_id']: dict(r) for r in c.execute(f'SELECT app_id,display_name FROM publisher WHERE app_id IN ({marks})', ids)}
-    out['counts'] = {r['app_id']: r['n'] for r in c.execute(f'SELECT app_id,count(*) AS n FROM release WHERE app_id IN ({marks}) AND prerelease=0 GROUP BY app_id', ids)}
+    out['sources'] = {r['app_id']: dict(r) for r in c.execute(f'''SELECT s.app_id,
+        p.repo_full_name AS repo,p.stars FROM app_source s JOIN app p ON p.id=s.source_app_id
+        WHERE s.app_id IN ({marks})''', ids)}
+    for row in c.execute(f"""SELECT app_id,SUM(prerelease=0) AS n
+        FROM catalog_release WHERE app_id IN ({marks}) GROUP BY app_id""", ids):
+        out['counts'][row['app_id']] = row['n']
+    # Downloads describe all GitHub Release attachments in each repository,
+    # including unrelated attachments; they are not store install counters.
+    for row in c.execute(f'''SELECT m.app_id,
+        CASE WHEN COUNT(r.github_downloads)=COUNT(*) AND COUNT(*)>0
+        THEN SUM(r.github_downloads) END AS github_downloads
+        FROM catalog_repository m JOIN release r ON r.app_id=m.repository_id
+        WHERE m.app_id IN ({marks}) GROUP BY m.app_id''', ids):
+        out['github_downloads'][row['app_id']] = row['github_downloads']
     for row in c.execute(f"""WITH ranked AS (
-        SELECT app_id,tag,name,published_at,prerelease,
-        row_number() OVER (PARTITION BY app_id ORDER BY published_at DESC) AS rank
-        FROM release WHERE app_id IN ({marks}) AND prerelease=0)
+        SELECT app_id,tag,name,published_at,prerelease,source_kind,source_repo,
+        row_number() OVER (PARTITION BY app_id ORDER BY published_at DESC,id DESC) AS rank
+        FROM catalog_release WHERE app_id IN ({marks}) AND prerelease=0)
         SELECT * FROM ranked WHERE rank=1""", ids):
-        out['latest'][row['app_id']] = {name: row[name] for name in ('tag','name','published_at','prerelease')}
+        out['latest'][row['app_id']] = {name: row[name] for name in ('tag','name','published_at','prerelease','source_kind','source_repo')}
     for row in c.execute(f"""WITH ranked AS (
-        SELECT r.app_id,r.id,row_number() OVER (PARTITION BY r.app_id ORDER BY r.published_at DESC,a.size DESC) AS rank
-        FROM release r JOIN asset a ON a.release_id=r.id
+        SELECT r.app_id,a.bundle_name,r.id,dense_rank() OVER (
+          PARTITION BY r.app_id,a.bundle_name ORDER BY r.published_at DESC,r.id DESC) AS rank
+        FROM catalog_release r JOIN catalog_asset a ON a.release_id=r.id AND a.catalog_app_id=r.app_id
         WHERE r.app_id IN ({marks}) AND r.prerelease=0 AND a.bundle_name<>'')
-        SELECT a.*,r.app_id FROM asset a JOIN ranked r ON r.id=a.release_id
+        SELECT DISTINCT a.*,r.app_id FROM catalog_asset a JOIN ranked r
+        ON r.id=a.release_id AND r.app_id=a.catalog_app_id AND r.bundle_name=a.bundle_name
         WHERE r.rank=1 AND a.bundle_name<>'' ORDER BY a.size DESC,a.name""", ids):
         out['assets'].setdefault(row['app_id'], []).append(_row_to_asset(row))
     return out
@@ -367,15 +410,7 @@ def _app_related(rows) -> dict:
 
 def latest_assets(c: sqlite3.Connection, app_id: int) -> list[dict[str, Any]]:
     """All selected packages in the newest installable stable release."""
-    rows = c.execute(
-        """SELECT a.* FROM asset a WHERE a.release_id=(
-           SELECT r.id FROM release r JOIN asset first ON first.release_id=r.id
-           WHERE r.app_id=? AND r.prerelease=0 AND first.bundle_name <> ''
-           ORDER BY r.published_at DESC, first.size DESC LIMIT 1)
-           AND a.bundle_name <> '' ORDER BY a.size DESC, a.name""",
-        (app_id,),
-    ).fetchall()
-    return [_row_to_asset(row) for row in rows]
+    return _app_related([{'id': app_id}])['assets'].get(app_id, [])
 
 
 def latest_asset(c: sqlite3.Connection, app_id: int) -> dict[str, Any] | None:
@@ -407,11 +442,18 @@ def list_apps(
         params.append(1 if featured else 0)
 
     order = {
+        # Rank the whole catalog before LIMIT/OFFSET, so later pages cannot
+        # introduce a featured card above cards the user has already read.
+        "discover": "CASE WHEN stars>100 THEN 0 ELSE 1 END ASC, "
+                    "CASE WHEN stars>100 THEN stars ELSE 0 END DESC, updated_at DESC, id DESC",
         "updated": "updated_at DESC",
         "stars": "stars DESC",
         "name": "display_name COLLATE NOCASE ASC",
         "new": "created_at DESC",
     }.get(sort, "updated_at DESC")
+    # Ranking and displayed counts must agree before pagination.
+    total_stars = "(stars+COALESCE((SELECT p.stars FROM app_source s JOIN app p ON p.id=s.source_app_id WHERE s.app_id=app.id),0))"
+    order = order.replace('stars', total_stars)
 
     clause = " AND ".join(where)
     total = c.execute(f"SELECT COUNT(*) AS n FROM app WHERE {clause}", params).fetchone()["n"]
@@ -462,6 +504,8 @@ def hide_published_app(app_id: int, account_id: str) -> bool:
              SELECT 1 FROM publisher WHERE publisher.app_id=app.id
              AND publisher.account_id=?)""", (int(time.time()), app_id, account_id)
     )
+    if cur.rowcount == 1:
+        c.execute('DELETE FROM app_source WHERE app_id=?', (app_id,))
     c.commit()
     return cur.rowcount == 1
 
@@ -495,6 +539,74 @@ def configure_published_app(app_id: int, account_id: str, category: str) -> bool
     return True
 
 
+def primary_bundles(app_id: int) -> set[str]:
+    return {r[0] for r in connect().execute('''SELECT DISTINCT a.bundle_name
+        FROM release r JOIN asset a ON a.release_id=r.id
+        WHERE r.app_id=? AND a.bundle_name<>'' AND a.version_code>0''', (app_id,))}
+
+
+def configure_app_source(app_id: int, account_id: str, category: str,
+                         draft_token: str = '', remove: bool = False) -> None:
+    """Publish a verified association and its category in one short transaction.
+
+    Network/package parsing happened in the durable draft worker. Recheck
+    ownership, package identity and draft expiry here, after that work completed.
+    """
+    c, now = connect(), int(time.time())
+    with c:
+        c.execute('BEGIN IMMEDIATE')
+        parent = c.execute('''SELECT a.* FROM app a JOIN publisher p ON p.app_id=a.id
+            WHERE a.id=? AND a.status='published' AND p.account_id=?''', (app_id, account_id)).fetchone()
+        if not parent:
+            raise ValueError('PUBLISHER_MISMATCH')
+        if draft_token:
+            draft = get_submit_draft(draft_token, account_id)
+            if not draft or draft['inspection_state'] != 'ready':
+                raise ValueError('SOURCE_DRAFT_NOT_READY')
+            if draft['repo'].lower() == parent['repo_full_name'].lower():
+                raise ValueError('SOURCE_IS_PRIMARY')
+            allowed = primary_bundles(app_id)
+            prepared = json.loads(draft['prepared_json'])
+            snapshot = prepared.get('snapshot')
+            if not snapshot:
+                raise ValueError('SOURCE_DRAFT_NOT_READY')
+            verified = {a['bundle_name'] for r in snapshot['releases'] for a in r.get('assets', [])
+                if a.get('bundle_name') in allowed and a.get('version_code', 0)>0 and
+                len(a.get('sha256', '')) == 64}
+            # At least one offered package must be verified; not just an older
+            # matching package buried somewhere in the repository's history.
+            verified &= {a.get('bundle_name') for a in draft['choices']}
+            if not verified:
+                raise ValueError('SOURCE_BUNDLE_MISMATCH')
+            source = c.execute('SELECT * FROM app WHERE repo_full_name=? COLLATE NOCASE',
+                               (draft['repo'],)).fetchone()
+            if source and source['status'] == 'published':
+                # Never change another listing's selection, owner, name or icon.
+                if not verified.intersection(primary_bundles(source['id'])):
+                    raise ValueError('SOURCE_BUNDLE_MISMATCH')
+                source_id = source['id']
+            else:
+                fetched = snapshot.get('fetched_at', now)
+                if source and source['status'] == 'source' and source['synced_at'] > fetched:
+                    source_id = source['id']
+                else:
+                    fields = dict(snapshot['metadata'], status='source', synced_at=fetched)
+                    source_id = _upsert_app(c, draft['repo'], fields)
+                    _replace_releases(c, source_id, snapshot['releases'])
+                # A dormant prior listing's selection must not filter this raw
+                # repository. It will be set again if somebody relists it.
+                c.execute('DELETE FROM app_selection WHERE app_id=?', (source_id,))
+                c.execute("UPDATE catalog_task SET status='cancelled' WHERE app_id=?", (source_id,))
+            c.execute('''INSERT INTO app_source(app_id,source_app_id,bundle_names_json,updated_at)
+                VALUES (?,?,?,?) ON CONFLICT(app_id) DO UPDATE SET
+                source_app_id=excluded.source_app_id,bundle_names_json=excluded.bundle_names_json,
+                updated_at=excluded.updated_at''', (app_id, source_id, json.dumps(sorted(verified)), now))
+        elif remove:
+            c.execute('DELETE FROM app_source WHERE app_id=?', (app_id,))
+        c.execute('UPDATE app SET category=?,updated_at=? WHERE id=?', (category, now, app_id))
+        c.execute('INSERT OR REPLACE INTO app_category(app_id,category) VALUES (?,?)', (app_id, category))
+
+
 def list_releases(app_id: int, *, page: int = 1, page_size: int = 20,
                   include_prerelease: bool = False,
                   prerelease_only: bool = False) -> dict[str, Any]:
@@ -507,19 +619,19 @@ def list_releases(app_id: int, *, page: int = 1, page_size: int = 20,
         where.append("prerelease=0")
     clause = " AND ".join(where)
 
-    total = c.execute(f"SELECT COUNT(*) AS n FROM release WHERE {clause}", params).fetchone()["n"]
+    total = c.execute(f"SELECT COUNT(*) AS n FROM catalog_release WHERE {clause}", params).fetchone()["n"]
     page = max(1, page)
     page_size = max(1, min(50, page_size))
     rows = c.execute(
-        f"""SELECT * FROM release WHERE {clause}
-            ORDER BY published_at DESC LIMIT ? OFFSET ?""",
+        f"""SELECT * FROM catalog_release WHERE {clause}
+            ORDER BY published_at DESC,id DESC LIMIT ? OFFSET ?""",
         params + [page_size, (page - 1) * page_size],
     ).fetchall()
 
     out = []
     for r in rows:
         assets = c.execute(
-            "SELECT * FROM asset WHERE release_id=? ORDER BY name", (r["id"],)
+            "SELECT * FROM catalog_asset WHERE release_id=? AND catalog_app_id=? ORDER BY name", (r["id"], app_id)
         ).fetchall()
         out.append(
             {
@@ -529,6 +641,8 @@ def list_releases(app_id: int, *, page: int = 1, page_size: int = 20,
                 "published_at": r["published_at"],
                 "prerelease": bool(r["prerelease"]),
                 "html_url": r["html_url"],
+                "source_kind": r['source_kind'],
+                "source_repo": r['source_repo'],
                 "assets": [_row_to_asset(a) for a in assets],
             }
         )
@@ -550,15 +664,17 @@ def _row_to_asset(a: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def get_release(app_id: int, tag: str) -> dict[str, Any] | None:
+def get_release(app_id: int, tag: str, source_repo: str = '') -> dict[str, Any] | None:
     c = connect()
     r = c.execute(
-        "SELECT * FROM release WHERE app_id=? AND tag=?", (app_id, tag)
+        """SELECT * FROM catalog_release WHERE app_id=? AND tag=?
+           AND ((?='' AND source_kind='primary') OR source_repo=? COLLATE NOCASE)""",
+        (app_id, tag, source_repo, source_repo)
     ).fetchone()
     if not r:
         return None
     assets = c.execute(
-        "SELECT * FROM asset WHERE release_id=? ORDER BY name", (r["id"],)
+        "SELECT * FROM catalog_asset WHERE release_id=? AND catalog_app_id=? ORDER BY name", (r["id"], app_id)
     ).fetchall()
     return {
         "tag": r["tag"],
@@ -567,6 +683,8 @@ def get_release(app_id: int, tag: str) -> dict[str, Any] | None:
         "published_at": r["published_at"],
         "prerelease": bool(r["prerelease"]),
         "html_url": r["html_url"],
+        "source_kind": r['source_kind'],
+        "source_repo": r['source_repo'],
         "assets": [_row_to_asset(a) for a in assets],
     }
 
@@ -834,7 +952,7 @@ def cached_repository_snapshot(repo: str, max_age_seconds: int) -> dict[str, Any
         return None
     releases = []
     for rel in c.execute("""SELECT * FROM release WHERE app_id=?
-        ORDER BY published_at DESC LIMIT 30""", (row["id"],)):
+        ORDER BY published_at DESC""", (row["id"],)):
         release = dict(rel)
         release["prerelease"] = bool(release["prerelease"])
         release["assets"] = [dict(a) for a in c.execute(
@@ -1047,17 +1165,18 @@ def _replace_releases(c: sqlite3.Connection, app_id: int,
         tags.append(rel["tag"])
         c.execute(
             """INSERT INTO release(app_id, tag, name, body, published_at,
-                                   prerelease, html_url, etag, fetched_at)
-               VALUES (?,?,?,?,?,?,?,?,?)
+                                   prerelease, html_url, etag, fetched_at, github_downloads)
+               VALUES (?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(app_id, tag) DO UPDATE SET
                  name=excluded.name, body=excluded.body,
                  published_at=excluded.published_at,
                  prerelease=excluded.prerelease, html_url=excluded.html_url,
-                 etag=excluded.etag, fetched_at=excluded.fetched_at""",
+                 etag=excluded.etag, fetched_at=excluded.fetched_at,
+                 github_downloads=excluded.github_downloads""",
             (
                 app_id, rel["tag"], rel.get("name", ""), rel.get("body", ""),
                 rel.get("published_at", ""), 1 if rel.get("prerelease") else 0,
-                rel.get("html_url", ""), rel.get("etag", ""), now,
+                rel.get("html_url", ""), rel.get("etag", ""), now, rel.get("github_downloads"),
             ),
         )
         rid = c.execute(
@@ -1134,7 +1253,9 @@ def stale_published_apps(max_age_seconds: int, limit: int = 50) -> list[dict[str
 def apps_needing_sync(limit: int = 50, max_age_seconds: int = 6 * 3600) -> list[dict[str, Any]]:
     cutoff = int(time.time()) - max_age_seconds
     rows = connect().execute(
-        """SELECT * FROM app WHERE status='published' AND synced_at < ?
+        """SELECT * FROM app WHERE (status='published' OR EXISTS (
+            SELECT 1 FROM app_source s JOIN app parent ON parent.id=s.app_id
+            WHERE s.source_app_id=app.id AND parent.status='published')) AND synced_at < ?
            AND NOT EXISTS (SELECT 1 FROM catalog_task t WHERE t.app_id=app.id
                            AND t.status IN ('pending','running'))
            ORDER BY synced_at ASC LIMIT ?""",
@@ -1224,7 +1345,9 @@ def enqueue_refresh(app_id: int, max_age_seconds: int = 60) -> dict[str, Any]:
     with c:
         c.execute('BEGIN IMMEDIATE')
         row = c.execute("SELECT status,synced_at FROM app WHERE id=?", (app_id,)).fetchone()
-        if not row or row['status'] != 'published':
+        linked = c.execute('''SELECT 1 FROM app_source s JOIN app p ON p.id=s.app_id
+            WHERE s.source_app_id=? AND p.status='published' LIMIT 1''', (app_id,)).fetchone()
+        if not row or (row['status'] != 'published' and not linked):
             raise ValueError('APP_NOT_FOUND')
         task = c.execute('SELECT * FROM refresh_task WHERE app_id=?', (app_id,)).fetchone()
         if task and task['status'] in ('pending', 'running'):
@@ -1244,13 +1367,42 @@ def refresh_status(app_id: int) -> dict[str, Any]:
     return dict(row) if row else {'status': 'fresh', 'last_error': ''}
 
 
+def catalog_repository_ids(app_id: int) -> list[int]:
+    return [r[0] for r in connect().execute(
+        'SELECT repository_id FROM catalog_repository WHERE app_id=?', (app_id,))]
+
+
+def catalog_refresh_status(app_id: int) -> dict[str, Any]:
+    states = [refresh_status(id) for id in catalog_repository_ids(app_id)]
+    # The client's refresh polling must wait for both repositories.
+    for status in ('running', 'pending', 'failed'):
+        found = next((s for s in states if s['status'] == status), None)
+        if found:
+            return dict(found, app_id=app_id)
+    return {'app_id': app_id, 'status': 'done', 'last_error': ''}
+
+
+def enqueue_catalog_refresh(app_id: int, max_age_seconds: int = 60) -> dict[str, Any]:
+    states = [enqueue_refresh(id, max_age_seconds) for id in catalog_repository_ids(app_id)]
+    state = catalog_refresh_status(app_id)
+    if all(s['status'] == 'fresh' for s in states):
+        state = {'app_id': app_id, 'status': 'fresh', 'last_error': ''}
+    state['queued'] = any(s['queued'] for s in states)
+    return state
+
+
 def claim_refresh() -> dict[str, Any] | None:
     c, now = connect(), int(time.time())
     with c:
         c.execute('BEGIN IMMEDIATE')
-        c.execute("UPDATE refresh_task SET status='cancelled' WHERE status='pending' AND app_id IN (SELECT id FROM app WHERE status<>'published')")
+        c.execute("""UPDATE refresh_task SET status='cancelled' WHERE status='pending'
+          AND app_id IN (SELECT id FROM app WHERE status<>'published')
+          AND NOT EXISTS (SELECT 1 FROM app_source s JOIN app p ON p.id=s.app_id
+            WHERE s.source_app_id=refresh_task.app_id AND p.status='published')""")
         row = c.execute("""SELECT t.*,a.repo_full_name FROM refresh_task t JOIN app a ON a.id=t.app_id
-          WHERE t.status='pending' AND t.next_attempt<=? AND a.status='published'
+          WHERE t.status='pending' AND t.next_attempt<=? AND (a.status='published' OR EXISTS (
+            SELECT 1 FROM app_source s JOIN app p ON p.id=s.app_id
+            WHERE s.source_app_id=a.id AND p.status='published'))
           AND NOT EXISTS (SELECT 1 FROM catalog_task ct WHERE ct.app_id=t.app_id AND ct.status IN ('pending','running'))
           ORDER BY t.updated_at,t.app_id LIMIT 1""", (now,)).fetchone()
         if row:

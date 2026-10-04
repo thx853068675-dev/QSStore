@@ -11,7 +11,8 @@ REVISION = 1
 MAX_ROW_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 FIELDS = ('bundle_name', 'version_code', 'version_name', 'min_api', 'display_name',
-          '_module_name', '_entry', '_icon_checked', 'archive_entry')
+          '_module_name', '_entry', '_icon_checked', 'archive_entry',
+          '_icon_status_revision', '_icon_retry_at', '_icon_attempts')
 
 
 def key(digest, kind):

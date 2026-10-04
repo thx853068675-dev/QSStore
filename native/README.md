@@ -1,4 +1,4 @@
-# 轻启·安装器原生工程（0.4.50）
+# 轻启·安装器原生工程（0.4.51）
 
 当前客户端使用 ArkTS/ArkUI 与鸿蒙 HDS 材质。Rust 签名器和 HDC 通过 C++ NAPI 静态链接到 `libhap_core.so`；不包含 Flutter 或旧 Go signer。商店数据、评论和上架依赖元数据服务器，下载包直接来自 GitHub 或镜像。
 
@@ -11,7 +11,7 @@
  ohpm install
  rustup target add aarch64-unknown-linux-ohos
 # 在仓库根目录执行
-python3 native/tools/build_unsigned_formal.py --output /tmp/qingqi-installer-0.4.50-unsigned.hap
+python3 native/tools/build_unsigned_formal.py --output /tmp/qingqi-installer-0.4.51-unsigned.hap
 python3 tools/check_local.py --offline --build --output /tmp/qingqi-check
 ```
 

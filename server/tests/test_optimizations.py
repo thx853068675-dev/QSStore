@@ -31,7 +31,7 @@ class OptimizationTest(unittest.TestCase):
         collector._github_cooldown.clear()
         self.temp.cleanup()
 
-    def test_catalog_30_apps_has_seven_queries_and_matches_detail(self):
+    def test_catalog_30_apps_has_constant_queries_and_matches_detail(self):
         for n in range(30):
             id = db.upsert_app(f'owner/app{n}', status='published', display_name=f'App{n}')
             db.set_publisher(id, 'u', '昵称')
@@ -45,7 +45,7 @@ class OptimizationTest(unittest.TestCase):
         result = db.list_apps(page_size=30)
         db.connect().set_trace_callback(None)
         reads = [sql for sql in statements if sql.lstrip().upper().startswith(('SELECT', 'WITH'))]
-        self.assertEqual(len(reads), 7)
+        self.assertEqual(len(reads), 9)
         self.assertEqual(len(result['items']), 30)
         for row in result['items']:
             self.assertEqual(row, db.get_app(row['id']))
@@ -66,6 +66,32 @@ class OptimizationTest(unittest.TestCase):
         self.assertEqual(db.list_reviews(id)['items'][0]['display_name'], '新昵称')
         db.sync_account_profile('u', 'u', '')
         self.assertEqual(db.list_reviews(id)['items'][0]['display_name'], '新昵称')
+
+    def test_discover_ranks_featured_globally_before_page_slicing(self):
+        regular = []
+        for n in range(31):
+            id = db.upsert_app(f'owner/regular{n}', status='published', stars=100 if n == 0 else 0,
+                               display_name=f'App{n}')
+            db.connect().execute('UPDATE app SET updated_at=? WHERE id=?', (1000 + n, id))
+            regular.append(id)
+        featured = []
+        for n, stars in enumerate([101, 2000, 10000]):
+            id = db.upsert_app(f'owner/featured{n}', status='published', stars=stars,
+                               display_name=f'Featured{n}')
+            db.connect().execute('UPDATE app SET updated_at=1 WHERE id=?', (id,))
+            featured.append(id)
+        hidden = db.upsert_app('owner/hidden', status='removed', stars=99999)
+        first = db.list_apps(sort='discover', page=1, page_size=30)
+        second = db.list_apps(sort='discover', page=2, page_size=30)
+        ids = [row['id'] for row in first['items'] + second['items']]
+        self.assertEqual(ids, list(reversed(featured)) + list(reversed(regular)))
+        self.assertNotIn(hidden, ids)
+        self.assertEqual(first['total'], 34)
+        self.assertEqual(len(ids), len(set(ids)))
+        # Search uses the same global order, while explicit updated order stays intact.
+        self.assertEqual([row['id'] for row in db.list_apps(sort='discover', q='Featured')['items']],
+                         list(reversed(featured)))
+        self.assertEqual(db.list_apps(sort='updated')['items'][0]['id'], regular[-1])
 
     def test_selected_zip_packages_share_one_verified_download(self):
         data = pack([('a.hap', hap()), ('b.hap', hap(bundle='com.other.app'))])
@@ -92,6 +118,13 @@ class OptimizationTest(unittest.TestCase):
             db.connect().execute('INSERT INTO artifact_inspection VALUES (?,?,?)',
                 (artifact_cache.key(digest, 'hap'), '[42]', 0))
         self.assertIsNone(artifact_cache.get(digest, 'hap'))
+
+    def test_icon_retry_state_survives_disk_cache_without_losing_verified_metadata(self):
+        row = dict(bundle_name='com.example.large', version_code=42,
+                   _icon_checked=False, _icon_status_revision=1, _icon_retry_at=1900,
+                   _icon_attempts=2)
+        artifact_cache.put('b' * 64, 'hap-range', [row])
+        self.assertEqual(artifact_cache.get('b' * 64, 'hap-range'), [row])
 
     def test_refresh_deduplicates_and_respects_failure_cooldown(self):
         id = db.upsert_app('owner/app', status='published', last_synced=0)

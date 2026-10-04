@@ -15,7 +15,7 @@ class PrepareBody { repo_url: string = ''; }
 class ConfirmBody {
   asset_name: string = ''; draft_token: string = ''; asset_names: string[] = []; category: string = ''; }
 class ReviewBody { stars: number = 0; body: string = ''; }
-class CategoryBody { category: string = ''; }
+class CategoryBody { category: string = ''; source_draft_token: string = ''; remove_secondary: boolean = false; }
 class IdentityBody {
   backup_scope: string = 'certificate';
   cert_id: string = '';
@@ -88,7 +88,12 @@ class PublicResponse {
   bytes: number = 0;
 }
 
-export class StoreClient {
+export interface RenewalCatalog {
+  listReleases(appId: number, page: number, pageSize: number,
+    preview: boolean): Promise<ListPage<ReleaseInfo>>;
+}
+
+export class StoreClient implements RenewalCatalog {
   private static viewedApps: Map<number, CatalogApp> = new Map();
 
   /** 返回页面只合并详情已读取的变化，不重载分页列表、重置滚动和图标。 */
@@ -193,7 +198,8 @@ export class StoreClient {
     return this.requestData(path, http.RequestMethod.GET, account);
   }
 
-  /// ``page`` is 1-based. ``sort`` is one of updated/stars/name/new.
+  /// ``page`` is 1-based. ``discover`` ranks featured apps before pagination.
+  /// Other orders: updated/stars/name/new.
   /// ``query`` 走服务端搜索：只过滤本地已加载的那一页会漏掉没加载的应用。
   async listApps(page: number = 1, pageSize: number = 30,
     sort: string = 'updated', query: string = ''): Promise<ListPage<CatalogApp>> {
@@ -371,9 +377,20 @@ export class StoreClient {
     return (data['items'] as string[] | undefined) ?? [];
   }
 
-  async configureMyApp(id: number, category: string, account: DeveloperAccount): Promise<CatalogApp> {
+  async prepareAppSource(id: number, repoUrl: string, account: DeveloperAccount): Promise<SubmitDraft> {
+    const body = new PrepareBody();
+    body.repo_url = repoUrl;
+    const data = await this.requestData('/api/v1/me/apps/' + id + '/source/prepare',
+      http.RequestMethod.POST, account, body);
+    return SubmitDraft.fromJson(data);
+  }
+
+  async configureMyApp(id: number, category: string, account: DeveloperAccount,
+    sourceDraftToken: string = '', removeSecondary: boolean = false): Promise<CatalogApp> {
     const body = new CategoryBody();
     body.category = category;
+    body.source_draft_token = sourceDraftToken;
+    body.remove_secondary = removeSecondary;
     const data = await this.requestData('/api/v1/me/apps/' + id + '/category',
       http.RequestMethod.POST, account, body);
     return CatalogApp.fromJson(data['app'] as Record<string, Object>);

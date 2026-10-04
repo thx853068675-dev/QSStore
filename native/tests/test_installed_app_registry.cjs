@@ -13,7 +13,38 @@ function load(file, mocks = {}) {
   return exports;
 }
 const bundle = 'com.tonghongxiang.quietstart';
-const names = 'ID: 100:\n\tcom.tonghongxiang.hapstore\n\t' + bundle + '\n';
+const end = '__QINGQI_BUNDLE_LIST_END__\n';
+const names = 'ID: 100:\n\tcom.tonghongxiang.hapstore\n\t' + bundle + '\n' + end;
+test('signing identity preserves the system update time and never invents a missing timestamp', () => {
+  const { InstalledAppRegistry } = load('jobs/InstalledAppRegistry');
+  for (const value of [1700000000000, undefined, null, 'bad', -1]) {
+    const row = { name: bundle, versionCode: 110003, updateTime: value,
+      applicationInfo: { fingerprint: 'A'.repeat(64) } };
+    const identity = InstalledAppRegistry.parseSigningIdentity(JSON.stringify(row), bundle);
+    assert.equal(identity.updateTime, value === 1700000000000 ? value : 0);
+  }
+});
+test('installation timestamps survive without certificate metadata and refreshing cannot move the estimation baseline', async () => {
+  const disk = new Map();
+  const mocks = { '@kit.ArkData': { preferences: { getPreferences: async () => ({
+    get: async (key, fallback) => disk.get(key) ?? fallback,
+    put: async (key, value) => disk.set(key, value), flush: async () => {}
+  }) } } };
+  const first = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  first.remember(bundle, 7);
+  first.rememberLauncher(JSON.stringify({ name: bundle, versionCode: 7, updateTime: 1700000000000 }), bundle);
+  assert.equal(first.signingIdentity(bundle), undefined);
+  assert.equal(first.installationTime(bundle, 7), 1700000000000);
+  first.remember(bundle, 7); await first.persist({});
+  const restored = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry; await restored.load({});
+  assert.equal(restored.installationTime(bundle, 7), 1700000000000);
+  restored.remember(bundle, 8); const baseline = restored.installationTime(bundle, 8);
+  restored.remember(bundle, 8);
+  assert.equal(restored.installationTime(bundle, 8), baseline);
+  assert.equal(restored.installationTime(bundle, 7), 0);
+  restored.remember(bundle, 0);
+  assert.equal(restored.installationTime(bundle, 8), 0);
+});
 test('a confirmed side-loaded app and its launcher survive process restart; uninstall clears them', async () => {
   const disk = new Map();
   const preferences = { getPreferences: async () => ({
@@ -35,8 +66,47 @@ test('a confirmed side-loaded app and its launcher survive process restart; unin
   await restarted.persist({});
   const afterRemoval = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
   await afterRemoval.load({});
-  assert.equal(afterRemoval.version(bundle), -1);
+  assert.equal(afterRemoval.version(bundle), 0, 'confirmed uninstall must survive restart');
   assert.equal(afterRemoval.launcher(bundle), undefined);
+});
+test('a confirmed uninstall survives the live TTL and positive-cache expiry, until a real reinstall', async () => {
+  const disk = new Map();
+  const mocks = { '@kit.ArkData': { preferences: { getPreferences: async () => ({
+    get: async (key, fallback) => disk.get(key) ?? fallback,
+    put: async (key, value) => disk.set(key, value), flush: async () => {}
+  }) } } };
+  const first = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  await first.load({}); first.remember(bundle, 0); await first.persist({});
+  const rows = JSON.parse(disk.get('last-confirmed'));
+  assert.equal(rows[0].version, 0);
+  rows[0].at = Date.now() - 31 * 24 * 60 * 60 * 1000;
+  disk.set('last-confirmed', JSON.stringify(rows));
+  const restarted = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  await restarted.load({}); assert.equal(restarted.version(bundle), 0);
+  await restarted.persist({});
+  assert.equal(JSON.parse(disk.get('last-confirmed'))[0].version, 0);
+  restarted.remember(bundle, 120101); restarted.rememberSideloadedNames([bundle]);
+  await restarted.persist({});
+  const reinstalled = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  await reinstalled.load({}); assert.equal(reinstalled.version(bundle), 120101);
+  assert.equal(reinstalled.sideloadedApps()[0].bundleName, bundle);
+});
+test('a delayed startup cache read cannot resurrect a package already confirmed uninstalled', async () => {
+  let releaseRead; const readReady = new Promise(resolve => { releaseRead = resolve; });
+  const old = [{ bundleName: bundle, version: 110003, at: Date.now() - 1000,
+    moduleName: 'entry', abilityName: 'EntryAbility', sideloaded: true }];
+  const disk = new Map([['last-confirmed', JSON.stringify(old)]]);
+  const mocks = { '@kit.ArkData': { preferences: { getPreferences: async () => ({
+    get: async (key, fallback) => { if (key === 'last-confirmed') await readReady; return disk.get(key) ?? fallback; },
+    put: async (key, value) => disk.set(key, value), flush: async () => {}
+  }) } } };
+  const registry = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  const loading = registry.load({}); registry.remember(bundle, 0);
+  const saving = registry.persist({}); releaseRead(); await loading; await saving;
+  assert.equal(registry.version(bundle), 0); assert.equal(registry.launcher(bundle), undefined);
+  const restarted = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  await restarted.load({}); assert.equal(restarted.version(bundle), 0);
+  assert.equal(restarted.sideloadedApps().length, 0);
 });
 test('a month-old device observation is not presented as a current install', async () => {
   const old = [{ bundleName: bundle, version: 110003,
@@ -51,6 +121,16 @@ test('a month-old device observation is not presented as a current install', asy
   await registry.load({});
   assert.equal(registry.version(bundle), -1);
   assert.equal(registry.launcher(bundle), undefined);
+});
+test('a missing, null or nonnumeric saved version is unknown, not a confirmed uninstall', async () => {
+  for (const version of [undefined, null, '', '0', -1]) {
+    const row = { bundleName: bundle, version, at: Date.now() - 1000 };
+    const registry = load('jobs/InstalledAppRegistry', { '@kit.ArkData': { preferences: {
+      getPreferences: async () => ({ get: async (key, fallback) =>
+        key === 'last-confirmed' ? JSON.stringify([row]) : fallback })
+    } } }).InstalledAppRegistry;
+    await registry.load({}); assert.equal(registry.version(bundle), -1);
+  }
 });
 test('the detected version name survives restart and is never applied to a different build', async () => {
   const disk = new Map();
@@ -95,14 +175,14 @@ test('manual rescan immediately detects an external version change and uninstall
   const updated = await f.bridge.installedBundleVersions([bundle]);
   assert.equal(updated.get(bundle), 120101);
   assert.equal(f.calls.filter(([op]) => op === 3).length, 2, 'a fresh display cache cannot skip live rescan');
-  f.list = 'ID: 100:\ncom.tonghongxiang.hapstore\n';
+  f.list = 'ID: 100:\ncom.tonghongxiang.hapstore\n' + end;
   const removed = await f.bridge.installedBundleVersions([bundle]);
   assert.equal(removed.has(bundle), false);
   assert.equal(f.registry.version(bundle), 0);
 });
 test('one malformed package does not repeat the full inventory or lose other live results', async () => {
   const f = fixture(), other = 'com.example.other';
-  f.list += other + '\n';
+  f.list = f.list.replace(end, other + '\n' + end);
   f.bridge.command = async (op, name) => {
     f.calls.push([op, name]);
     return op === 6 ? f.list : name === bundle ? 'invalid package details' :
@@ -115,7 +195,7 @@ test('one malformed package does not repeat the full inventory or lose other liv
 });
 test('a broken link stops the remaining package queries without deleting cached installs', async () => {
   const f = fixture(), other = 'com.example.other';
-  f.list += other + '\n'; f.registry.remember(other, 99);
+  f.list = f.list.replace(end, other + '\n' + end); f.registry.remember(other, 99);
   f.detail = '[Fail] disconnected';
   const values = await f.bridge.installedBundleVersions([bundle, other]);
   assert.equal(f.calls.filter(([op]) => op === 3).length, 1);
@@ -163,6 +243,31 @@ test('a mismatched bundle or invalid version is rejected', () => {
   for (const data of [{ name: 'other.bundle', versionCode: 110003 }, { name: bundle, versionCode: 0 }, { name: bundle, versionCode: 'NaN' }]) {
     assert.throws(() => f.registry.parseVersion(JSON.stringify(data), bundle));
   }
+});
+
+test('a partial inventory cannot persist false uninstalls, even when cut between complete lines', async () => {
+  const disk = new Map();
+  const mocks = { '@kit.ArkData': { preferences: { getPreferences: async () => ({
+    get: async (key, fallback) => disk.get(key) ?? fallback,
+    put: async (key, value) => disk.set(key, value), flush: async () => {}
+  }) } } };
+  const registry = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  await registry.load({}); registry.remember(bundle, 110003); await registry.persist({});
+  const Bridge = load('jobs/HdcDeviceBridge', { './InstalledAppRegistry': { InstalledAppRegistry: registry } }).HdcDeviceBridge;
+  const bridge = new Bridge({}); bridge.connected = async () => true;
+  for (const partial of ['ID: 100:\ncom.tonghongxiang.hapstore\n',
+    'ID: 100:\ncom.tonghongxiang.hapstore\ncom.exa',
+    'ID: 100:\ncom.tonghongxiang.hapstore\n__QINGQI_BUNDLE_LIST_END_',
+    'ID: 100:\n[Fail] disconnected\n' + end]) {
+    bridge.command = async () => partial;
+    assert.equal(await bridge.installedBundleVersions([bundle]), undefined);
+    assert.equal(registry.version(bundle), 110003);
+    const restarted = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+    await restarted.load({}); assert.equal(restarted.version(bundle), 110003);
+  }
+  assert.equal(registry.parseNames('ID: 100:\n' + end).size, 0);
+  assert.equal(registry.parseNames('ID: 100:\ncom.atomicservice.6917587889453404644\n' + end)
+    .has('com.atomicservice.6917587889453404644'), true);
 });
 test('6.1 bundle dump exposes the installed identity without treating malformed output as absence', async () => {
   const f = fixture();
@@ -265,4 +370,25 @@ test('HDC unsigned and unauthorized errors are rejected even inside an Info resp
   const bridge = new sandbox.Bridge(); bridge.context = { filesDir: '/sandbox' };
   bridge.connected = async () => true; bridge.command = io.command;
   await assert.rejects(bridge.install('/sandbox/app.hap'), /9568423/);
+});
+
+test('scanned signing identity survives restart and is invalidated by a new version, uninstall or incomplete signing evidence', async () => {
+  const disk = new Map(), mocks = { '@kit.ArkData': { preferences: { getPreferences: async () => ({
+    get: async (key, fallback) => disk.get(key) ?? fallback, put: async (key, value) => disk.set(key, value), flush: async () => {}
+  }) } } };
+  const first = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  first.remember(bundle, 110003);
+  const output = JSON.stringify({ name: bundle, versionCode: 110003, updateTime: 1700000000000,
+    applicationInfo: { fingerprint: 'A'.repeat(64) }, appIdentifier: 'stable' });
+  first.rememberLauncher(output, bundle); await first.persist({});
+  const restored = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry; await restored.load({});
+  assert.equal(restored.signingIdentity(bundle).fingerprint, 'A'.repeat(64));
+  assert.equal(restored.signingIdentity(bundle).updateTime, 1700000000000);
+  restored.remember(bundle, 110004); assert.equal(restored.signingIdentity(bundle), undefined);
+  restored.remember(bundle, 110003); restored.rememberLauncher(output, bundle);
+  restored.rememberLauncher(JSON.stringify({ name: bundle, versionCode: 110003 }), bundle);
+  assert.equal(restored.signingIdentity(bundle), undefined);
+  restored.rememberLauncher(output, bundle); restored.remember(bundle, 0); await restored.persist({});
+  const deleted = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry; await deleted.load({});
+  assert.equal(deleted.signingIdentity(bundle), undefined);
 });

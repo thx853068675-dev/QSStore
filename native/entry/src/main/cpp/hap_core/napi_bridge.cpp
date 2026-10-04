@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -154,6 +155,58 @@ napi_value ReadIcon(napi_env env, napi_callback_info info) {
   }
   try {
     const auto bytes = qingqi::hap::ReadHapIcon(values[0], values[1]);
+    void* data = nullptr;
+    napi_value buffer = nullptr;
+    if (napi_create_arraybuffer(env, bytes.size(), &data, &buffer) != napi_ok) {
+      napi_throw_error(env, nullptr, "Cannot allocate HAP icon buffer");
+      return nullptr;
+    }
+    if (!bytes.empty()) {
+      std::memcpy(data, bytes.data(), bytes.size());
+    }
+    // Hand ArkTS a Uint8Array over that buffer; Uint8Array.buffer gives the
+    // ArrayBuffer back, so callers can use either shape.
+    napi_value result = nullptr;
+    if (napi_create_typedarray(env, napi_uint8_array, bytes.size(), buffer, 0, &result) != napi_ok) {
+      napi_throw_error(env, nullptr, "Cannot return HAP icon");
+      return nullptr;
+    }
+    return result;
+  } catch (const std::exception& error) {
+    napi_throw_error(env, "HAP_ICON", error.what());
+    return nullptr;
+  }
+}
+
+napi_value ReadArchiveFile(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2]{};
+  if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 2) {
+    napi_throw_type_error(env, nullptr, "Expected a HAP path and an icon name");
+    return nullptr;
+  }
+  std::array<std::string, 2> values;
+  for (size_t i = 0; i < argc; ++i) {
+    size_t length = 0;
+    if (napi_get_value_string_utf8(env, args[i], nullptr, 0, &length) != napi_ok) {
+      napi_throw_type_error(env, nullptr, "Invalid HAP icon argument");
+      return nullptr;
+    }
+    // The icon name is short; the path uses the same bound as the manifest reader.
+    const size_t limit = i == 0 ? 4096 : 1024;
+    if (length > limit) {
+      napi_throw_type_error(env, nullptr, "Invalid HAP icon argument");
+      return nullptr;
+    }
+    std::vector<char> buffer(length + 1);
+    if (napi_get_value_string_utf8(env, args[i], buffer.data(), buffer.size(), &length) != napi_ok) {
+      napi_throw_type_error(env, nullptr, "Invalid HAP icon argument");
+      return nullptr;
+    }
+    values[i].assign(buffer.data(), length);
+  }
+  try {
+    const auto bytes = qingqi::hap::ReadEntryBytes(values[0], values[1], 4 * 1024 * 1024);
     void* data = nullptr;
     napi_value buffer = nullptr;
     if (napi_create_arraybuffer(env, bytes.size(), &data, &buffer) != napi_ok) {
@@ -647,7 +700,41 @@ napi_value ExtractPackage(napi_env env, napi_callback_info info) {
   return promise;
 }
 
-napi_value ListPackages(napi_env env, napi_callback_info info) {
+
+struct ArchiveWork { std::string input, output, error, previous_bundle, next_bundle; std::vector<std::pair<std::string,std::string>> files; napi_deferred deferred = nullptr; napi_async_work work = nullptr; };
+std::string StringArg(napi_env env, napi_value value) {
+  size_t length = 0; if (napi_get_value_string_utf8(env,value,nullptr,0,&length) != napi_ok || !length || length > 4096) throw std::runtime_error("Invalid archive argument");
+  std::vector<char> buffer(length + 1); napi_get_value_string_utf8(env,value,buffer.data(),buffer.size(),&length); std::string result(buffer.data(),length);
+  if (result.find('\0') != std::string::npos) throw std::runtime_error("Invalid archive argument"); return result;
+}
+napi_value Rewrite(napi_env env, napi_callback_info info) {
+  size_t argc = 6; napi_value args[6]{}; napi_get_cb_info(env,info,&argc,args,nullptr,nullptr);
+  auto* task = new ArchiveWork();
+  try {
+    if (argc != 4 && argc != 6) throw std::runtime_error("Expected archive paths, replacement arrays and optional bundle names");
+    task->input = StringArg(env,args[0]); task->output = StringArg(env,args[1]);
+    if (argc == 6) { task->previous_bundle = StringArg(env,args[4]); task->next_bundle = StringArg(env,args[5]); }
+    bool names = false, paths = false; napi_is_array(env,args[2],&names); napi_is_array(env,args[3],&paths);
+    uint32_t count = 0, other = 0; napi_get_array_length(env,args[2],&count); napi_get_array_length(env,args[3],&other);
+    if (!names || !paths || !count || count > 128 || count != other) throw std::runtime_error("Invalid archive replacements");
+    for (uint32_t i=0;i<count;i++) { napi_value name,path; napi_get_element(env,args[2],i,&name); napi_get_element(env,args[3],i,&path); task->files.emplace_back(StringArg(env,name),StringArg(env,path)); }
+  } catch (const std::exception& e) { delete task; napi_throw_error(env,"PACKAGE_EDIT",e.what()); return nullptr; }
+  napi_value promise = nullptr, name = nullptr;
+  if (napi_create_promise(env, &task->deferred, &promise) != napi_ok ||
+      napi_create_string_utf8(env, "rewritePackage", NAPI_AUTO_LENGTH, &name) != napi_ok) {
+    delete task; napi_throw_error(env, "PACKAGE_EDIT", "Cannot create archive task"); return nullptr;
+  }
+  if (napi_create_async_work(env,nullptr,name,[](napi_env,void* value) { auto* t=static_cast<ArchiveWork*>(value); try { qingqi::hap::RewriteArchive(t->input,t->output,t->files,t->previous_bundle,t->next_bundle); } catch(const std::exception& e) {t->error=e.what();} },
+    [](napi_env env,napi_status status,void* value) { auto* t=static_cast<ArchiveWork*>(value); napi_value result;
+      if (status==napi_ok && t->error.empty()) { napi_get_undefined(env,&result); napi_resolve_deferred(env,t->deferred,result); }
+      else { napi_value message; napi_create_string_utf8(env,t->error.empty()?"Package edit failed":t->error.c_str(),NAPI_AUTO_LENGTH,&message); napi_create_error(env,nullptr,message,&result); napi_reject_deferred(env,t->deferred,result); }
+      napi_delete_async_work(env,t->work); delete t; },task,&task->work)!=napi_ok || napi_queue_async_work(env,task->work)!=napi_ok) {
+    if (task->work) napi_delete_async_work(env,task->work); delete task; napi_throw_error(env,"PACKAGE_EDIT","Cannot queue archive edit"); return nullptr;
+  }
+  return promise;
+}
+
+napi_value ListArchiveEntries(napi_env env, napi_callback_info info, bool profiles) {
   size_t argc = 1, length = 0;
   napi_value arg = nullptr;
   napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr);
@@ -657,7 +744,8 @@ napi_value ListPackages(napi_env env, napi_callback_info info) {
   std::vector<char> path(length + 1);
   napi_get_value_string_utf8(env, arg, path.data(), path.size(), &length);
   try {
-    const auto entries = qingqi::hap::ListPackageEntries(std::string(path.data(), length));
+    const auto entries = profiles ? qingqi::hap::ListProfileEntries(std::string(path.data(), length)) :
+      qingqi::hap::ListPackageEntries(std::string(path.data(), length));
     napi_value result = nullptr;
     napi_create_array_with_length(env, entries.size(), &result);
     for (size_t i = 0; i < entries.size(); ++i) {
@@ -674,6 +762,9 @@ napi_value ListPackages(napi_env env, napi_callback_info info) {
     napi_throw_error(env, "PACKAGE_ARCHIVE", error.what()); return nullptr;
   }
 }
+
+napi_value ListPackages(napi_env env, napi_callback_info info) { return ListArchiveEntries(env, info, false); }
+napi_value ListProfiles(napi_env env, napi_callback_info info) { return ListArchiveEntries(env, info, true); }
 
 napi_value HdcInstallProgress(napi_env env, napi_callback_info info) {
   size_t argc = 2;
@@ -702,7 +793,10 @@ napi_value HdcInstallProgress(napi_env env, napi_callback_info info) {
 
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
+    {"listProfileEntries", nullptr, ListProfiles, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listPackageEntries", nullptr, ListPackages, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"readArchiveFile", nullptr, ReadArchiveFile, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"rewriteArchive", nullptr, Rewrite, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"extractPackageEntry", nullptr, ExtractPackage, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readModuleJson", nullptr, ReadModule, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readInstallPermissions", nullptr, ReadInstallPermissions, nullptr, nullptr, nullptr, napi_default, nullptr},

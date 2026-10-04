@@ -69,6 +69,8 @@ export class Palette {
   /** 危险 / 破坏性 */
   get danger(): string { return this.pick('#B14848', '#FF8A80'); }
   get dangerSoft(): string { return this.pick('#FFF0F0', '#3A1F22'); }
+  /** Signing authorization expires within seven days. */
+  get renewalWarning(): string { return this.pick('#FFEAF1', '#382434'); }
   /** 成功 */
   get success(): string { return this.pick('#257B65', '#5DD3AE'); }
   get successSoft(): string { return this.pick('#E7F5EF', '#14322A'); }

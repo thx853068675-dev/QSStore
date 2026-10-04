@@ -1,3 +1,9 @@
 {
-  "src": ["pages/Index", "pages/Detail"]
+  "src": [
+    "pages/Index",
+    "pages/Detail",
+    "pages/InstalledDetail",
+    "pages/PackageTools",
+    "pages/LocalInstall"
+  ]
 }

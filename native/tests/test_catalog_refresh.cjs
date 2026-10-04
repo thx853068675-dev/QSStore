@@ -8,6 +8,11 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
+const paging = {};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
+  '../entry/src/main/ets/data/CatalogPaging.ets'), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+}).outputText, { exports: paging });
 // Page methods have two-space indentation; the next member closes the slice.
 function method(name) {
   // 方法可能是 private / public / static，也可能没有修饰符
@@ -23,7 +28,7 @@ const code = ts.transpileModule(`class Index {
   static REFRESH_MIN_VISIBLE_MS = 600;
   static STAR_FIELD_COUNT = 46;
   static STARRED_MIN_STARS = 100;
-  ${['catalogHasMore', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
+  ${['catalogHasMore', 'loadMoreApps', 'prefetchCatalog', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
     'latestAssets', 'installedAssets', 'assetForBundle', 'refreshCatalogInstallState', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion',
     'displayApps', 'featuredTier', 'featuredColors']
     .map(method).join('\n')}
@@ -36,7 +41,7 @@ function deferred() {
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const page = (ids, total = ids.length) => ({ items: ids.map(id => {
   const row = typeof id === 'object' ? id : { id };
-  return { iconRev: 'rev-1', iconUrl: '/api/v1/apps/' + row.id + '/icon', ...row };
+  return { stars: 0, iconRev: 'rev-1', iconUrl: '/api/v1/apps/' + row.id + '/icon', ...row };
 }), total, rawItems: [] });
 function fixture() {
   const requests = [], icons = [], saved = [], savedIcons = [], releases = [];
@@ -81,11 +86,11 @@ function fixture() {
   f2.deviceUnparsable = false;
   f2.deviceVersions = {};
   f2.knownBundles = [];
-  const sandbox = { ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {}, setTimeout, clearTimeout, console, Curve: { EaseOut: 'ease-out' },
+  const sandbox = { ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {}, setTimeout, clearTimeout, console, Curve: { EaseOut: 'ease-out' },
     InstallReconnect: { clear() {}, deactivate() {} }, InstallConfirmation: { deactivate() {} }, InstallCoordinator: { conditionReady() {} }, InstallStage: { WAITING_DEVICE: 'waiting-device' },
     StoreClient: class {
       listApps(number, size, sort, query) {
-        const d = deferred(); requests.push({ ...d, number, query }); return d.promise;
+        const d = deferred(); requests.push({ ...d, number, query, sort }); return d.promise;
       }
       appIconBytes(app) { icons.push(app.id); return f.icon(app); }
       /** 服务端批量重采：记录客户端点名了哪几个应用。 */
@@ -108,7 +113,7 @@ function fixture() {
   sandbox.Page.REFRESH_MIN_VISIBLE_MS = 20;
   const ui = new sandbox.Page();
   Object.assign(ui, { catalogToken: 0, activeQuery: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
-    catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false,
+    catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false, catalogMoreError: '',
     catalogRefreshing: false, catalogRefreshBusy: false, catalogError: '',
     getUIContext: () => ({ animateTo: (_options, change) => change() }),
     installedDisplay: new Map(), installedVersions: new Map(), installedJobs: [], catalogProbeBusy: false, catalogProbeNames: [], catalogProbePending: [], updateCatalogReady: false, updateInstallScanPrompt() {}, refreshCatalogInstallState() {},
@@ -211,10 +216,10 @@ test('a transient icon miss gets one retry in the same refresh', async () => {
 });
 test('reset invalidates an in-flight next page and retains only new results', async () => {
   const f = fixture(), ui = f.ui;
-  ui.apps = [{ id: 1 }]; ui.catalogPage = 1; ui.catalogTotal = 3;
+  ui.apps = [{ id: 1 }]; ui.catalogPage = 1; ui.catalogTotal = 60;
   const more = ui.loadApps(false); assert.equal(f.requests[0].number, 2);
   const refresh = ui.pullRefreshCatalog(); f.requests[1].resolve(page([4])); await refresh;
-  f.requests[0].resolve(page([1, 2], 3)); await more;
+  f.requests[0].resolve(page([1, 2], 60)); await more;
   assert.equal(ui.apps.length, 1); assert.equal(ui.apps[0].id, 4);
   assert.equal(ui.catalogPage, 1); assert.equal(ui.catalogTotal, 1);
 });
@@ -340,11 +345,62 @@ test('pull refresh only reads the catalog even when installed apps are behind', 
 
 // ── 发现页大卡：置顶与星点背景 ────────────────────────────────────
 
-test('displayApps puts oversized cards first, best first', () => {
+test('displayApps preserves the committed order when new pages have already been ranked', () => {
   const f = fixture(), ui = f.ui;
   ui.apps = [10, 300, 50, 120, 400].map((stars, i) => ({ id: i + 1, stars }));
-  // 大卡按星数降序置顶；其余保持目录原顺序
-  assert.deepEqual(Array.from(ui.displayApps(), a => a.stars), [400, 300, 120, 10, 50]);
+  assert.deepEqual(Array.from(ui.displayApps(), a => a.stars), [10, 300, 50, 120, 400]);
+});
+
+test('Discover asks the server to rank featured cards before both first-page and next-page slicing', async () => {
+  const f = fixture(), ui = f.ui;
+  let run = ui.loadApps();
+  assert.equal(f.requests[0].sort, 'discover');
+  f.requests[0].resolve(page([{ id: 1, stars: 9000 }], 60)); await run;
+  run = ui.loadApps(false);
+  assert.equal(f.requests[1].sort, 'discover');
+  f.requests[1].resolve(page([{ id: 2, stars: 150 }], 60)); await run;
+  assert.deepEqual(Array.from(ui.displayApps(), app => app.id), [1, 2]);
+});
+
+test('appending a page only probes newly added apps and preserves earlier installed state', async () => {
+  const f = fixture(), ui = f.ui, queried = [];
+  ui.apps = [{ id: 1, stars: 0, latestAsset: { bundleName: 'app.old' } }];
+  ui.catalogPage = 1; ui.catalogTotal = 60;
+  ui.installedVersions.set(1, 200);
+  f.localBundles.liveInstalledVersion = name => { queried.push(name); return 0; };
+  delete ui.refreshCatalogInstallState;
+  const run = ui.loadApps(false);
+  f.requests[0].resolve(page([{ id: 2, latestAsset: { bundleName: 'app.new' } }], 60));
+  await run;
+  assert.deepEqual(queried, ['app.new']);
+  assert.equal(ui.installedVersions.get(1), 200);
+  assert.equal(ui.installedVersions.get(2), 0);
+});
+
+test('pagination failure leaves visible cards intact and blocks repeated automatic requests until retry', async () => {
+  const f = fixture(), ui = f.ui;
+  ui.apps = [{ id: 1, stars: 0 }]; ui.catalogPage = 1; ui.catalogTotal = 60;
+  const run = ui.loadApps(false); f.requests[0].reject(new Error('offline')); await run;
+  assert.equal(ui.catalogError, '');
+  assert.equal(ui.catalogMoreError, 'offline');
+  assert.equal(ui.apps[0].id, 1);
+  ui.prefetchCatalog(30); ui.loadMoreApps();
+  assert.equal(f.requests.length, 1);
+  ui.catalogMoreError = ''; ui.loadMoreApps();
+  assert.equal(f.requests[1].number, 2);
+  f.requests[1].resolve(page([2], 60)); await tick();
+  assert.equal(ui.apps[1].id, 2);
+});
+
+test('a page starts at most four concurrent icon transfers and stops queuing when the query changes', async () => {
+  const f = fixture(), ui = f.ui, pending = deferred();
+  ui.apps = page([1, 2, 3, 4, 5, 6, 7, 8]).items;
+  const client = { appIconBytes: app => { f.icons.push(app.id); return pending.promise; } };
+  const flight = ui.loadCatalogIcons(client, ui.apps, '', false);
+  assert.equal(f.icons.length, 4);
+  ui.activeQuery = 'another'; pending.resolve(undefined);
+  await flight;
+  assert.equal(f.icons.length, 4);
 });
 
 test('displayApps does not mutate the catalog array', () => {
@@ -434,10 +490,10 @@ test('a live package result updates its button before the rest of the device sca
 test('repeated refresh and pagination reuse an unfinished icon without losing the first page', async () => {
   const f = fixture(), ui = f.ui, icon = deferred();
   f.icon = app => app.id === 1 ? icon.promise : Promise.resolve(new ArrayBuffer(4));
-  let run = ui.loadApps(); f.requests[0].resolve(page([1], 2)); await run;
-  run = ui.loadApps(); f.requests[1].resolve(page([1], 2)); await run;
+  let run = ui.loadApps(); f.requests[0].resolve(page([1], 60)); await run;
+  run = ui.loadApps(); f.requests[1].resolve(page([1], 60)); await run;
   assert.deepEqual(f.icons, [1]);
-  run = ui.loadApps(false); f.requests[2].resolve(page([2], 2)); await run;
+  run = ui.loadApps(false); f.requests[2].resolve(page([2], 60)); await run;
   icon.resolve(new ArrayBuffer(4)); await tick();
   assert.deepEqual(ui.appIcons.map(i => i.id).sort(), [1, 2]);
   assert.equal(f.icons.filter(id => id === 1).length, 1);

@@ -1111,6 +1111,12 @@ pub extern "C" fn qingqi_hdc_install_progress(
     0
 }
 
+fn bundle_list_command(sideloaded: bool) -> Vec<String> {
+    let flag = if sideloaded { "-g" } else { "-a" };
+    vec!["shell".into(), "sh".into(), "-c".into(),
+        format!("'bm dump {flag} && printf \"\\n__QINGQI_BUNDLE_LIST_END__\\n\"'")]
+}
+
 #[no_mangle]
 pub extern "C" fn qingqi_hdc_command(
     key_root: *const c_char,
@@ -1158,10 +1164,13 @@ pub extern "C" fn qingqi_hdc_command(
                 vec!["shell".into(), "bm".into(), "dump".into(), "-n".into(), argument]
             }
             // 只返回已安装包名，不包含版本；版本仍须查询在清单中的目标包。
-            6 => vec!["shell".into(), "bm".into(), "dump".into(), "-a".into()],
+            6 => bundle_list_command(false),
             7 => {
                 validate_bundle_name(&argument)?;
-                vec!["uninstall".into(), argument]
+                // bm waits for the actual result. The legacy AppUninstall
+                // forwarder closes idle channels after two seconds, even while
+                // a slow device is still removing the application.
+                vec!["shell".into(), "bm".into(), "uninstall".into(), "-n".into(), argument]
             }
             8 => {
                 let sandbox = fs::canonicalize(&root).map_err(|error| error.to_string())?;
@@ -1184,7 +1193,7 @@ pub extern "C" fn qingqi_hdc_command(
             }
             11 | 12 => { parse_staged_ticket(&argument)?; Vec::new() }
             // Debug provisioning includes release builds installed with a debug profile.
-            13 => vec!["shell".into(), "bm".into(), "dump".into(), "-g".into()],
+            13 => bundle_list_command(true),
             14 => {
                 validate_bundle_name(&argument)?;
                 vec!["shell".into(), "bm".into(), "dump".into(), "-l".into(), "-n".into(), argument]
@@ -1306,6 +1315,15 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::{fs, io::{Cursor, Write}, sync::atomic::Ordering};
     use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
+
+    #[test]
+    fn bundle_list_completion_is_only_emitted_after_success() {
+        for (sideloaded, flag) in [(false, "-a"), (true, "-g")] {
+            let args = super::bundle_list_command(sideloaded);
+            assert_eq!(&args[..3], &["shell", "sh", "-c"]);
+            assert_eq!(args[3], format!("'bm dump {flag} && printf \"\\n__QINGQI_BUNDLE_LIST_END__\\n\"'"));
+        }
+    }
 
     fn sample_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));

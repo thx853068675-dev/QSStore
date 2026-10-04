@@ -2,7 +2,8 @@ name: Host regression
 on:
   pull_request:
   push:
-    branches: [main, master, 'codex/**']
+    # Development commits are checked by pull_request, avoiding duplicate runs.
+    branches: [main, master]
 permissions:
   contents: read
 concurrency:
@@ -33,3 +34,11 @@ jobs:
         env:
           QINGQI_TYPESCRIPT: ${{ runner.temp }}/qingqi-typescript/node_modules/typescript/lib/typescript.js
         run: python tools/check_local.py --output "$RUNNER_TEMP/qingqi-results"
+      - name: Keep regression logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regression-results
+          path: ${{ runner.temp }}/qingqi-results
+          if-no-files-found: ignore
+          retention-days: 7

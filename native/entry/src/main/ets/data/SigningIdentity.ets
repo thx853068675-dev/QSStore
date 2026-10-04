@@ -455,6 +455,16 @@ export class SigningIdentityRecovery {
     }
   }
 
+  /** A renewal rotates only when the existing certificate cannot outlive the previous authorization. */
+  static async ensureForRenewal(context: common.UIAbilityContext, account: DeveloperAccount,
+    minimumExpiry: number): Promise<LocalSigningIdentity> {
+    const options = new EnrollmentOptions();
+    options.allowLastSlot = true;
+    options.refreshCertificate = true;
+    options.renewBeforeSeconds = minimumExpiry;
+    return (await SigningIdentityRecovery.enroll(context, account, options)).identity;
+  }
+
   private static async enrollLocked(context: common.UIAbilityContext,
     account: DeveloperAccount, options: EnrollmentOptions): Promise<EnrollmentResult> {
     // 「确认没有身份」和「暂时核实不了」必须分开：后者接着往下走就会申请新证书，
@@ -543,6 +553,9 @@ export class SigningIdentityRecovery {
     }
 
     if (freeSlots <= 0) {
+      if (options.renewBeforeSeconds > 0) {
+        throw new Error('AGC 调试证书槽位已满，现有证书有效期不足以续签。旧证书和应用已保留，请在证书管理中释放不用的证书后重试');
+      }
       throw new Error('AGC 的 ' + SigningIdentityRecovery.DEBUG_SLOT_LIMIT +
         ' 个调试证书槽位已满，且都不与本机私钥配对。请在证书管理中删除一张不用的证书后重试');
     }
@@ -554,7 +567,12 @@ export class SigningIdentityRecovery {
     const keyPem = fileIo.readTextSync(privateKeyPath);
     const csrPem = generated !== undefined ? generated.csrPem :
       await SigningIdentityRecovery.csrForExistingKey(keyPem);
-    const certName = await DeviceIdentity.certNameFor(keyPem);
+    const baseName = await DeviceIdentity.certNameFor(keyPem);
+    // Keep the same private key, but AGC forbids reusing the old certificate's name.
+    // The expiry threshold also makes an interrupted renewal's name deterministic.
+    const renewalSuffix = options.renewBeforeSeconds > 0 ?
+      '-r-' + Math.floor(options.renewBeforeSeconds).toString(36) : '';
+    const certName = baseName.substring(0, 64 - renewalSuffix.length) + renewalSuffix;
     const created = await agc.createCertificate(csrPem, certName);
     const createdId = String(created['id'] ?? '');
     const createdBytes = await SigningIdentityRecovery.downloadNewCertificate(agc, created);

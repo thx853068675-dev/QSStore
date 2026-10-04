@@ -1,3 +1,4 @@
+import { DownloadJournal } from './AssetDownload';
 import { HdcDeviceBridge } from './HdcDeviceBridge';
 import { InstallTaskState } from './InstallTaskState';
 import { common } from '@kit.AbilityKit';
@@ -33,6 +34,14 @@ const JOB_SCHEMA = `CREATE TABLE IF NOT EXISTS install_jobs (
   signed_profile_sha256 TEXT NOT NULL DEFAULT '',
   signing_cert_id TEXT NOT NULL DEFAULT '',
   reinstall_required INTEGER NOT NULL DEFAULT 0,
+  renewal_requested_at INTEGER NOT NULL DEFAULT 0,
+  renewal_prepared_at INTEGER NOT NULL DEFAULT 0,
+  renewal_previous_expiry INTEGER NOT NULL DEFAULT 0,
+  renewal_expires_at INTEGER NOT NULL DEFAULT 0,
+  renewal_install_baseline INTEGER NOT NULL DEFAULT 0,
+  authorization_expires_at INTEGER NOT NULL DEFAULT 0,
+  installed_update_time INTEGER NOT NULL DEFAULT 0,
+  installed_fingerprint TEXT NOT NULL DEFAULT '',
   allow_data_loss INTEGER NOT NULL DEFAULT 0,
   approved_installed_version INTEGER NOT NULL DEFAULT 0,
   approved_installed_fingerprint TEXT NOT NULL DEFAULT '',
@@ -44,13 +53,33 @@ const JOB_SCHEMA = `CREATE TABLE IF NOT EXISTS install_jobs (
   updated_at INTEGER NOT NULL
 )`;
 
-export class JobStore {
+export class JobStore implements DownloadJournal {
   private static opening: Promise<JobStore> | undefined;
+  private static packageReaders: Map<string, number> = new Map();
   private db: relationalStore.RdbStore;
   private context: common.UIAbilityContext | undefined;
+  private renewalTail: Promise<void> = Promise.resolve();
 
   private constructor(db: relationalStore.RdbStore) {
     this.db = db;
+  }
+
+  /** Pins a package while a local import or renewal is becoming a durable task. */
+  static reservePackage(path: string): () => void {
+    JobStore.packageReaders.set(path, (JobStore.packageReaders.get(path) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (JobStore.packageReaders.get(path) ?? 1) - 1;
+      if (remaining > 0) JobStore.packageReaders.set(path, remaining);
+      else JobStore.packageReaders.delete(path);
+    };
+  }
+
+  private static packageInUse(path: string): boolean {
+    return path.length > 0 && Array.from(JobStore.packageReaders.keys()).some((base: string) =>
+      path === base || path.startsWith(base + '.'));
   }
 
   static async open(context: common.UIAbilityContext): Promise<JobStore> {
@@ -71,6 +100,7 @@ export class JobStore {
     await db.executeSql(JOB_SCHEMA);
     await db.executeSql('CREATE TABLE IF NOT EXISTS cancelled_job_cleanup (id TEXT PRIMARY KEY, payload TEXT NOT NULL)');
     const columns = await db.querySql('PRAGMA table_info(install_jobs)');
+    const availableColumns = new Set<string>();
     let hasTransferId = false;
     let hasStagedTicket = false;
     let hasMirrorUrls = false;
@@ -93,6 +123,7 @@ export class JobStore {
     try {
       while (columns.goToNextRow()) {
         const name = columns.getString(columns.getColumnIndex('name'));
+        availableColumns.add(name);
         if (name === 'staged_ticket') hasStagedTicket = true;
         if (name === 'transfer_task_id') {
           hasTransferId = true;
@@ -117,6 +148,16 @@ export class JobStore {
       }
     } finally {
       columns.close();
+    }
+    for (const name of ['renewal_requested_at', 'renewal_prepared_at',
+      'renewal_previous_expiry', 'renewal_expires_at', 'renewal_install_baseline',
+      'authorization_expires_at', 'installed_update_time']) {
+      if (!availableColumns.has(name)) {
+        await db.executeSql('ALTER TABLE install_jobs ADD COLUMN ' + name + ' INTEGER NOT NULL DEFAULT 0');
+      }
+    }
+    if (!availableColumns.has('installed_fingerprint')) {
+      await db.executeSql("ALTER TABLE install_jobs ADD COLUMN installed_fingerprint TEXT NOT NULL DEFAULT ''");
     }
     if (!hasStagedTicket) {
       await db.executeSql("ALTER TABLE install_jobs ADD COLUMN staged_ticket TEXT NOT NULL DEFAULT ''");
@@ -181,6 +222,7 @@ export class JobStore {
     // 应用退出时仍未完成的清理，在下次启动继续。
     await store.pruneCompleted(context);
     await store.cleanupCancelled(context);
+    try { await store.cleanupOrphanedPackages(context); } catch (_) {}
     return store;
   }
 
@@ -216,8 +258,10 @@ export class JobStore {
        device_udid, profile_sha256, signed_profile_sha256, transfer_task_id,
        signing_cert_id, reinstall_required, allow_data_loss, approved_installed_version,
        approved_installed_fingerprint, approved_installed_app_identifier,
-       attempt, last_error, updated_at, staged_ticket)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       attempt, last_error, updated_at, staged_ticket,
+       renewal_requested_at, renewal_prepared_at, renewal_previous_expiry, renewal_expires_at, renewal_install_baseline,
+       authorization_expires_at, installed_update_time, installed_fingerprint)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [job.id, job.appId, job.assetName, job.sourceUrl, JSON.stringify(job.mirrorUrls),
        job.expectedSha256, job.catalogBundleName, job.catalogVersionCode,
        job.bundleName, job.versionCode, job.versionName, JSON.stringify(job.stageHistory),
@@ -227,7 +271,10 @@ export class JobStore {
        job.transferTaskId, job.signingCertId, job.reinstallRequired ? 1 : 0, job.allowDataLoss ? 1 : 0,
        job.approvedInstalledVersion, job.approvedInstalledFingerprint,
        job.approvedInstalledAppIdentifier,
-       job.attempt, job.lastError, job.updatedAt, job.stagedTicket ?? '']
+       job.attempt, job.lastError, job.updatedAt, job.stagedTicket ?? '',
+       job.renewalRequestedAt ?? 0, job.renewalPreparedAt ?? 0,
+       job.renewalPreviousExpiry ?? 0, job.renewalExpiresAt ?? 0, job.renewalInstallBaseline ?? 0,
+       job.authorizationExpiresAt ?? 0, job.installedUpdateTime ?? 0, job.installedFingerprint ?? '']
     );
     if (JobCancellation.isCancelled(job.id)) {
       await this.rememberCancelledFiles(job);
@@ -250,6 +297,9 @@ export class JobStore {
     const job = await this.get(id);
     if (!job || job.stage !== InstallStage.WAITING_CONFIRMATION) {
       throw new Error('安装任务不再等待确认，请重新检查安装状态');
+    }
+    if (job.renewalRequestedAt > 0 && installed.versionCode !== job.versionCode) {
+      throw new Error('应用版本已变化，请重新选择同版本安装包续签');
     }
     job.allowDataLoss = true;
     job.approvedInstalledVersion = installed.versionCode;
@@ -299,26 +349,115 @@ export class JobStore {
     return job;
   }
 
+  /** Persist a same-version renewal before the dispatcher can observe the task. */
+  async enqueueRenewal(appId: number, assetName: string, sourceUrl: string,
+    mirrors: string[], bundleName: string, versionCode: number, versionName: string,
+    accountReady: boolean = true): Promise<InstallJob> {
+    const previous = this.renewalTail;
+    let unlock: () => void = () => {};
+    this.renewalTail = new Promise<void>((resolve) => { unlock = resolve; });
+    await previous;
+    let releasePackage: () => void = () => {};
+    try {
+      if (appId <= 0 || !assetName || !/^https:\/\//.test(sourceUrl) || !bundleName ||
+        !Number.isSafeInteger(versionCode) || versionCode <= 0) throw new Error('续签原包信息无效');
+      const rows = await this.listAll();
+      const pending = rows.find((job: InstallJob) => isPending(job.stage) &&
+        (job.bundleName === bundleName || job.catalogBundleName === bundleName));
+      if (pending) {
+        if (pending.renewalRequestedAt > 0 && pending.versionCode === versionCode) return pending;
+        throw new Error('该应用已有安装任务，请完成或取消后再续签');
+      }
+      // Every explicit attempt owns a journal. Replacing the last successful
+      // same-version row would discard its installed signing/expiry evidence.
+      let requestedAt = Date.now();
+      for (const previous of rows) {
+        if (previous.bundleName === bundleName) requestedAt = Math.max(requestedAt, previous.renewalRequestedAt + 1);
+      }
+      const id = 'renew:' + appId + ':' + bundleName + ':' + versionCode + ':' + requestedAt.toString(36);
+      const reusable = rows.filter((job: InstallJob) => job.stage === InstallStage.INSTALLED &&
+        job.appId === appId && job.bundleName === bundleName && job.versionCode === versionCode &&
+        job.assetName === assetName && [job.sourceUrl, ...job.mirrorUrls].includes(sourceUrl))
+        .sort((a: InstallJob, b: InstallJob) => b.updatedAt - a.updatedAt)[0];
+      const job = InstallJob.create(id, appId, assetName, sourceUrl, '');
+      job.mirrorUrls = mirrors.filter((url: string) => /^https:\/\//.test(url) && url !== sourceUrl);
+      job.catalogBundleName = bundleName; job.bundleName = bundleName;
+      job.catalogVersionCode = versionCode; job.versionCode = versionCode; job.versionName = versionName;
+      job.renewalRequestedAt = requestedAt; job.reinstallRequired = true;
+      if (!accountReady) { job.stage = InstallStage.WAITING_ACCOUNT; job.lastError = '请先登录开发者账号'; }
+      if (reusable) {
+        job.profilePath = reusable.profilePath; job.signingCertId = reusable.signingCertId;
+        job.renewalPreviousExpiry = reusable.renewalExpiresAt || reusable.renewalPreviousExpiry || 0;
+        job.moduleName = reusable.moduleName; job.mainAbility = reusable.mainAbility;
+        if (reusable.cachePath && fileIo.accessSync(reusable.cachePath)) {
+          releasePackage = JobStore.reservePackage(reusable.cachePath);
+          job.cachePath = reusable.cachePath; job.expectedSha256 = reusable.expectedSha256;
+          job.signedPath = reusable.cachePath + '.renew-' + job.renewalRequestedAt.toString(36) +
+            (assetName.toLowerCase().endsWith('.app') ? '.signed.app' : '.signed.hap');
+        }
+      }
+      await this.save(job);
+      return job;
+    } finally { releasePackage(); unlock(); }
+  }
+
   async enqueueLocal(cachePath: string, signedPath: string, sha256: string,
     bundleName: string, versionCode: number, versionName: string, moduleName: string,
-    mainAbility: string): Promise<InstallJob> {
+    mainAbility: string, renewal: boolean = false): Promise<InstallJob> {
     if (!/^[0-9a-f]{64}$/.test(sha256) || bundleName.length === 0 ||
       versionCode <= 0 || cachePath === signedPath) {
       throw new Error('本地安装任务信息无效');
     }
-    // 本地任务的 id 由文件哈希决定，所以**同一个 HAP 每次都是同一个 id**。
-    // 已经装完的记录可以复用（幂等）；但停在中间阶段的记录必须重建 ——
-    // 那种记录是上次中断留下的，`stageHistory` 停在当时那一步。直接返回它，
-    // 界面就会一直显示「已核对应用身份」这条旧时间轴，看起来像进度卡住不走。
+    if (renewal) {
+      const previous = this.renewalTail;
+      let unlock: () => void = () => {};
+      this.renewalTail = new Promise<void>((resolve) => { unlock = resolve; });
+      await previous;
+      try {
+        const rows = await this.listAll();
+        const pending = rows.find((job: InstallJob) => isPending(job.stage) && job.bundleName === bundleName);
+        if (pending) {
+          if (pending.renewalRequestedAt > 0 && pending.versionCode === versionCode) {
+            throw new Error('续签已在队列中，请在管理页查看进度');
+          }
+          throw new Error('该应用已有安装任务，请完成或取消后再续签');
+        }
+        let requestedAt = Date.now();
+        for (const prior of rows) if (prior.bundleName === bundleName) {
+          requestedAt = Math.max(requestedAt, prior.renewalRequestedAt + 1);
+        }
+        const job = InstallJob.create('local:' + sha256 + ':renew:' + requestedAt.toString(36),
+          0, bundleName, 'local', sha256);
+        job.cachePath = cachePath;
+        job.signedPath = cachePath + '.renew-' + requestedAt.toString(36) + '.signed' +
+          (signedPath.endsWith('.app') ? '.app' : '.hap');
+        job.bundleName = bundleName; job.versionCode = versionCode; job.versionName = versionName;
+        job.moduleName = moduleName; job.mainAbility = mainAbility;
+        job.stage = InstallStage.PACKAGE_INSPECTED;
+        job.renewalRequestedAt = requestedAt; job.reinstallRequired = true;
+        await this.save(job);
+        return job;
+      } finally { unlock(); }
+    }
+    // Explicit local import may be a same-version name/icon/bytecode edit.
+    // The installed version alone cannot prove this exact file was applied.
     const id = 'local:' + sha256;
     const existing = await this.get(id);
-    if (existing && existing.stage === InstallStage.INSTALLED) {
-      if (bundleName === 'com.tonghongxiang.quietstart') {
-        existing.reinstallRequired = true;
-        existing.stage = InstallStage.PACKAGE_INSPECTED;
-        existing.lastError = '';
-        await this.save(existing);
-      }
+    if (existing && (existing.stage === InstallStage.INSTALLED || existing.renewalRequestedAt > 0)) {
+      // Completed task files may have been pruned. Bind the newly imported
+      // source before recovery can plan a different, nonexistent cache path.
+      existing.cachePath = cachePath;
+      existing.signedPath = signedPath;
+      existing.bundleName = bundleName;
+      existing.versionCode = versionCode;
+      existing.versionName = versionName;
+      existing.moduleName = moduleName;
+      existing.mainAbility = mainAbility;
+      existing.reinstallRequired = true;
+      existing.stage = InstallStage.PACKAGE_INSPECTED;
+      existing.stageHistory = [];
+      existing.lastError = '';
+      await this.save(existing);
       return existing;
     }
 
@@ -332,8 +471,7 @@ export class JobStore {
     job.versionName = versionName;
     job.moduleName = moduleName;
     job.mainAbility = mainAbility;
-    // 用户主动再次导入轻启，可修复同版本里仍带旧设备授权的工作模块。
-    job.reinstallRequired = bundleName === 'com.tonghongxiang.quietstart';
+    job.reinstallRequired = true;
     job.stage = InstallStage.PACKAGE_INSPECTED;
     await this.save(job);
     return job;
@@ -395,7 +533,7 @@ export class JobStore {
     }
   }
 
-  async cleanupCancelled(context: common.UIAbilityContext, id: string = ''): Promise<void> {
+  private async cancelledFiles(id: string = ''): Promise<InstallJob[]> {
     const result = await this.db.querySql('SELECT id, payload FROM cancelled_job_cleanup' +
       (id.length > 0 ? ' WHERE id = ?' : ''), id.length > 0 ? [id] : []);
     const jobs: InstallJob[] = [];
@@ -404,15 +542,21 @@ export class JobStore {
         jobs.push(JSON.parse(result.getString(result.getColumnIndex('payload'))) as InstallJob);
       }
     } finally { result.close(); }
+    return jobs;
+  }
+
+  async cleanupCancelled(context: common.UIAbilityContext, id: string = ''): Promise<void> {
+    const jobs = await this.cancelledFiles(id);
     const prefix = context.filesDir + '/install-jobs/';
     for (const job of jobs) {
       if (!await this.stopTransfer(context, job)) continue;
-      const retained = await this.listAll();
       let clean = true;
       if ((job.stagedTicket ?? '').length > 0) {
         clean = HdcDeviceBridge.deviceLinked() &&
           await new HdcDeviceBridge(context).discardStaged(job.stagedTicket);
       }
+      // Read references after asynchronous device cleanup, immediately before unlinking.
+      const retained = await this.listAll();
       const paths = [job.cachePath, job.signedPath, job.cachePath + '.part',
         job.cachePath + '.package.hap', job.cachePath + '.package.app',
         job.cachePath + '.package.hap.part', job.cachePath + '.package.app.part'];
@@ -442,33 +586,53 @@ export class JobStore {
         if (!path.startsWith(prefix) || path.includes('/../') ||
           retained.some((other: InstallJob) => (other.cachePath.length > 0 &&
             (other.cachePath === path || path.startsWith(other.cachePath + '.'))) || other.signedPath === path)) continue;
+        if (JobStore.packageInUse(path)) { clean = false; continue; }
         try { if (fileIo.accessSync(path)) fileIo.unlinkSync(path); } catch (_) { clean = false; }
       }
       if (clean) await this.db.executeSql('DELETE FROM cancelled_job_cleanup WHERE id = ?', [job.id]);
     }
   }
 
-  /** Keep install history; evict completed package bytes after 24h or over 512 MB. */
+  /** Keep history and signing materials; release package bytes once installation is confirmed. */
   async pruneCompleted(context: common.UIAbilityContext): Promise<void> {
     const jobs = (await this.listAll()).filter((job: InstallJob) =>
-      job.stage === InstallStage.INSTALLED && job.cachePath.length > 0)
+      job.stage === InstallStage.INSTALLED &&
+      (job.cachePath.length > 0 || job.signedPath.length > 0 || job.transferTaskId.length > 0 || (job.stagedTicket ?? '').length > 0) &&
+      !JobStore.packageInUse(job.cachePath) && !JobStore.packageInUse(job.signedPath))
       .sort((a: InstallJob, b: InstallJob) => b.updatedAt - a.updatedAt);
-    let retainedBytes = 0;
-    const prefix = context.filesDir + '/install-jobs/';
     for (const job of jobs) {
-      let bytes = 0;
-      for (const path of [job.cachePath, job.signedPath]) {
-        try { if (path.startsWith(prefix) && fileIo.accessSync(path)) bytes += fileIo.statSync(path).size; } catch (_) {}
-      }
-      if (Date.now() - job.updatedAt < 86400000 && retainedBytes + bytes <= 512 * 1024 * 1024) {
-        retainedBytes += bytes; continue;
-      }
       // Journal before clearing references, so interrupted eviction resumes next startup.
       await this.rememberCancelledFiles(job);
-      job.cachePath = ''; job.signedPath = ''; job.transferTaskId = '';
+      job.cachePath = ''; job.signedPath = ''; job.transferTaskId = ''; job.stagedTicket = '';
       await this.save(job);
     }
     await this.cleanupCancelled(context);
+  }
+
+  /** Startup sweep inside the DB-open barrier: installation work cannot begin before it completes. */
+  async cleanupOrphanedPackages(context: common.UIAbilityContext): Promise<number> {
+    const dir = context.filesDir + '/install-jobs';
+    if (!fileIo.accessSync(dir)) return 0;
+    const root = fileIo.lstatSync(dir);
+    if (!root.isDirectory() || root.isSymbolicLink()) return 0;
+    const jobs = (await this.listAll()).concat(await this.cancelledFiles());
+    // A cancelled system download can still be alive: retain its cleanup receipt's paths too.
+    const bases = jobs.flatMap((job: InstallJob) => [job.cachePath, job.signedPath]).filter((path: string) => path.length > 0);
+    let removed = 0;
+    for (const name of fileIo.listFileSync(dir)) {
+      if (/[\\/\u0000-\u001f]/.test(name) || !/\.(hap|app|zip|part)$/i.test(name)) continue;
+      const path = dir + '/' + name;
+      if (JobStore.packageInUse(path) || bases.some((base: string) => path === base || path.startsWith(base + '.'))) continue;
+      try {
+        const stat = fileIo.lstatSync(path);
+        if (!stat.isFile() || stat.isSymbolicLink()) continue;
+        const modified = Number(stat.mtime) * 1000;
+        // Fresh/future/unknown timestamps are not reliable evidence of an abandoned writer.
+        if (!Number.isFinite(modified) || modified <= 0 || Date.now() - modified < 10 * 60 * 1000) continue;
+        fileIo.unlinkSync(path); removed++;
+      } catch (_) { /* Retry inaccessible or disappearing files on the next startup. */ }
+    }
+    return removed;
   }
 
   private async query(sql: string, args: Array<relationalStore.ValueType>): Promise<InstallJob[]> {
@@ -518,6 +682,14 @@ export class JobStore {
         job.signedProfileSha256 = result.getString(result.getColumnIndex('signed_profile_sha256'));
         job.signingCertId = result.getString(result.getColumnIndex('signing_cert_id'));
         job.reinstallRequired = result.getLong(result.getColumnIndex('reinstall_required')) === 1;
+        job.renewalRequestedAt = result.getLong(result.getColumnIndex('renewal_requested_at'));
+        job.renewalPreparedAt = result.getLong(result.getColumnIndex('renewal_prepared_at'));
+        job.renewalPreviousExpiry = result.getLong(result.getColumnIndex('renewal_previous_expiry'));
+        job.renewalExpiresAt = result.getLong(result.getColumnIndex('renewal_expires_at'));
+        job.renewalInstallBaseline = result.getLong(result.getColumnIndex('renewal_install_baseline'));
+        job.authorizationExpiresAt = result.getLong(result.getColumnIndex('authorization_expires_at'));
+        job.installedUpdateTime = result.getLong(result.getColumnIndex('installed_update_time'));
+        job.installedFingerprint = result.getString(result.getColumnIndex('installed_fingerprint'));
         job.allowDataLoss = result.getLong(result.getColumnIndex('allow_data_loss')) === 1;
         job.approvedInstalledVersion = result.getLong(result.getColumnIndex('approved_installed_version'));
         job.approvedInstalledFingerprint = result.getString(result.getColumnIndex('approved_installed_fingerprint'));

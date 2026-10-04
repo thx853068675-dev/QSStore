@@ -12,6 +12,10 @@ const code = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
 }).outputText;
 const UDID = '4D32998F6E8174CAABD6EF5B2527D35F1D983EC7067970B52E8F865E0D8B92FC';
+const registryCode = ts.transpileModule(fs.readFileSync(path.resolve(__dirname,
+  '../entry/src/main/ets/jobs/InstalledAppRegistry.ets'), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+}).outputText;
 
 function fixture(responses, savedPort = 0) {
   const calls = [];
@@ -24,11 +28,13 @@ function fixture(responses, savedPort = 0) {
     return next ?? '[Fail] offline';
   }, hdcDisconnect: () => { calls.push(['disconnect']); return 1; } };
   const exports = {};
-  vm.runInNewContext(code, { exports, require: name => ({
+  const registryExports = {};
+  vm.runInNewContext(registryCode, { exports: registryExports, require: () => ({}) });
+  vm.runInNewContext(code, { exports, setTimeout: callback => setImmediate(callback), require: name => ({
     'libhap_core.so': native,
     '@kit.ArkData': { preferences: { getPreferences: async () => preference } },
     '@kit.CoreFileKit': { fileIo: {} },
-    './InstalledAppRegistry': { InstalledAppRegistry: {} },
+    './InstalledAppRegistry': registryExports,
     './ConnectionHint': { ConnectionHint: { closed: detail => /connection refused/i.test(detail) } }
   })[name] || {} });
   return { bridge: new exports.HdcDeviceBridge({ filesDir: '/data/app/files' }),
@@ -43,6 +49,75 @@ test('a previously valid HDC link is probed again before installation', async ()
   assert.equal(await f.bridge.connected(), false);
   assert.equal(f.Bridge.deviceLinked(), false);
   assert.deepEqual(f.calls.map(row => row[0]), [2, 2]);
+});
+
+const removedBundle = 'com.example.uninstalltest';
+const listEnd = '__QINGQI_BUNDLE_LIST_END__\n';
+const removedList = 'ID: 100:\ncom.tonghongxiang.hapstore\n' + listEnd;
+const presentList = 'ID: 100:\n' + removedBundle + '\n' + listEnd;
+
+test('system uninstall success is returned without losing the receipt', async () => {
+  const f = fixture([UDID, 'uninstall bundle successfully.']);
+  await f.bridge.uninstall(removedBundle);
+  assert.deepEqual(f.calls.map(row => row[0]), [2, 7]);
+  assert.equal(f.Bridge.busy(), false);
+});
+
+test('lost uninstall receipt is reconciled against a complete system inventory', async () => {
+  const f = fixture([UDID, new Error('HDC command: peer closed'), removedList]);
+  await f.bridge.uninstall(removedBundle);
+  assert.deepEqual(f.calls.map(row => row[0]), [2, 7, 6]);
+});
+
+test('a slow uninstall waits for disappearance without submitting removal twice', async () => {
+  const f = fixture([UDID, '', presentList, presentList, removedList]);
+  await f.bridge.uninstall(removedBundle);
+  assert.deepEqual(f.calls.map(row => row[0]), [2, 7, 6, 6, 6]);
+});
+
+test('truncated and offline inventories never falsely confirm uninstall', async () => {
+  for (const response of [removedList.replace(listEnd, ''), '[Fail] offline',
+    new Error('connection reset')]) {
+    const f = fixture([UDID, new Error('peer closed'), response]);
+    await assert.rejects(() => f.bridge.uninstall(removedBundle), /暂时无法确认卸载结果/);
+    assert.deepEqual(f.calls.map(row => row[0]), [2, 7, 6]);
+    assert.equal(f.Bridge.busy(), false);
+  }
+});
+
+test('a real system rejection with the app still installed remains a failure', async () => {
+  const f = fixture([UDID, 'error: failed to uninstall bundle. code: 123', presentList]);
+  await assert.rejects(() => f.bridge.uninstall(removedBundle), /code: 123/);
+  assert.deepEqual(f.calls.map(row => row[0]), [2, 7, 6]);
+});
+
+test('uninstalling an already absent app is idempotent after a complete inventory', async () => {
+  const f = fixture([UDID, 'error: bundle not found', removedList]);
+  await f.bridge.uninstall(removedBundle);
+});
+
+test('unconfirmed removal is bounded and cannot clear a still installed app', async () => {
+  const f = fixture([UDID, '', ...Array(6).fill(presentList)]);
+  await assert.rejects(() => f.bridge.uninstall(removedBundle), /设备上仍安装着该应用/);
+  assert.equal(f.calls.filter(row => row[0] === 7).length, 1);
+  assert.equal(f.calls.filter(row => row[0] === 6).length, 6);
+  assert.equal(f.Bridge.busy(), false);
+});
+
+test('idle background disconnect cannot interrupt uninstall confirmation', async () => {
+  let resolve;
+  const pending = new Promise(yes => { resolve = yes; });
+  const f = fixture([UDID, '', pending]);
+  const removal = f.bridge.uninstall(removedBundle);
+  await new Promise(done => setImmediate(done));
+  assert.equal(f.Bridge.busy(), true);
+  // releaseWhenIdle normally waits for the command queue; a separate direct
+  // busy check also protects the gaps between confirmation polls.
+  const release = f.Bridge.releaseWhenIdle(() => true);
+  resolve(removedList);
+  await removal;
+  assert.equal(await release, false);
+  assert.equal(f.calls.some(row => row[0] === 'disconnect'), false);
 });
 
 test('a failed UDID query does not become a false positive link', async () => {

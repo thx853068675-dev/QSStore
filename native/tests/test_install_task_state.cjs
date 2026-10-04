@@ -49,9 +49,8 @@ function pages(f) {
     setInterval: () => 1, clearInterval: () => {},
     isPending: f.load('jobs/RecoveryPlanner').isPending };
   const index = pageClass('Index', ['latestAssets', 'assetForBundle', 'observeInstallTasks', 'taskForApp', 'taskPending', 'taskRunning',
-    'taskLabel', 'jobRunning', 'taskJobLabel', 'refreshLocalTimeline', 'startStageTicker', 'stopStageTicker'], globals);
+    'taskLabel', 'jobRunning', 'taskJobLabel'], globals);
   Object.assign(index, { installSubscription: -1, installTasks: [], pendingJobs: [], installedJobs: [],
-    localJobId: '', stageTicker: -1,
     catalogApp: () => undefined, updateFor: () => undefined,
     forgetInstalledVersions() {}, refreshCatalogInstallState() {}, checkInstalledUpdates() {} });
   index.observeInstallTasks();
@@ -66,7 +65,14 @@ function pages(f) {
       selectedVersionLabel: () => '2' });
     ui.observeInstallTasks(); return ui;
   }
-  return { index, detail };
+  function local() {
+    const ui = pageClass('LocalInstall', ['observeTasks', 'refreshTimeline'], {
+      ...globals, LocalTimelineView: f.load('jobs/LocalInstallTimeline').LocalTimelineView
+    });
+    Object.assign(ui, { subscription: -1, tasks: [], preview: false, selected: f.job });
+    ui.observeTasks(); return ui;
+  }
+  return { index, detail, local };
 }
 test('data-loss approval is bound to the exact installed identity and only a waiting task', async () => {
   const f = fixture();
@@ -200,7 +206,7 @@ test('re-picking the same local HAP does not revive a stalled stage history', as
   assert.ok(rebuilt.updatedAt > 1000, '重建后应刷新时间戳，便于排序与展示');
 });
 
-test('re-picking an already installed local HAP stays idempotent', async () => {
+test('explicit same-version local reinstallation cannot accept an old installation', async () => {
   const f = fixture();
   const sha = 'c'.repeat(64);
   const args = ['/sandbox/a.hap', '/sandbox/a-signed.hap', sha, 'test.bundle', 2, 'entry', 'EntryAbility'];
@@ -211,8 +217,10 @@ test('re-picking an already installed local HAP stays idempotent', async () => {
   f.store.get = async () => done;
   const reused = await f.store.enqueueLocal(...args);
   assert.equal(reused, done);
-  assert.equal(reused.stage, f.InstallStage.INSTALLED);
-  assert.equal(reused.updatedAt, 4242);
+  assert.equal(reused.stage, f.InstallStage.PACKAGE_INSPECTED);
+  assert.equal(reused.reinstallRequired, true);
+  assert.ok(reused.updatedAt > 4242);
+  assert.equal(reused.stageHistory.length, 1);
 });
 
 function localFixture() {
@@ -233,8 +241,7 @@ test('local timeline: inspected milestone completes while authorization has its 
   assert.equal(view.steps[1].indicator, 'running');
 });
 test('local timeline: actual runner pushes authorization, signing, install and completion into the page', async () => {
-  const f = localFixture(), { index } = pages(f);
-  index.localJobId = f.job.id;
+  const f = localFixture(), ui = pages(f).local();
   await f.store.save(f.job);
   f.store.get = async () => JSON.parse(JSON.stringify(f.state.snapshot()[0].job));
   let installed = 0;
@@ -245,7 +252,7 @@ test('local timeline: actual runner pushes authorization, signing, install and c
     ensureDevice: async () => true, install: async () => { installed = 2; },
     installedVersion: async () => installed
   };
-  const views = []; const observer = f.state.subscribe(() => views.push(index.localTimelineView));
+  const views = []; const observer = f.state.subscribe(() => views.push(ui.timeline));
   const { JobRunner } = f.load('jobs/JobRunner');
   const result = await new JobRunner(f.store, runtime).run(f.job.id);
   f.state.unsubscribe(observer);
@@ -253,10 +260,10 @@ test('local timeline: actual runner pushes authorization, signing, install and c
   for (const label of ['正在准备设备授权', '正在用本机证书签名', '正在校验签名', '正在连接设备', '正在安装到设备']) {
     assert.ok(views.some(view => view.steps.some(step => step.label === label && step.indicator === 'running')), label);
   }
-  assert.equal(index.localTimelineView.status, '安装完成');
-  assert.equal(index.localTimelineView.steps.at(-1).label, '安装完成');
-  assert.equal(index.localTimelineView.steps.some(step => step.indicator === 'running'), false);
-  assert.equal(index.stageTicker, -1);
+  assert.equal(ui.timeline.status, '安装完成');
+  assert.equal(ui.timeline.steps.at(-1).label, '安装完成');
+  assert.equal(ui.timeline.steps.some(step => step.indicator === 'running'), false);
+  f.state.unsubscribe(ui.subscription);
 });
 test('a submitted install with an old reported version pauses without asking to reconnect', async () => {
   const f = localFixture(); f.job.stage = f.InstallStage.INSTALLING;
@@ -285,16 +292,15 @@ test('local timeline: completing the same historical row changes its ForEach key
 });
 test('local timeline: waiting, retryable and terminal failures remain visible without spinning', async () => {
   for (const stage of ['WAITING_DEVICE', 'WAITING_ACCOUNT', 'WAITING_NETWORK', 'RETRYABLE_ERROR', 'TERMINAL_ERROR']) {
-    const f = localFixture(), { index } = pages(f);
-    index.localJobId = f.job.id;
+    const f = localFixture(), ui = pages(f).local();
     await f.store.save(f.job); f.state.setRunning(f.job.id, true);
     f.job.stage = f.InstallStage[stage]; f.job.lastError = 'test failure'; await f.store.save(f.job);
     f.state.setRunning(f.job.id, false);
-    assert.equal(index.localTimelineView.visible, true, stage);
-    assert.equal(index.localTimelineView.running, false, stage);
-    assert.equal(index.localTimelineView.steps.at(-1).indicator, 'paused', stage);
-    assert.equal(index.localTimelineView.message, 'test failure', stage);
-    assert.equal(index.stageTicker, -1, stage);
+    assert.equal(ui.timeline.visible, true, stage);
+    assert.equal(ui.timeline.running, false, stage);
+    assert.equal(ui.timeline.steps.at(-1).indicator, 'paused', stage);
+    assert.equal(ui.timeline.message, 'test failure', stage);
+    f.state.unsubscribe(ui.subscription);
   }
 });
 test('local timeline: restart restores terminal state and selected local task excludes unrelated catalog work', async () => {
@@ -465,6 +471,8 @@ test('Management moves installed apps with queued updates into the task section,
   const installed = [{ id: 'local', appId: 0, bundleName: 'test.bundle' },
     { id: 'other', appId: 12, bundleName: 'another.bundle' }];
   ui.allInstalledJobs = () => installed;
+  ui.updateFor = () => undefined;
+  ui.renewalDeadline = () => 1800000000;
   ui.updateApps = () => [{ latestAssets: installed.map(job => ({ bundleName: job.bundleName })) }];
   ui.installedAssets = app => app.latestAssets;
   ui.installedLocalOnly = false;
@@ -579,7 +587,7 @@ test('Detail submits another selected package to the shared FIFO without startin
   await d.downloadSelected(); assert.equal(queued, 1); assert.equal(downloaded, 0);
 });
 
-test('completed cache eviction journals files, retains install identity, and skips pending jobs', async () => {
+test('confirmed installation releases even fresh packages, retaining identity and pending task inputs', async () => {
   const f = fixture({ '@kit.CoreFileKit': { fileIo: {
     accessSync: () => true, statSync: () => ({ size: 10 }) } } });
   const now = Date.now();
@@ -593,11 +601,11 @@ test('completed cache eviction journals files, retains install identity, and ski
   f.store.rememberCancelledFiles = async job => journal.push({ ...job });
   f.store.save = async job => saved.push({ ...job }); f.store.cleanupCancelled = async () => {};
   await f.store.pruneCompleted({ filesDir: '/sandbox' });
-  assert.deepEqual(journal.map(j => j.id), ['old']);
-  assert.equal(journal[0].cachePath, '/sandbox/install-jobs/old.hap');
+  assert.deepEqual(journal.map(j => j.id), ['recent', 'old']);
+  assert.equal(journal[1].cachePath, '/sandbox/install-jobs/old.hap');
   assert.equal(saved[0].cachePath, ''); assert.equal(saved[0].stage, f.InstallStage.INSTALLED);
   assert.equal(saved[0].bundleName, f.job.bundleName);
-  assert.equal(recent.cachePath, '/sandbox/install-jobs/new.hap');
+  assert.equal(recent.cachePath, '');
   assert.equal(pending.cachePath, '/sandbox/install-jobs/old.hap');
 });
 
@@ -623,4 +631,13 @@ test('channel changes allow higher builds and open installed builds at or above 
   d.installedUnknown = true; d.selectedAsset.versionCode = 7;
   d.releases = [{ prerelease: true, assets: [{ bundleName: 'test.bundle', versionCode: 9 }] }];
   assert.equal(d.installButtonEnabled(), false, 'unknown system state falls back to the recorded internal build');
+});
+
+test('a local task waiting in the FIFO is queued, not falsely paused or failed', async () => {
+  const f = localFixture(), ui = pages(f).local();
+  f.job.stage = f.InstallStage.QUEUED; await f.store.save(f.job);
+  assert.equal(ui.timeline.status, '排队中');
+  assert.equal(ui.timeline.tone, 'normal');
+  assert.equal(ui.timeline.running, false);
+  f.state.unsubscribe(ui.subscription);
 });

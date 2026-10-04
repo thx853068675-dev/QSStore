@@ -12,6 +12,7 @@ function load(file, mocks) {
   }).outputText, { exports, require: name => mocks[name] || {}, console });
   return exports;
 }
+const end = '__QINGQI_BUNDLE_LIST_END__\n';
 const own = 'com.tonghongxiang.hapstore', external = 'com.example.external';
 function fixture() {
   const disk = new Map(), calls = [], starts = [];
@@ -28,8 +29,8 @@ function fixture() {
   f.bridge.connected = async () => { Bridge.linked = true; return true; };
   f.bridge.command = async (op, name) => {
     calls.push([op, name]);
-    if (op === 13) return f.invalid ?? 'ID: 100:\n' + f.names.join('\n') + '\n';
-    if (op === 6) return 'ID: 100:\n' + f.all.join('\n') + '\n';
+    if (op === 13) return f.invalid ?? 'ID: 100:\n' + f.names.join('\n') + '\n' + end;
+    if (op === 6) return f.partialAll ?? 'ID: 100:\n' + f.all.join('\n') + '\n' + end;
     if (op === 14) return name === external ? '离线阅读器' : '轻启·安装器';
     if (f.bad.has(name)) return 'malformed bundle details';
     return JSON.stringify({ name, versionCode: f.version ?? 42, versionName: '1.2.3', entryModuleName: 'entry',
@@ -70,7 +71,7 @@ test('malformed or truncated inventories preserve cached side loads; a valid emp
     f.invalid = output; await assert.rejects(() => f.bridge.sideloadedApps());
     assert.equal(f.registry.sideloadedApps().length, 2);
   }
-  f.invalid = 'ID: 100:\n';
+  f.invalid = 'ID: 100:\n' + end;
   assert.equal((await f.bridge.sideloadedApps()).length, 0);
 });
 test('individual package failures retain its last version; a complete existence list confirms removal', async () => {
@@ -89,22 +90,102 @@ function method(name) {
   const start = source.search(new RegExp(`^  (?:private )?(?:async )?${name}\\(`, 'm'));
   assert(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
 }
-function pageFixture() {
+function pageFixture(registry) {
   const box = { InstallStage: { INSTALLED: 'installed' }, ReleaseChannelRegistry: { apply: app => app },
-    InstalledAppRegistry: { version: () => -1, versionName: () => '', displayName: () => '' } };
+    InstalledSigningExpiry: load('jobs/InstalledSigningExpiry', {}).InstalledSigningExpiry,
+    InstalledAppRegistry: registry ?? { version: () => -1, observedAt: () => 0, versionName: () => '', displayName: () => '', installationTime: () => 0 } };
   const members = ['allInstalledJobs', 'recentInstalledJobs', 'currentInstalledView', 'displayInstalledVersion',
-    'managementInstalledJobs', 'updateApps', 'installedAssets', 'latestAssets', 'catalogForJob', 'jobTitle'];
+    'managementInstalledJobs', 'renewalDeadline', 'updateApps', 'installedAssets', 'latestAssets', 'catalogForJob', 'jobTitle'];
   vm.runInNewContext(ts.transpileModule(`class Page { ${members.map(method).join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
   const ui = new box.Page();
   Object.assign(ui, { installedJobs: [], storeInstalled: [], deviceInstalled: [], pendingJobs: [],
+    updateFor: () => undefined, signingExpiries: new Map(), signingExpiryEstimates: new Map(),
     installedDisplay: new Map(), apps: [], updateCatalog: [], updateCatalogReady: true, installedLocalOnly: false });
   return ui;
 }
 function job(bundleName, id = bundleName) {
-  return { id, bundleName, appId: 0, versionCode: 42, versionName: '1.2.3', sourceUrl: 'device', stage: 'installed' };
+  return { id, bundleName, appId: 0, versionCode: 42, versionName: '1.2.3', sourceUrl: 'device',
+    stage: 'installed', stageHistory: [], updatedAt: 1800000000000 };
 }
+
+test('both installed groups rank updates first, then earliest exact or estimated expiry, preserving ties', () => {
+  for (const localOnly of [false, true]) {
+    const ui = pageFixture();
+    const rows = ['latest', 'expired', 'estimate', 'update-late', 'update-soon', 'same-day']
+      .map(name => job('com.example.' + name, name));
+    ui.installedJobs = rows;
+    ui.updateCatalog = localOnly ? [] : [{ id: 1, latestAssets: rows.map(row => ({ bundleName: row.bundleName })) }];
+    ui.updateFor = bundle => bundle.includes('update-') ? { bundleName: bundle } : undefined;
+    const end = 1800000000;
+    ui.signingExpiries = new Map([
+      [rows[0].bundleName, end + 300], [rows[1].bundleName, end - 1],
+      [rows[3].bundleName, end + 200], [rows[4].bundleName, end + 100],
+      [rows[5].bundleName, end + 300]
+    ]);
+    // An estimate is ordered by the displayed date, but never replaces a verified date.
+    ui.signingExpiryEstimates = new Map([[rows[2].bundleName, end + 10], [rows[3].bundleName, end - 100]]);
+    assert.deepEqual(Array.from(ui.managementInstalledJobs(localOnly), row => row.id),
+      ['update-soon', 'update-late', 'expired', 'estimate', 'latest', 'same-day']);
+    assert.deepEqual(Array.from(ui.installedJobs, row => row.id), rows.map(row => row.id),
+      'sorting must not rewrite install history');
+    ui.signingExpiryEstimates.set(rows[2].bundleName, end + 500);
+    ui.updateFor = () => undefined;
+    assert.deepEqual(Array.from(ui.managementInstalledJobs(localOnly), row => row.id),
+      ['expired', 'update-soon', 'update-late', 'latest', 'same-day', 'estimate'],
+      'refreshed expiry and update state immediately changes the order');
+  }
+});
+
+test('pending expiry reads sort using the same durable install-time fallback shown in the label', () => {
+  const ui = pageFixture();
+  const a = job('com.example.newer', 'newer'), b = job('com.example.older', 'older');
+  a.installedUpdateTime = 1800000000000; b.installedUpdateTime = 1700000000000;
+  ui.installedJobs = [a, b];
+  assert.deepEqual(Array.from(ui.managementInstalledJobs(true), row => row.id), ['older', 'newer']);
+  ui.signingExpiryEstimates.set(a.bundleName, 1600000000);
+  assert.deepEqual(Array.from(ui.managementInstalledJobs(true), row => row.id), ['newer', 'older']);
+});
+
+test('freshly confirmed local reinstall beats the page snapshot, while newer uninstall still wins', async () => {
+  const f = fixture(); await f.bridge.sideloadedApps();
+  const page = pageFixture(f.registry); page.installedJobs = [job(external)];
+  page.installedDisplay.set(external, { version: 0, at: Date.now() - 1000 });
+  assert.equal(page.displayInstalledVersion(external), 42);
+  assert.equal(page.managementInstalledJobs(true).length, 1);
+  page.installedDisplay.set(external, { version: 0, at: f.registry.observedAt(external) + 1 });
+  assert.equal(page.managementInstalledJobs(true).length, 0);
+});
+
+test('a truncated sideload inventory preserves the previous offline group', async () => {
+  const f = fixture(); await f.bridge.sideloadedApps();
+  f.invalid = 'ID: 100:\n' + own + '\n';
+  await assert.rejects(f.bridge.sideloadedApps(), /完整/);
+  assert.equal(f.registry.sideloadedApps().some(row => row.bundleName === external), true);
+});
+test('uninstall refresh and process restart never revive old local installation history', async () => {
+  const f = fixture(); await f.bridge.sideloadedApps();
+  const before = pageFixture(f.registry); before.installedJobs = [job(external, 'old-local-install')];
+  assert.equal(before.managementInstalledJobs(true).length, 1);
+  f.names = [own]; f.all = [own, 'com.huawei.settings'];
+  await f.bridge.sideloadedApps([external]);
+  assert.equal(before.managementInstalledJobs(true).length, 0);
+  const restartedRegistry = load('jobs/InstalledAppRegistry', f.mocks).InstalledAppRegistry;
+  await restartedRegistry.load({});
+  const restartedPage = pageFixture(restartedRegistry);
+  restartedPage.installedJobs = [job(external, 'old-local-install')];
+  assert.equal(restartedPage.managementInstalledJobs(true).length, 0,
+    'restoring job history must not turn an uninstalled app back into an installed app');
+  assert.equal(restartedPage.installedJobs.length, 1, 'history remains intact');
+  f.mocks['./InstalledAppRegistry'] = { InstalledAppRegistry: restartedRegistry };
+  const Bridge = load('jobs/HdcDeviceBridge', f.mocks).HdcDeviceBridge;
+  const bridge = new Bridge({}); bridge.connected = async () => { Bridge.linked = true; return true; };
+  bridge.command = f.bridge.command; f.names = [own, external]; f.all.push(external); f.version = 43;
+  await bridge.sideloadedApps();
+  assert.equal(restartedPage.managementInstalledJobs(true).length, 1);
+  assert.equal(restartedPage.managementInstalledJobs(true)[0].versionCode, 43);
+});
 test('one bundle appears and counts once across sources; locally installed published apps join the store group', () => {
   const ui = pageFixture(); ui.updateCatalog = [{ id: 1, displayName: '商店应用', latestAssets: [{ bundleName: external }] }];
   ui.installedJobs = [job(external, 'history')];

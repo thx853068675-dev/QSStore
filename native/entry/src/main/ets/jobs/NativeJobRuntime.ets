@@ -5,7 +5,7 @@ import { LocalBundles } from './LocalBundles';
 import { common } from '@kit.AbilityKit';
 import { fileIo, hash } from '@kit.CoreFileKit';
 import { hasSigningBlock, signHap, verifyHap } from 'libhap_core.so';
-import { AgcProfile } from '../data/AgcProfile';
+import { AgcProfile, ProfileRefreshOptions } from '../data/AgcProfile';
 import { DeveloperAccount } from '../data/DeveloperAccount';
 import { StoreClient } from '../data/StoreClient';
 import { LocalSigningIdentity, SigningIdentityRecovery } from '../data/SigningIdentity';
@@ -13,10 +13,11 @@ import { AssetDownload } from './AssetDownload';
 import { FailureKind, InstallJob, InstallStage, RecoveryEvidence } from './InstallJob';
 import { JobFailure, JobPaths, JobRuntime, PackageIdentity } from './JobRunner';
 import { JobStore } from './JobStore';
-import { InstalledSigningIdentity } from './InstalledAppRegistry';
+import { InstalledAppRegistry, InstalledSigningIdentity } from './InstalledAppRegistry';
 import { checkCatalogIdentity, inspectPackage, PackageInspectError, PackageIdentity as InspectedIdentity, requestedPermissions } from './PackageInspector';
 import { JobCancellation } from './JobCancellation';
 import { InstallTaskState } from './InstallTaskState';
+import { InstalledSigningExpiry } from './InstalledSigningExpiry';
 
 // A concrete adapter must query the device after reconnecting. Installed
 // version is the final proof; a successful HDC command alone is insufficient.
@@ -47,6 +48,8 @@ export class NativeJobRuntime implements JobRuntime {
   private verifiedCacheSha256: string = '';
   private freshlySignedPath: string = '';
   private freshlySignedProfileSha256: string = '';
+  private confirmedSubmission: string = '';
+  private confirmedRenewalIdentity: InstalledSigningIdentity | undefined = undefined;
 
   constructor(context: common.UIAbilityContext, store: JobStore,
     account: DeveloperAccount | undefined, device: NativeDeviceBridge) {
@@ -96,6 +99,8 @@ export class NativeJobRuntime implements JobRuntime {
     evidence.verifiedCache = await new AssetDownload(this.context, this.store)
       .verifiedFileExists(job);
     if (evidence.verifiedCache) this.rememberVerifiedCache(job);
+    // An old valid Profile is not proof that this renewal request was prepared.
+    if (job.renewalRequestedAt > 0 && job.renewalPreparedAt !== job.renewalRequestedAt) return evidence;
     if (evidence.verifiedCache && this.usesOriginalInstaller(job)) {
       // 兼容旧版已签名制品。未签名制品以及已选本机证书的任务都必须走
       // 下方的 Profile、签名和恢复校验，不能把原包当成已签名。
@@ -194,6 +199,23 @@ export class NativeJobRuntime implements JobRuntime {
 
   async ensureProfile(job: InstallJob): Promise<void> {
     JobCancellation.assertActive(job.id);
+    if (job.renewalRequestedAt > 0) {
+      if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, '请先登录华为开发者账号');
+      // Recovery may skip the normal inspection stage for a retained source.
+      // Validate actual bytes against the renewal target before any AGC work.
+      const parsed = await this.inspectPackage(job);
+      if (parsed.bundleName !== job.bundleName || parsed.versionCode !== job.versionCode) {
+        throw new JobFailure(FailureKind.INVALID_PACKAGE, '续签原包与已安装应用的包名或内部版本号不一致');
+      }
+      job.moduleName = parsed.moduleName; job.mainAbility = parsed.mainAbility;
+      let installed: InstalledSigningIdentity | undefined;
+      try { installed = await this.device.installedSigningIdentity(job.bundleName); }
+      catch (error) { throw new JobFailure(FailureKind.DEVICE, '请连接无线调试，核对待续签应用后继续：' + String(error)); }
+      this.assertRenewalTarget(job, installed);
+      await this.ensureAccountProfile(job,
+        await SigningIdentityRecovery.ensureForInstall(this.context, this.account));
+      return;
+    }
     if (LocalBundles.isSelfBundle(job.bundleName)) {
       await this.verifyOriginalInstaller(job);
       const installed = LocalBundles.selfSigningFingerprint();
@@ -243,31 +265,86 @@ export class NativeJobRuntime implements JobRuntime {
       throw new JobFailure(FailureKind.DEVICE, '设备 UDID 尚未可用');
     }
     let selected = identity;
+    let renewalInstalled: InstalledSigningIdentity | undefined;
     let fingerprint = LocalBundles.isSelfBundle(job.bundleName) ?
       LocalBundles.selfSigningFingerprint() : '';
     try {
       const installed = await this.device.installedSigningIdentity(job.bundleName);
+      renewalInstalled = installed;
       if (installed?.fingerprint.length === 64) fingerprint = installed.fingerprint;
-    } catch (_) { /* 身份查询失败时由系统安装器最终裁决。 */ }
+    } catch (error) {
+      if (job.renewalRequestedAt > 0) throw new JobFailure(FailureKind.DEVICE,
+        '请连接无线调试，核对待续签应用后继续：' + String(error));
+      /* 普通安装的身份查询失败由系统安装器最终裁决。 */
+    }
+    if (job.renewalRequestedAt > 0) {
+      this.assertRenewalTarget(job, renewalInstalled);
+      if (job.renewalPreparedAt !== job.renewalRequestedAt && renewalInstalled) {
+        const candidates = [job, ...await this.store.listAll()];
+        for (const previous of candidates) {
+          if (previous.bundleName !== job.bundleName || previous.versionCode !== job.versionCode ||
+            (previous !== job && previous.stage !== InstallStage.INSTALLED) || !previous.profilePath) continue;
+          try {
+            if (await AgcProfile.signingFingerprint(previous.profilePath) !== renewalInstalled.fingerprint) continue;
+            job.renewalPreviousExpiry = Math.max(job.renewalPreviousExpiry,
+              AgcProfile.profileExpiry(previous.profilePath));
+          } catch (_) { /* 其他工具的 Profile 可能不可读取，不能虚构原有效期。 */ }
+        }
+        await this.store.save(job);
+      }
+    }
+    const minimumExpiry = Math.max(Math.floor(Date.now() / 1000) + 3600, job.renewalPreviousExpiry || 0);
     if (fingerprint.length === 64) {
       try {
         const matched = await SigningIdentityRecovery.matchingInstalledCertificate(
           this.context, this.account, fingerprint);
-        if (matched) selected = matched;
+        if (matched && (!(job.renewalRequestedAt > 0) || matched.certExpiry > minimumExpiry)) selected = matched;
       } catch (error) {
         // AGC 列表或下载失败是“未知”，不能当成找不到匹配证书。
         throw new JobFailure((error as ClassifiedFailure).failureKind ?? FailureKind.ACCOUNT,
           '暂时无法核实可复用证书，已暂停更新以保护应用数据：' + String(error));
       }
     }
+    if (job.renewalRequestedAt > 0 && selected.certExpiry <= minimumExpiry) {
+      selected = await SigningIdentityRecovery.ensureForRenewal(this.context, this.account, minimumExpiry);
+    }
     selected = await SigningIdentityRecovery.pinForJob(this.context, selected);
     job.signingCertId = selected.certId;
+    let refresh: ProfileRefreshOptions | undefined;
+    if (job.renewalRequestedAt > 0) {
+      refresh = new ProfileRefreshOptions();
+      refresh.requestId = job.renewalRequestedAt.toString(36);
+      refresh.minimumExpiry = minimumExpiry;
+    }
     job.profilePath = await AgcProfile.ensure(this.context, this.account, selected,
-      job.bundleName, udid, await PackageArchive.permissions(await this.packagePath(job)));
+      job.bundleName, udid, await PackageArchive.permissions(await this.packagePath(job)), refresh);
     job.deviceUdid = udid;
     job.profileSha256 = (await hash.hash(job.profilePath, 'sha256')).toLowerCase();
+    if (job.renewalRequestedAt > 0) {
+      job.renewalExpiresAt = AgcProfile.effectiveExpiry(job.profilePath, selected.certExpiry);
+      job.renewalPreparedAt = job.renewalRequestedAt;
+    }
     await this.store.save(job);
     await this.assertCompatibleUpdate(job);
+  }
+
+  private assertRenewalTarget(job: InstallJob, installed: InstalledSigningIdentity | undefined): void {
+    // A confirmed replacement can be resumed if uninstall succeeded but installation was interrupted.
+    if (!installed && job.allowDataLoss && job.approvedInstalledVersion === job.versionCode &&
+      job.renewalInstallBaseline > 0 && (job.approvedInstalledFingerprint.length === 64 ||
+        job.approvedInstalledAppIdentifier.length > 0)) return;
+    if (!installed || installed.versionCode <= 0) {
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, '本机未安装该应用，无法续签，请使用普通签装');
+    }
+    if (installed.versionCode !== job.versionCode) {
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, '续签需要与已安装应用相同版本的安装包，请重新选择');
+    }
+    if (installed.fingerprint.length !== 64 && !installed.appIdentifier) {
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, '无法核对已安装应用的签名身份，已保留旧应用');
+    }
+    if (!Number.isFinite(installed.updateTime) || installed.updateTime <= 0) {
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, '无法核对应用安装时间，请刷新应用信息后再续签');
+    }
   }
 
   private async assertCompatibleUpdate(job: InstallJob): Promise<void> {
@@ -275,7 +352,11 @@ export class NativeJobRuntime implements JobRuntime {
     // appIdentifier 相同。提前发现冲突，避免重签、传包后才卡在安装阶段。
     let installed: InstalledSigningIdentity | undefined;
     try { installed = await this.device.installedSigningIdentity(job.bundleName); }
-    catch (_) { /* 无法读取时仍交给系统安装器作最终校验。 */ }
+    catch (error) {
+      if (job.renewalRequestedAt > 0) throw new JobFailure(FailureKind.DEVICE,
+        '无线调试连接不可用，无法核对续签身份：' + String(error));
+      /* 普通安装无法读取时仍交给系统安装器作最终校验。 */
+    }
     if (installed === undefined && LocalBundles.isSelfBundle(job.bundleName)) {
       installed = new InstalledSigningIdentity();
       installed.fingerprint = LocalBundles.selfSigningFingerprint();
@@ -288,7 +369,13 @@ export class NativeJobRuntime implements JobRuntime {
         candidateFingerprint === installed.fingerprint;
       const sameApp = installed.appIdentifier.length > 0 &&
         candidateIdentifier.length > 0 && candidateIdentifier === installed.appIdentifier;
-      if (!sameCertificate && !sameApp && !job.allowDataLoss) {
+      const approved = job.allowDataLoss && installed.versionCode === job.approvedInstalledVersion &&
+        installed.fingerprint === job.approvedInstalledFingerprint &&
+        installed.appIdentifier === job.approvedInstalledAppIdentifier;
+      if (!sameCertificate && !sameApp && !approved) {
+        if (job.allowDataLoss) { job.allowDataLoss = false; await this.store.save(job); }
+        if (job.renewalRequestedAt > 0) throw new JobFailure(FailureKind.CONFIRMATION,
+          '当前签名身份无法保留数据续签。继续会卸载重装，清除该应用的缓存、设置和登录状态。');
         throw new JobFailure(FailureKind.CONFIRMATION,
           '未找到可保留数据的签名身份。卸载旧版再安装会清除该应用的缓存和登录状态。');
       }
@@ -361,7 +448,8 @@ export class NativeJobRuntime implements JobRuntime {
 
   private usesOriginalInstaller(job: InstallJob): boolean {
     return LocalBundles.isSelfBundle(job.bundleName) &&
-      !job.allowDataLoss && !this.unsignedInstallerAsset(job) && job.profilePath.length === 0;
+      !(job.renewalRequestedAt > 0) && !job.allowDataLoss &&
+      !this.unsignedInstallerAsset(job) && job.profilePath.length === 0;
   }
 
   private async profileMatchesInstalledInstaller(path: string): Promise<boolean> {
@@ -389,6 +477,20 @@ export class NativeJobRuntime implements JobRuntime {
 
   async install(job: InstallJob): Promise<void> {
     JobCancellation.assertActive(job.id);
+    if (job.renewalRequestedAt > 0) {
+      // A timeout/navigation/restart may hide the system's success response.
+      // Reconcile the original baseline before submitting the same renewal again.
+      if (job.renewalInstallBaseline > 0 && await this.confirmRenewal(job)) return;
+      const installed = await this.device.installedSigningIdentity(job.bundleName);
+      this.assertRenewalTarget(job, installed);
+      if (job.renewalPreparedAt !== job.renewalRequestedAt ||
+        job.renewalExpiresAt <= Date.now() / 1000 + 3600) {
+        throw new JobFailure(FailureKind.INVALID_PACKAGE, '续签授权尚未核对或已失效，旧应用已保留');
+      }
+      await this.assertCompatibleUpdate(job);
+      if (job.renewalInstallBaseline <= 0) job.renewalInstallBaseline = installed?.updateTime ?? 0;
+      await this.store.save(job);
+    }
     // 排队期间本机可能已通过其他来源升级。用解析出的内部编号复核，
     // 在线更新不能因签名不兼容而误走卸载后降级的路线。
     if (job.appId > 0 && await this.installedVersion(job.bundleName) > job.versionCode) {
@@ -489,6 +591,7 @@ export class NativeJobRuntime implements JobRuntime {
         InstallTaskState.installProgress(job.id, phase, sent, total);
       if (replacing) await this.device.installStaged(staged, job.bundleName, progress);
       else await this.device.install(path, progress);
+      this.confirmedSubmission = job.id;
       InstallTaskState.installProgress(job.id, 'verifying', 0, 0);
     }
     catch (error) {
@@ -498,6 +601,8 @@ export class NativeJobRuntime implements JobRuntime {
         LocalBundles.liveInstalledVersion(job.bundleName) === job.versionCode) return;
       const reason = String(error);
       if (!job.allowDataLoss && /9568264/.test(reason)) {
+        if (job.renewalRequestedAt > 0) throw new JobFailure(FailureKind.CONFIRMATION,
+          '系统拒绝保留数据续签。继续会卸载重装，清除该应用的缓存、设置和登录状态。');
         throw new JobFailure(FailureKind.CONFIRMATION,
           '系统拒绝覆盖安装：签名身份不一致。卸载旧版再安装会清除该应用的缓存和登录状态。');
       }
@@ -516,13 +621,53 @@ export class NativeJobRuntime implements JobRuntime {
 
   async installedVersion(bundleName: string): Promise<number> {
     const local = LocalBundles.liveInstalledVersion(bundleName);
-    if (LocalBundles.isKnown(local)) return local;
+    if (LocalBundles.isKnown(local)) {
+      await InstalledAppRegistry.load(this.context);
+      const name = LocalBundles.installedVersionName(bundleName, local);
+      const changed = InstalledAppRegistry.version(bundleName) !== local ||
+        InstalledAppRegistry.versionName(bundleName, local) !== name;
+      InstalledAppRegistry.remember(bundleName, local, name);
+      if (changed) await InstalledAppRegistry.persist(this.context);
+      return local;
+    }
     try { return await this.device.installedVersion(bundleName); }
     catch (error) {
       if (!await this.device.connected()) {
         throw new JobFailure(FailureKind.DEVICE, '无线调试已断开，请重新连接后继续');
       }
       throw new Error(String(error));
+    }
+  }
+
+  async confirmRenewal(job: InstallJob): Promise<boolean> {
+    let installed: InstalledSigningIdentity | undefined;
+    try { installed = await this.device.installedSigningIdentity(job.bundleName); }
+    catch (error) { throw new JobFailure(FailureKind.DEVICE, '无线调试连接不可用，续签结果尚未核实：' + String(error)); }
+    const confirmed = installed !== undefined && installed.versionCode === job.versionCode &&
+      job.renewalInstallBaseline > 0 && installed.updateTime > job.renewalInstallBaseline &&
+      installed.fingerprint === await AgcProfile.signingFingerprint(job.profilePath);
+    this.confirmedRenewalIdentity = confirmed ? installed : undefined;
+    return confirmed;
+  }
+
+  async rememberInstalledAuthorization(job: InstallJob): Promise<void> {
+    if (!job.profilePath) return;
+    if (job.renewalRequestedAt > 0 && this.confirmedRenewalIdentity !== undefined) {
+      // confirmRenewal already obtained fresh system evidence. Its timestamp
+      // can precede the retry's INSTALLING mark; that does not erase success.
+      await InstalledSigningExpiry.capture(job, this.confirmedRenewalIdentity);
+      await InstalledAppRegistry.persist(this.context);
+      return;
+    }
+    if (this.confirmedSubmission !== job.id) return;
+    // Display metadata must not add another HDC round-trip at 95% progress.
+    const installed = InstalledSigningExpiry.current(job.bundleName) ??
+      InstalledAppRegistry.signingIdentity(job.bundleName, 15000);
+    const installingAt = job.stageHistory.filter((mark) => mark.stage === InstallStage.INSTALLING)
+      .slice(-1)[0]?.at ?? 0;
+    if (installed && installingAt > 0 && installed.updateTime >= installingAt) {
+      await InstalledSigningExpiry.capture(job, installed);
+      await InstalledAppRegistry.persist(this.context);
     }
   }
 }

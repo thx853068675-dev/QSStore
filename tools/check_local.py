@@ -49,8 +49,9 @@ def main():
         ('hdc', [cargo, 'test', '--manifest-path', 'native/hdc_transport/hdc/Cargo.toml', *rust_args], 900),
     ]
     if args.build:
+        version = json.loads((ROOT / 'native/AppScope/app.json5').read_text())['app']['versionName']
         steps.append(('arkts-build', [sys.executable, 'native/tools/build_unsigned_formal.py',
-                      '--output', str(output / 'qingqi-installer-0.4.50-unsigned.hap')], 900))
+                      '--output', str(output / f'quietstart-installer-{version}-unsigned.hap')], 900))
     results = []
     for name, command, timeout in steps:
         print(f'Checking {name}…', flush=True)
@@ -65,6 +66,10 @@ def main():
                 handle.write('\nGate timeout; process terminated.\n')
         results.append(dict(name=name, exit_code=code, seconds=round(time.monotonic() - start, 2), log=str(log)))
         print(f'{name}: {"PASS" if code == 0 else "FAIL"} ({results[-1]["seconds"]}s)', flush=True)
+        if code != 0:
+            # Keep full logs on disk; make the failing diagnostics visible in CI too.
+            lines = log.read_text(errors='replace').splitlines()
+            print('\n'.join(lines[-200:]), flush=True)
     summary = output / 'summary.json'
     summary.write_text(json.dumps(results, indent=2) + '\n')
     print(f'Results: {summary}', flush=True)

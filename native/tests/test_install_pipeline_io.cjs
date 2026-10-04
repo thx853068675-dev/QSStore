@@ -22,7 +22,8 @@ function fixture(installedVersion = 0, selfUpdate = false,
   alternateCertificate = false, backupFails = false) {
   const calls = { hapHashes: 0, profileHashes: 0, nativeSigns: 0,
     nativeVerifies: 0, installedPath: '', uninstalls: 0, selfStaged: '',
-    selectedCertId: '', identityBackups: 0, identityPrepares: 0, order: [], stagedCleanup: 0 };
+    selectedCertId: '', identityBackups: 0, identityPrepares: 0, order: [], stagedCleanup: 0,
+    profiles: [], renewals: [], previousJobs: [], saved: [] };
   let deviceVersion = installedVersion;
   const job = {
     sourceUrl: 'local', assetName: 'installer-signed.hap',
@@ -34,30 +35,40 @@ function fixture(installedVersion = 0, selfUpdate = false,
   };
   const originalIdentity = { bundleName: job.bundleName, versionCode: job.versionCode };
   const mocks = {
+    './InstalledSigningExpiry': { InstalledSigningExpiry: {
+      capture: async (value, installed) => {
+        calls.capturedIdentity={...installed};value.authorizationExpiresAt=1900000000;
+        value.installedUpdateTime=installed.updateTime;value.installedFingerprint=installed.fingerprint;
+      },current:()=>undefined
+    } },
     './StorageBudget': { StorageBudget: { require: async () => {} } },
     './PackageArchive': { PackageArchive: { permissions: async () => [], workingBytes: () => 123, release: () => {} } },
     './JobCancellation': { JobCancellation: { assertActive: () => {
       if (calls.cancelled) throw new Error('安装任务已取消');
     } } },
     './InstallJob': { InstallStage: { INSTALLING: 'installing', INSTALLED: 'installed' },
-      FailureKind: { INVALID_PACKAGE: 'invalid_package' },
+      FailureKind: { INVALID_PACKAGE: 'invalid_package', DEVICE: 'device', CONFIRMATION: 'confirmation' },
       RecoveryEvidence: class {
       verifiedCache = false; validProfile = false; verifiedSignature = false;
       installedVersionCode = 0;
     } },
-    './LocalBundles': { LocalBundles: { liveInstalledVersion: () => installedVersion,
+    './LocalBundles': { LocalBundles: { liveInstalledVersion: () => installedVersion, installedVersionName: () => '',
       isKnown: version => version >= 0, isSelfBundle: () => selfUpdate, selfSigningFingerprint: () => 'A'.repeat(64),
       selfAppIdentifier: () => 'installed-app-id' } },
-    './InstalledAppRegistry': { InstalledSigningIdentity: class {
+    './InstalledAppRegistry': { InstalledAppRegistry: { load: async () => {}, version: () => installedVersion,
+      versionName: () => '', remember: () => {}, persist: async () => {} }, InstalledSigningIdentity: class {
       fingerprint = ''; appIdentifier = ''; versionCode = 0;
     } },
-    '../data/AgcProfile': { AgcProfile: {
+    '../data/AgcProfile': { ProfileRefreshOptions: class {}, AgcProfile: {
       signingFingerprint: async () => matchingIdentity ? 'A'.repeat(64) : 'B'.repeat(64),
       appIdentifier: () => matchingIdentity || matchingAppIdentifier ?
         'installed-app-id' : 'other-app-id',
       valid: () => true, effectiveAcls: () => [],
-      ensure: async (_context, _account, identity) => {
+      profileExpiry: () => calls.previousExpiry || 0,
+      effectiveExpiry: (_path, expiry) => Math.min(calls.profileExpiry || Date.now() / 1000 + 86400, expiry),
+      ensure: async (_context, _account, identity, _bundle, _udid, _permissions, refresh) => {
         calls.selectedCertId = identity.certId;
+        calls.profiles.push(refresh && { ...refresh });
         return '/private/profile.p7b';
       }
     } },
@@ -81,14 +92,20 @@ function fixture(installedVersion = 0, selfUpdate = false,
         calls.identityPrepares++;
         if (calls.enrollmentError) throw new Error(calls.enrollmentError);
         if (calls.cancelAfterPrepare) calls.cancelled = true;
-        return { certId: calls.missingIdentity ? '3' : '1',
+        return { certId: calls.missingIdentity ? '3' : '1', certExpiry: calls.certExpiry ?? Date.now() / 1000 + 365 * 86400,
           privateKeyPath: '/private/key', certificatePath: '/private/cert' };
+      },
+      ensureForRenewal: async (_context, _account, minimum) => {
+        calls.renewals.push(minimum);
+        return { certId: '4', certExpiry: minimum + 365 * 86400,
+          privateKeyPath: '/private/key', certificatePath: '/private/cert-4' };
       },
       load: async () => ({ certId: '1', privateKeyPath: '/private/key', certificatePath: '/private/cert' }),
       restore: async () => ({ certId: '1', privateKeyPath: '/private/key', certificatePath: '/private/cert' }),
       forJob: async () => ({ certId: '1', privateKeyPath: '/private/key', certificatePath: '/private/cert' }),
       matchingInstalledCertificate: async () => alternateCertificate ?
-        { certId: '2', privateKeyPath: '/private/key', certificatePath: '/private/cert-2' } : undefined,
+        { certId: '2', certExpiry: calls.certExpiry ?? Date.now() / 1000 + 365 * 86400,
+          privateKeyPath: '/private/key', certificatePath: '/private/cert-2' } : undefined,
       pinForJob: async (_context, identity) => identity
     } },
     '../data/StoreClient': { StoreClient: class {
@@ -103,20 +120,29 @@ function fixture(installedVersion = 0, selfUpdate = false,
         return value.expectedSha256 === 'abc';
       }
     } },
-    './PackageInspector': { inspectPackage: () => originalIdentity,
+    './PackageInspector': { inspectPackage: () => calls.inspectedIdentity ?? originalIdentity,
+      checkCatalogIdentity: () => {}, PackageInspectError: class extends Error {},
       requestedPermissions: () => [] },
     './JobRunner': { JobFailure: class extends Error {
-      constructor(_kind, message) { super(message); }
+      constructor(kind, message) { super(message); this.kind=kind; }
     }, JobPaths: class {}, PackageIdentity: class {} }
   };
   const Runtime = loadRuntime(mocks);
-  const runtime = new Runtime({}, { save: async () => {} }, { userId: '1' }, {
+  const runtime = new Runtime({}, { save: async value => calls.saved.push({ ...value }),
+    listAll: async () => calls.previousJobs }, { userId: '1' }, {
     connected: async () => true,
     udid: async () => 'a'.repeat(64),
-    installedSigningIdentity: async () => installedIdentity,
+    installedSigningIdentity: async () => {
+      calls.signingQueries=(calls.signingQueries||0)+1;
+      if (calls.queryError) throw Error('device offline');
+      return installedIdentity;
+    },
     installedVersion: async () => deviceVersion,
     uninstall: async () => { calls.uninstalls++; deviceVersion = 0; },
-    install: async file => { calls.installedPath = file; deviceVersion = job.versionCode; },
+    install: async file => {
+      if (calls.installError) throw Error(calls.installError);
+      calls.installedPath = file; deviceVersion = job.versionCode;
+    },
     stageInstall: async file => {
       calls.order.push('stage');
       if (calls.stageFails) throw Error('transfer failed before uninstall');
@@ -134,6 +160,153 @@ function fixture(installedVersion = 0, selfUpdate = false,
   return { job, calls, Runtime, runtime };
 }
 
+function renewalFixture({ sameCertificate = true, sameApp = false, alternateCertificate = false } = {}) {
+  const installed = { versionCode: 7, fingerprint: 'A'.repeat(64),
+    appIdentifier: 'installed-app-id', updateTime: 1700000000000 };
+  const f = fixture(7, false, sameCertificate, sameApp, installed, alternateCertificate);
+  Object.assign(f.job, { renewalRequestedAt: Date.now(), renewalPreparedAt: 0,
+    renewalPreviousExpiry: 0, renewalExpiresAt: 0, renewalInstallBaseline: 0, reinstallRequired: true });
+  return { ...f, installed };
+}
+test('an old valid Profile is never accepted as evidence of a new renewal', async () => {
+  const f = renewalFixture();
+  f.job.deviceUdid = 'a'.repeat(64); f.job.signedProfileSha256 = 'profile';
+  const evidence = await f.runtime.inspectEvidence(f.job);
+  assert.equal(evidence.validProfile, false);
+  assert.equal(evidence.verifiedSignature, false);
+});
+test('retained renewal bytes are inspected before certificate work, even when the journal claims the right version', async () => {
+  for (const actual of [{ bundleName: 'com.example.other', versionCode: 7 },
+    { bundleName: 'com.example.app', versionCode: 8 }]) {
+    const f = renewalFixture(); f.calls.inspectedIdentity = actual;
+    await assert.rejects(f.runtime.ensureProfile(f.job), /续签原包.*不一致/);
+    assert.equal(f.calls.identityPrepares, 0); assert.equal(f.calls.profiles.length, 0);
+    assert.equal(f.calls.uninstalls, 0);
+  }
+});
+test('same-version renewal prepares a fresh authorization and submits without uninstalling', async () => {
+  const f = renewalFixture({ alternateCertificate: true });
+  f.calls.previousExpiry = Date.now() / 1000 + 7200;
+  await f.runtime.ensureProfile(f.job);
+  assert.equal(f.job.signingCertId, '2');
+  assert.equal(f.job.renewalPreparedAt, f.job.renewalRequestedAt);
+  assert.ok(f.job.renewalExpiresAt > f.job.renewalPreviousExpiry);
+  assert.deepEqual(f.calls.profiles[0], {
+    requestId: f.job.renewalRequestedAt.toString(36), minimumExpiry: f.job.renewalPreviousExpiry });
+  await f.runtime.sign(f.job); await f.runtime.install(f.job);
+  assert.equal(f.calls.installedPath, f.job.signedPath);
+  assert.equal(f.job.renewalInstallBaseline, f.installed.updateTime);
+  assert.equal(f.calls.uninstalls, 0); assert.equal(f.calls.renewals.length, 0);
+  assert.equal(await f.runtime.confirmRenewal(f.job), false, 'same version alone is not a completion proof');
+  f.installed.updateTime++;
+  assert.equal(await f.runtime.confirmRenewal(f.job), true);
+});
+test('renewal rejects missing, mismatched or unidentifiable targets before certificate preparation', async () => {
+  for (const change of [i => { i.versionCode = 0; }, i => { i.versionCode++; },
+    i => { i.fingerprint = ''; i.appIdentifier = ''; }, i => { i.updateTime = 0; }]) {
+    const f = renewalFixture(); change(f.installed);
+    await assert.rejects(() => f.runtime.ensureProfile(f.job));
+    assert.equal(f.calls.identityPrepares, 0);
+    assert.equal(f.calls.profiles.length, 0); assert.equal(f.calls.uninstalls, 0);
+  }
+});
+test('renewal rotates only an insufficient certificate and keeps the existing private key', async () => {
+  const f = renewalFixture({ sameCertificate: false, sameApp: true });
+  f.calls.certExpiry = Date.now() / 1000 + 7200;
+  f.calls.previousExpiry = f.calls.certExpiry + 3600;
+  // The previous Profile belongs to the installed certificate, while the new certificate is different.
+  f.calls.previousJobs = [];
+  f.job.renewalPreviousExpiry = f.calls.previousExpiry;
+  await f.runtime.ensureProfile(f.job);
+  assert.deepEqual(f.calls.renewals, [f.job.renewalPreviousExpiry]);
+  assert.equal(f.calls.selectedCertId, '4');
+  await f.runtime.install(f.job);
+  assert.equal(f.calls.uninstalls, 0);
+});
+test('incompatible renewal asks for consent and never uninstalls with missing or stale approval', async () => {
+  for (const approval of [false, true]) {
+    const f = renewalFixture({ sameCertificate: false, sameApp: false });
+    f.job.allowDataLoss = approval;
+    await assert.rejects(() => f.runtime.ensureProfile(f.job), e => e.kind==='confirmation'&&/无法保留数据续签/.test(e.message));
+    await assert.rejects(() => f.runtime.install(f.job), /无法保留数据续签/);
+    assert.equal(f.calls.uninstalls, 0); assert.equal(f.calls.installedPath, '');
+  }
+});
+test('renewal cannot submit a package before fresh authorization is prepared', async () => {
+  const f = renewalFixture();
+  await assert.rejects(() => f.runtime.install(f.job), /尚未核对/);
+  assert.equal(f.calls.installedPath, ''); assert.equal(f.calls.uninstalls, 0);
+});
+test('platform identity conflicts during renewal pause for explicit data-loss consent', async () => {
+  const f = renewalFixture(); await f.runtime.ensureProfile(f.job);
+  f.calls.installError = '9568264 incompatible signature';
+  await assert.rejects(() => f.runtime.install(f.job), e=>e.kind==='confirmation'&&/系统拒绝保留数据续签/.test(e.message));
+  assert.equal(f.calls.uninstalls, 0);
+});
+test('approved incompatible renewal transfers a verified package before replacing the exact approved application', async () => {
+  const f=renewalFixture({sameCertificate:false,sameApp:false});
+  await assert.rejects(()=>f.runtime.ensureProfile(f.job),/无法保留数据续签/);
+  Object.assign(f.job,{allowDataLoss:true,approvedInstalledVersion:f.installed.versionCode,
+    approvedInstalledFingerprint:f.installed.fingerprint,approvedInstalledAppIdentifier:f.installed.appIdentifier});
+  await f.runtime.ensureProfile(f.job);await f.runtime.sign(f.job);await f.runtime.verifySignature(f.job);
+  await f.runtime.install(f.job);
+  assert.equal(f.calls.uninstalls,1);assert.deepEqual(f.calls.order,['stage','uninstall-and-install']);
+  assert.equal(f.calls.installedPath,f.job.signedPath);assert.equal(f.calls.nativeSigns,1);
+  assert.equal(f.job.renewalInstallBaseline,f.installed.updateTime);
+});
+test('renewal replacement rechecks consent after transmission and can recover an interrupted reinstall', async () => {
+  const f=renewalFixture({sameCertificate:false,sameApp:false});
+  await assert.rejects(()=>f.runtime.ensureProfile(f.job),/无法保留数据续签/);
+  Object.assign(f.job,{allowDataLoss:true,approvedInstalledVersion:f.installed.versionCode,
+    approvedInstalledFingerprint:f.installed.fingerprint,approvedInstalledAppIdentifier:f.installed.appIdentifier});
+  f.calls.identityChangesDuringTransfer=true;
+  await assert.rejects(()=>f.runtime.install(f.job),/传输期间已安装应用发生变化/);
+  assert.equal(f.calls.uninstalls,0);assert.equal(f.job.allowDataLoss,false);
+  f.installed.versionCode--;f.calls.identityChangesDuringTransfer=false;f.job.allowDataLoss=true;
+  f.runtime.device.installedSigningIdentity=async()=>undefined;
+  f.runtime.device.installedVersion=async()=>0;
+  await f.runtime.install(f.job);
+  assert.equal(f.calls.uninstalls,0);assert.equal(f.calls.installedPath,f.job.signedPath);
+});
+test('renewal rechecks the target at submission and rejects a queued version change', async () => {
+  const f = renewalFixture(); await f.runtime.ensureProfile(f.job);
+  f.installed.versionCode++;
+  await assert.rejects(() => f.runtime.install(f.job), /相同版本/);
+  assert.equal(f.calls.uninstalls, 0); assert.equal(f.calls.installedPath, '');
+});
+test('resuming a prepared renewal uses verified files without new AGC enrollment', async () => {
+  const f = renewalFixture(); await f.runtime.ensureProfile(f.job);
+  f.job.signedProfileSha256 = f.job.profileSha256;
+  const evidence = await f.runtime.inspectEvidence(f.job);
+  assert.equal(evidence.validProfile, true); assert.equal(evidence.verifiedSignature, true);
+  assert.equal(f.calls.identityPrepares, 1); assert.equal(f.calls.profiles.length, 1);
+});
+test('renewal confirmation requires both a newer installation time and the expected signing certificate', async () => {
+  const f = renewalFixture(); await f.runtime.ensureProfile(f.job); await f.runtime.install(f.job);
+  f.installed.updateTime++; f.installed.fingerprint = 'C'.repeat(64);
+  assert.equal(await f.runtime.confirmRenewal(f.job), false);
+  f.installed.fingerprint = 'A'.repeat(64); f.installed.versionCode++;
+  assert.equal(await f.runtime.confirmRenewal(f.job), false);
+  f.installed.versionCode = f.job.versionCode;
+  assert.equal(await f.runtime.confirmRenewal(f.job), true);
+  f.calls.queryError = true;
+  await assert.rejects(() => f.runtime.confirmRenewal(f.job), /核实/);
+});
+test('a renewal completed before a timeout is reconciled without resubmission and seals expiry after leaving the page', async () => {
+  const f=renewalFixture();await f.runtime.ensureProfile(f.job);await f.runtime.install(f.job);
+  const baseline=f.job.renewalInstallBaseline;
+  f.installed.updateTime+=1000;
+  f.calls.installedPath='';f.runtime.confirmedSubmission=''; // new runtime cannot depend on an old in-memory receipt
+  f.job.stageHistory=[{stage:'installing',at:f.installed.updateTime+5000}];
+  await f.runtime.install(f.job);
+  assert.equal(f.calls.installedPath,'','the already applied renewal is not submitted again');
+  assert.equal(f.job.renewalInstallBaseline,baseline,'retry retains the first submission baseline');
+  const queries=f.calls.signingQueries;
+  await f.runtime.rememberInstalledAuthorization(f.job);
+  assert.equal(f.calls.signingQueries,queries,'reuse confirmed system identity without another HDC query');
+  assert.equal(f.job.installedUpdateTime,f.installed.updateTime);
+  assert.equal(f.job.authorizationExpiresAt,1900000000);
+});
 test('installer self-update keeps the official signed HAP and lets the platform verify it', async () => {
   const { job, calls, runtime } = fixture(1, true);
   const evidence = await runtime.inspectEvidence(job);

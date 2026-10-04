@@ -78,7 +78,9 @@ test('saved ports prefill both pages, but never overwrite text entered during th
 });
 test('the extra history option loads another page without changing the selected release', () => {
   const ui = sourceMethods('Detail', ['releaseOptions', 'selectRelease']);
-  ui.releases = [{ name: 'v1', tag: 'v1', publishedAt: '', prerelease: false }];
+  ui.app = { secondaryRepo: '' };
+  const { ReleaseInfo } = load('data/ReleaseInfo');
+  ui.releases = [ReleaseInfo.fromJson({name:'v1',tag:'v1',published_at:'',prerelease:false})];
   ui.releaseTotal = 2; ui.selectedReleaseIndex = 0; let calls = 0;
   ui.loadMoreReleases = () => calls++;
   assert.equal(ui.releaseOptions()[1].value, '更多历史版本…');

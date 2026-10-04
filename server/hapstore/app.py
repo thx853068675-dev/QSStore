@@ -28,12 +28,13 @@ from urllib.parse import parse_qs, urlparse
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from . import auth, collector, db, identity_vault, submissions
+from . import auth, collector, db, identity_vault, monitor, submissions
 
 API_VERSION = 1
 HOST = os.environ.get("HAPSTORE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HAPSTORE_PORT", "8787"))
 GITHUB_TOKEN = os.environ.get("HAPSTORE_GITHUB_TOKEN", "")
+MONITOR_PASSWORD_HASH = os.environ.get("HAPSTORE_MONITOR_PASSWORD_HASH", "")
 
 # 管理接口只允许本机访问（通过 SSH 隧道使用），绝不暴露公网
 ADMIN_ALLOW = {"127.0.0.1", "::1"}
@@ -271,7 +272,7 @@ def h_app_release(app_id: str, tag: str, q: dict[str, list[str]]) -> dict[str, A
     published = db.get_app(int(app_id))
     if not published or published["status"] != "published":
         raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
-    rel = db.get_release(int(app_id), tag)
+    rel = db.get_release(int(app_id), tag, (q.get('source_repo') or [''])[0])
     if not rel:
         raise ApiError(404, "RELEASE_NOT_FOUND", "该版本不存在")
     return rel
@@ -317,7 +318,7 @@ def _reject_foreign_repo(repo: str, account_id: str) -> None:
 
 
 def h_submit_prepare(body: dict[str, Any], ip: str,
-                     identity: tuple[str, str]) -> dict[str, Any]:
+                     identity: tuple[str, str], *, require_identity: bool = False) -> dict[str, Any]:
     repo = collector.normalize_repo(str(body.get("repo_url") or ""))
     if not repo:
         raise ApiError(400, "INVALID_REPO_URL",
@@ -327,6 +328,16 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
     cached = db.recent_submit_draft(repo, identity[0])
     if cached is not None:
         result = dict(cached["prepared"])
+        if require_identity and (result.get('inspection_status') == 'ready' and
+                any(not a.get('bundle_name') or not a.get('version_code') or not a.get('sha256')
+                    for a in result.get('choices', []))):
+            result.update(require_identity=True, inspection_status='pending')
+            c = db.connect()
+            c.execute('UPDATE submit_draft SET prepared_json=? WHERE token=?',
+                      (json.dumps(result), result['draft_token']))
+            c.commit()
+            db.queue_archive_inspection(result['draft_token'])
+            submissions.wake_worker()
         result.pop("snapshot", None)
         result["expires_in_seconds"] = max(0, cached["expires_at"] - int(time.time()))
         result["existing"] = _repo_owner_state(repo, identity[0])
@@ -362,7 +373,7 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
             "sha256": a.get("sha256") or "",
         } for a in candidate["assets"]]
         token = secrets.token_urlsafe(24)
-        needs_inspection = any(a['name'].lower().endswith(('.app', '.zip')) for a in candidate['assets'])
+        needs_inspection = require_identity or any(a['name'].lower().endswith(('.app', '.zip')) for a in candidate['assets'])
         result = {"draft_token": token, "repo": repo, "supports_multi_select": True,
                 "inspection_status": 'pending' if needs_inspection else 'ready',
                 "display_name": meta["display_name"],
@@ -373,7 +384,7 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
                 # 客户端据此提示「这是更新已有的那条」还是「已被别人上架」
                 "existing": _repo_owner_state(repo, identity[0]),
                 "expires_in_seconds": 1800}
-        stored = dict(result, snapshot=snapshot)
+        stored = dict(result, snapshot=snapshot, require_identity=require_identity)
         db.create_submit_draft(token, repo, identity[0], choices, meta["category"], stored)
         if needs_inspection:
             db.queue_archive_inspection(token)
@@ -454,7 +465,7 @@ def h_refresh_stale_apps(ip: str, limit: int, budget_seconds: float,
     for row in rows:
         if not row or row['status'] != 'published':
             continue
-        state = db.enqueue_refresh(row['id'], max_age)
+        state = db.enqueue_catalog_refresh(row['id'], max_age)
         if state['queued']:
             queued.append({'app_id': row['id'], 'repo': row['repo'], 'status': state['status']})
         else:
@@ -471,7 +482,7 @@ def h_refresh_app(app_id: str, ip: str) -> dict[str, Any]:
     details = db.get_app(int(app_id))
     if not details or details['status'] != 'published':
         raise ApiError(404, 'APP_NOT_FOUND', '应用不存在')
-    state = db.enqueue_refresh(int(app_id), 60)
+    state = db.enqueue_catalog_refresh(int(app_id), 60)
     if state['queued']:
         submissions.wake_worker()
     return dict(state, repo=details['repo'], latest=details.get('latest'),
@@ -482,7 +493,7 @@ def h_refresh_status(app_id: str) -> dict[str, Any]:
     row = db.connect().execute("SELECT status FROM app WHERE id=?", (int(app_id),)).fetchone()
     if not row or row['status'] != 'published':
         raise ApiError(404, 'APP_NOT_FOUND', '应用不存在')
-    return db.refresh_status(int(app_id))
+    return db.catalog_refresh_status(int(app_id))
 
 
 def h_my_apps(identity: tuple[str, str]) -> dict[str, Any]:
@@ -510,9 +521,40 @@ def h_configure_my_app(app_id: str, body: dict[str, Any],
     category = body.get("category")
     if not isinstance(category, str) or category not in SUBMIT_CATEGORIES:
         raise ApiError(400, "INVALID_CATEGORY", "请选择有效的软件分类")
-    if not db.configure_published_app(int(app_id), identity[0], category):
-        raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
+    token = body.get('source_draft_token', '')
+    remove = body.get('remove_secondary', False)
+    if not isinstance(token, str) or type(remove) is not bool or (token and remove):
+        raise ApiError(400, 'INVALID_SOURCE', '请选择有效的子仓配置')
+    try:
+        db.configure_app_source(int(app_id), identity[0], category, token, remove)
+    except ValueError as error:
+        errors = {
+            'PUBLISHER_MISMATCH': (403, '只能配置自己上架的应用'),
+            'SOURCE_DRAFT_NOT_READY': (409, '子仓检查未完成或已过期，请重新检查'),
+            'SOURCE_IS_PRIMARY': (400, '子仓不能与主仓相同'),
+            'SOURCE_BUNDLE_MISMATCH': (422, '子仓安装包与主仓的包名不一致，无法关联'),
+        }
+        status, message = errors.get(str(error), (409, '子仓配置已变化，请重新检查'))
+        raise ApiError(status, str(error), message) from error
+    if token:
+        db.enqueue_catalog_refresh(int(app_id), 300)
+        submissions.wake_worker()
     return {"app": db.get_app(int(app_id))}
+
+
+def h_prepare_app_source(app_id: str, body: dict[str, Any], ip: str,
+                         identity: tuple[str, str]) -> dict[str, Any]:
+    published = db.get_app(int(app_id))
+    if not published or published['status'] != 'published':
+        raise ApiError(404, 'APP_NOT_FOUND', '应用不存在')
+    if db.publisher_account_id(int(app_id)) != identity[0]:
+        raise ApiError(403, 'PUBLISHER_MISMATCH', '只能配置自己上架的应用')
+    repo = collector.normalize_repo(str(body.get('repo_url') or ''))
+    if repo and repo.lower() == published['repo'].lower():
+        raise ApiError(400, 'SOURCE_IS_PRIMARY', '子仓不能与主仓相同')
+    if not db.primary_bundles(int(app_id)):
+        raise ApiError(409, 'PRIMARY_IDENTITY_PENDING', '主仓包名尚未解析完成，请稍后重试')
+    return h_submit_prepare(body, ip, identity, require_identity=True)
 
 
 def h_admin_sync(body: dict[str, Any], ip: str) -> dict[str, Any]:
@@ -555,6 +597,8 @@ router.add("POST", r"/api/v1/apps/(?P<app_id>\d+)/reviews", "REVIEW")
 router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/releases", h_app_releases)
 router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/releases/(?P<tag>[^/]+)", h_app_release)
 router.add("GET", r"/api/v1/healthz", lambda q: {"ok": True, "stage": "M1"})
+router.add("GET", r"/api/v1/monitor", "MONITOR")
+router.add("GET", r"/api/v1/me/presence", "PRESENCE")
 router.add("POST", r"/api/v1/submit/prepare", "SUBMIT_PREPARE")
 router.add("POST", r"/api/v1/submit/confirm", "SUBMIT_CONFIRM")
 router.add("POST", r"/api/v1/submit/status", "SUBMIT_STATUS")
@@ -564,6 +608,7 @@ router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/refresh", "APP_REFRESH_STATUS")
 router.add("GET", r"/api/v1/me/apps", "MY_APPS")
 router.add("GET", r"/api/v1/categories", lambda q: {"items": SUBMIT_CATEGORIES})
 router.add("POST", r"/api/v1/me/apps/(?P<app_id>\d+)/category", "MY_APP_CONFIGURE")
+router.add("POST", r"/api/v1/me/apps/(?P<app_id>\d+)/source/prepare", "MY_APP_SOURCE_PREPARE")
 router.add("DELETE", r"/api/v1/me/apps/(?P<app_id>\d+)", "MY_APP_DELETE")
 router.add("GET", r"/api/v1/signing-identity", "IDENTITY_GET")
 router.add("POST", r"/api/v1/signing-identity", "IDENTITY_PUT")
@@ -648,6 +693,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             identity = auth.verify(token, access_token)
             db.sync_account_profile(*identity, auth.verified_avatar(token, access_token))
+            monitor.record_authenticated_account(identity[0])
             return identity
         except auth.InvalidIdentity as exc:
             raise ApiError(401, "SIGN_IN_REQUIRED", str(exc)) from None
@@ -691,7 +737,19 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/v1/admin/") and ip not in ADMIN_ALLOW:
                 raise ApiError(403, "FORBIDDEN", "管理接口仅限本机访问")
 
-            if fn == "SUBMIT_PREPARE":
+            if fn == "MONITOR":
+                supplied = self.headers.get("Authorization", "")
+                if not monitor.password_configured(MONITOR_PASSWORD_HASH):
+                    raise ApiError(503, "MONITOR_DISABLED", "监控密码尚未配置")
+                if not _rate_ok(f"monitor:{ip}", 10, 60):
+                    raise ApiError(429, "MONITOR_RATE_LIMITED", "尝试过于频繁，请一分钟后再试")
+                if not monitor.verify_authorization(supplied, MONITOR_PASSWORD_HASH):
+                    raise ApiError(401, "MONITOR_UNAUTHORIZED", "监控密码不正确")
+                self._json(monitor.snapshot(GITHUB_TOKEN))
+            elif fn == "PRESENCE":
+                self._identity()
+                self._json({"recorded": True})
+            elif fn == "SUBMIT_PREPARE":
                 self._json(h_submit_prepare(self._read_body(), ip, self._identity()))
             elif fn == "SUBMIT_STATUS":
                 self._json(h_submit_status(self._read_body(), self._identity()))
@@ -713,6 +771,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(h_remove_my_app(params["app_id"], self._identity()))
             elif fn == "MY_APP_CONFIGURE":
                 self._json(h_configure_my_app(params["app_id"], self._read_body(), self._identity()))
+            elif fn == "MY_APP_SOURCE_PREPARE":
+                self._json(h_prepare_app_source(params['app_id'], self._read_body(), ip, self._identity()))
             elif fn == "REVIEW":
                 self._json(h_put_review(params["app_id"], self._read_body(), self._identity()))
             elif fn == "IDENTITY_GET":

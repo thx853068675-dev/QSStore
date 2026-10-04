@@ -48,6 +48,7 @@ def export_all() -> dict[str, Any]:
                 "prerelease": bool(r["prerelease"]),
                 "html_url": r["html_url"],
                 "etag": r["etag"],
+                "github_downloads": r["github_downloads"],
                 "assets": [
                     {
                         "name": a["name"],
@@ -134,6 +135,7 @@ def import_all(payload: dict[str, Any], *, replace_releases: bool = True,
                         "prerelease": r.get("prerelease", False),
                         "html_url": r.get("html_url", ""),
                         "etag": r.get("etag", ""),
+                        "github_downloads": r.get("github_downloads"),
                         "assets": [
                             {
                                 "name": a.get("name", ""),

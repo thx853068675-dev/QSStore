@@ -4,10 +4,13 @@ export class CatalogApp {
   id: number = 0;
   displayName: string = '';
   repo: string = '';
+  secondaryRepo: string = '';
   summary: string = '';
   category: string = '';
   publisherName: string = '';
   stars: number = 0;
+  /** -1: not collected; GitHub Release attachment downloads, not store installs. */
+  githubDownloads: number = -1;
   iconUrl: string = '';
   iconRev: string = '';
   latestName: string = '';
@@ -26,8 +29,10 @@ export class CatalogApp {
   static copy(app: CatalogApp): CatalogApp {
     const copy = new CatalogApp();
     copy.id = app.id; copy.displayName = app.displayName; copy.repo = app.repo;
+    copy.secondaryRepo = app.secondaryRepo;
     copy.summary = app.summary; copy.category = app.category; copy.publisherName = app.publisherName;
     copy.stars = app.stars; copy.iconUrl = app.iconUrl; copy.iconRev = app.iconRev;
+    copy.githubDownloads = app.githubDownloads;
     copy.latestName = app.latestName; copy.latestAsset = app.latestAsset; copy.latestAssets = app.latestAssets;
     copy.ratingAverage = app.ratingAverage; copy.ratingCount = app.ratingCount;
     return copy;
@@ -38,10 +43,13 @@ export class CatalogApp {
     app.id = Number(row['id'] ?? 0);
     app.displayName = String(row['display_name'] ?? row['name'] ?? '');
     app.repo = String(row['repo'] ?? '');
+    app.secondaryRepo = String(row['secondary_repo'] ?? '');
     app.summary = String(row['summary'] ?? '');
     app.category = String(row['category'] ?? '');
     app.publisherName = String(row['publisher_name'] ?? '');
     app.stars = Number(row['stars'] ?? 0);
+    const downloads = Number(row['github_downloads'] ?? -1);
+    app.githubDownloads = Number.isFinite(downloads) && downloads >= 0 ? Math.floor(downloads) : -1;
     app.iconUrl = String(row['icon_url'] ?? '');
     app.iconRev = String(row['icon_rev'] ?? '');
     const latest = row['latest'] as Record<string, Object> | undefined;

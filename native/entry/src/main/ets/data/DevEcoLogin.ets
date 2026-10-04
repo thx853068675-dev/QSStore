@@ -101,6 +101,7 @@ export class DevEcoLogin {
     account.userId = String(info['userId'] ?? '');
     account.teamId = String(info['teamId'] ?? account.userId);
     account.displayName = String(info['nickName'] ?? '');
+    if (typeof info['realName'] === 'boolean') account.realNameVerified = info['realName'] as boolean;
     if (account.accessToken.length === 0 || account.userId.length === 0) {
       throw new Error('华为账号返回的信息不完整');
     }
@@ -139,6 +140,7 @@ export class DevEcoLogin {
     const refreshed = await DevEcoLogin.userInfo(saved.jwtToken, true);
     if (refreshed.userId !== saved.userId) throw new Error('账号身份发生变化，请重新登录');
     if (refreshed.avatarUrl.length === 0) refreshed.avatarUrl = saved.avatarUrl;
+    if (refreshed.realNameVerified === undefined) refreshed.realNameVerified = saved.realNameVerified;
     if (refreshed.label === refreshed.userId && saved.label !== saved.userId) {
       refreshed.displayName = saved.displayName;
     }

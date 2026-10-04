@@ -55,12 +55,13 @@ export default class EntryAbility extends UIAbility {
     } catch (error) {
       console.warn('Unable to clear window background: ' + JSON.stringify(error));
     }
-    return mainWindow.setWindowSystemBarProperties(dark ? BARS_DARK : BARS_LIGHT)
+    // 保留系统手势条。恢复系统栏可能重置底色，因此最后再应用透明颜色。
+    return mainWindow.setSpecificSystemBarEnabled('navigation', true).catch(() => {})
+      .then(() => mainWindow.setSpecificSystemBarEnabled('navigationIndicator', true).catch(() => {}))
+      .then(() => mainWindow.setWindowSystemBarProperties(dark ? BARS_DARK : BARS_LIGHT))
       .catch((error: Error) => {
         console.warn('Unable to apply transparent system bars: ' + JSON.stringify(error));
-      }).then(() => mainWindow.setSpecificSystemBarEnabled('navigation', false).catch(() => {}))
-      // 从设置/输入法回到前台时，系统可能恢复指示条；跟随外观一起重新同步。
-      .then(() => mainWindow.setSpecificSystemBarEnabled('navigationIndicator', false).catch(() => {}));
+      });
   }
 
   onCreate(_want: Want, _launchParam: AbilityConstant.LaunchParam): void {

@@ -6,10 +6,15 @@ class InstalledVersionEntry {
   version: number = 0;
   versionName: string = '';
   at: number = 0;
+  firstSeenAt: number = 0;
+  installationUpdateTime: number = 0;
   displayName: string = '';
   sideloaded: boolean = false;
   iconId: number = 0;
   iconModuleName: string = '';
+  signingFingerprint: string = '';
+  signingUpdateTime: number = 0;
+  signingAppIdentifier: string = '';
 }
 
 class SavedInstalledEntry {
@@ -17,12 +22,17 @@ class SavedInstalledEntry {
   version: number = 0;
   versionName: string = '';
   at: number = 0;
+  firstSeenAt: number = 0;
+  installationUpdateTime: number = 0;
   moduleName: string = '';
   abilityName: string = '';
   displayName: string = '';
   sideloaded: boolean = false;
   iconId: number = 0;
   iconModuleName: string = '';
+  signingFingerprint: string = '';
+  signingUpdateTime: number = 0;
+  signingAppIdentifier: string = '';
 }
 
 /** 设备清单的展示模型，独立于安装任务和历史记录。 */
@@ -44,6 +54,7 @@ export class InstalledLaunchTarget {
 /** 设备当前安装包的签名身份；仅实时 bm dump 可作为覆盖更新的预检依据。 */
 export class InstalledSigningIdentity {
   versionCode: number = 0;
+  updateTime: number = 0;
   fingerprint: string = '';
   appIdentifier: string = '';
 }
@@ -60,7 +71,7 @@ export class InstalledAppRegistry {
   private static launchers: Map<string, InstalledLaunchTarget> = new Map();
   private static savedVersions: Map<string, InstalledVersionEntry> = new Map();
 
-  /** 只载入设备曾确认安装的应用；过期或损坏的缓存不参与展示。 */
+  /** 恢复本机确认状态；卸载记录保留到下一次真实安装，避免旧安装历史复活。 */
   static async load(context: common.UIAbilityContext): Promise<void> {
     if (InstalledAppRegistry.loading !== undefined) return InstalledAppRegistry.loading;
     InstalledAppRegistry.loading = InstalledAppRegistry.loadSaved(context);
@@ -85,23 +96,36 @@ export class InstalledAppRegistry {
         const version = Number(row['version'] ?? 0);
         const at = Number(row['at'] ?? 0);
         if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(name) ||
-          !Number.isSafeInteger(version) || version <= 0 || !Number.isFinite(at) ||
-          at <= 0 || at > now || now - at > InstalledAppRegistry.SAVED_MAX_AGE_MS) continue;
+          typeof row['version'] !== 'number' || !Number.isSafeInteger(version) || version < 0 || !Number.isFinite(at) ||
+          at <= 0 || at > now || (version > 0 && now - at > InstalledAppRegistry.SAVED_MAX_AGE_MS)) continue;
+        // 启动读盘期间的实时观察优先，包括尚未落盘的卸载。
+        if (InstalledAppRegistry.versions.has(name)) continue;
         const existing = InstalledAppRegistry.savedVersions.get(name);
         if (existing !== undefined && existing.at >= at) continue;
         const entry = new InstalledVersionEntry();
         entry.version = version;
         entry.versionName = String(row['versionName'] ?? '').trim().substring(0, 128);
         entry.at = at;
+        const firstSeenAt = Number(row['firstSeenAt'] ?? at);
+        entry.firstSeenAt = Number.isSafeInteger(firstSeenAt) && firstSeenAt > 0 && firstSeenAt <= at ? firstSeenAt : at;
+        const installationUpdateTime = Number(row['installationUpdateTime'] ?? row['signingUpdateTime'] ?? 0);
+        entry.installationUpdateTime = version > 0 && Number.isSafeInteger(installationUpdateTime) &&
+          installationUpdateTime > 0 && installationUpdateTime <= now + 300000 ? installationUpdateTime : 0;
         entry.displayName = String(row['displayName'] ?? '').trim().substring(0, 256);
-        entry.sideloaded = row['sideloaded'] === true;
+        entry.sideloaded = version > 0 && row['sideloaded'] === true;
         const iconId = Number(row['iconId'] ?? 0);
         entry.iconId = Number.isSafeInteger(iconId) && iconId > 0 ? iconId : 0;
         entry.iconModuleName = String(row['iconModuleName'] ?? '');
+        const fingerprint = String(row['signingFingerprint'] ?? '');
+        const updateTime = Number(row['signingUpdateTime'] ?? 0);
+        if (version > 0 && /^[A-F0-9]{64}$/.test(fingerprint) && Number.isSafeInteger(updateTime) && updateTime > 0) {
+          entry.signingFingerprint = fingerprint; entry.signingUpdateTime = updateTime;
+          entry.signingAppIdentifier = String(row['signingAppIdentifier'] ?? '');
+        }
         InstalledAppRegistry.savedVersions.set(name, entry);
         const moduleName = String(row['moduleName'] ?? '');
         const abilityName = String(row['abilityName'] ?? '');
-        if (/^[A-Za-z][A-Za-z0-9_.]{0,255}$/.test(moduleName) &&
+        if (version > 0 && /^[A-Za-z][A-Za-z0-9_.]{0,255}$/.test(moduleName) &&
           /^[A-Za-z][A-Za-z0-9_.]{0,255}$/.test(abilityName)) {
           const target = new InstalledLaunchTarget();
           target.bundleName = name;
@@ -141,17 +165,21 @@ export class InstalledAppRegistry {
         const rows: SavedInstalledEntry[] = [];
         for (const name of InstalledAppRegistry.savedVersions.keys()) {
           const entry = InstalledAppRegistry.savedVersions.get(name);
-          if (entry === undefined || entry.version <= 0 ||
-            now - entry.at > InstalledAppRegistry.SAVED_MAX_AGE_MS) continue;
+          if (entry === undefined || entry.version < 0 || (entry.version > 0 &&
+            now - entry.at > InstalledAppRegistry.SAVED_MAX_AGE_MS)) continue;
           const row = new SavedInstalledEntry();
           row.bundleName = name;
           row.version = entry.version;
           row.versionName = entry.versionName;
           row.at = entry.at;
+          row.firstSeenAt = entry.firstSeenAt;
+          row.installationUpdateTime = entry.installationUpdateTime;
           row.displayName = entry.displayName;
           row.sideloaded = entry.sideloaded;
           row.iconId = entry.iconId;
           row.iconModuleName = entry.iconModuleName;
+          row.signingFingerprint = entry.signingFingerprint; row.signingUpdateTime = entry.signingUpdateTime;
+          row.signingAppIdentifier = entry.signingAppIdentifier;
           const target = InstalledAppRegistry.launchers.get(name);
           row.moduleName = target?.moduleName ?? '';
           row.abilityName = target?.abilityName ?? '';
@@ -178,12 +206,20 @@ export class InstalledAppRegistry {
     if (String(row['name'] ?? '') !== bundleName) return;
     const observed = InstalledAppRegistry.savedVersions.get(bundleName);
     if (observed !== undefined && observed.version === Number(row['versionCode'])) {
+      const updateTime = Number(row['updateTime'] || row['installTime'] || 0);
+      observed.installationUpdateTime = Number.isSafeInteger(updateTime) && updateTime > 0 &&
+        updateTime <= Date.now() + 300000 ? updateTime : 0;
       observed.versionName = String(row['versionName'] ?? '').trim().substring(0, 128);
       const app = row['applicationInfo'] as Record<string, Object> | undefined;
       const icon = app?.['iconResource'] as Record<string, Object> | undefined;
       const iconId = Number(icon?.['id'] ?? app?.['iconId'] ?? 0);
       observed.iconId = Number.isSafeInteger(iconId) && iconId > 0 ? iconId : 0;
       observed.iconModuleName = String(icon?.['moduleName'] ?? row['entryModuleName'] ?? '');
+      const signing = InstalledAppRegistry.parseSigningIdentity(output, bundleName);
+      // A complete dump that lacks signing evidence invalidates an older guess.
+      observed.signingFingerprint = signing?.fingerprint ?? '';
+      observed.signingUpdateTime = signing?.updateTime ?? 0;
+      observed.signingAppIdentifier = signing?.appIdentifier ?? '';
     }
     const modules = row['hapModuleInfos'] as Array<Record<string, Object>> | undefined;
     const entry = String(row['entryModuleName'] ?? row['mainEntry'] ?? '');
@@ -202,26 +238,32 @@ export class InstalledAppRegistry {
   private static versions: Map<string, InstalledVersionEntry> = new Map();
   private static readonly TTL_MS: number = 60000;
 
-  static remember(bundleName: string, version: number): void {
+  static remember(bundleName: string, version: number, versionName: string = ''): void {
     if (!Number.isInteger(version) || version < 0) return;
     const previous = InstalledAppRegistry.savedVersions.get(bundleName);
     const entry = new InstalledVersionEntry();
     entry.version = version;
-    entry.versionName = previous?.version === version ? previous.versionName : '';
-    entry.displayName = previous?.displayName ?? '';
-    entry.sideloaded = previous?.sideloaded ?? false;
+    entry.versionName = version > 0 && versionName.trim().length > 0 ? versionName.trim().substring(0, 128) :
+      previous?.version === version ? previous.versionName : '';
+    entry.displayName = version > 0 ? previous?.displayName ?? '' : '';
+    entry.sideloaded = version > 0 && (previous?.sideloaded ?? false);
     entry.iconId = previous?.version === version ? previous.iconId : 0;
     entry.iconModuleName = previous?.version === version ? previous.iconModuleName : '';
+    if (version > 0 && previous?.version === version) {
+      entry.signingFingerprint = previous.signingFingerprint; entry.signingUpdateTime = previous.signingUpdateTime;
+      entry.signingAppIdentifier = previous.signingAppIdentifier;
+    }
     entry.at = Date.now();
+    entry.firstSeenAt = previous?.version === version ? previous.firstSeenAt || previous.at : entry.at;
+    entry.installationUpdateTime = version > 0 && previous?.version === version ? previous.installationUpdateTime : 0;
     InstalledAppRegistry.versions.set(bundleName, entry);
+    InstalledAppRegistry.savedVersions.set(bundleName, entry);
     if (version > 0) {
       if (previous !== undefined && previous.version !== version) {
         InstalledAppRegistry.launchers.delete(bundleName);
       }
-      InstalledAppRegistry.savedVersions.set(bundleName, entry);
     }
     else {
-      InstalledAppRegistry.savedVersions.delete(bundleName);
       InstalledAppRegistry.launchers.delete(bundleName);
     }
   }
@@ -230,8 +272,33 @@ export class InstalledAppRegistry {
     const entry = InstalledAppRegistry.versions.get(bundleName);
     if (entry !== undefined && Date.now() - entry.at < InstalledAppRegistry.TTL_MS) return entry.version;
     const saved = InstalledAppRegistry.savedVersions.get(bundleName);
-    return saved !== undefined && Date.now() - saved.at < InstalledAppRegistry.SAVED_MAX_AGE_MS ?
+    return saved !== undefined && (saved.version === 0 ||
+      Date.now() - saved.at < InstalledAppRegistry.SAVED_MAX_AGE_MS) ?
       saved.version : -1;
+  }
+
+  /** Cached identity is display evidence only; install safety still uses a live dump. */
+  static signingIdentity(bundleName: string, maxAgeMs: number = InstalledAppRegistry.SAVED_MAX_AGE_MS): InstalledSigningIdentity | undefined {
+    const entry = InstalledAppRegistry.savedVersions.get(bundleName);
+    if (!entry || InstalledAppRegistry.version(bundleName) !== entry.version || entry.version <= 0 ||
+      Date.now() - entry.at > maxAgeMs || entry.signingFingerprint.length !== 64 || entry.signingUpdateTime <= 0) return undefined;
+    const identity = new InstalledSigningIdentity(); identity.versionCode = entry.version;
+    identity.fingerprint = entry.signingFingerprint; identity.updateTime = entry.signingUpdateTime;
+    identity.appIdentifier = entry.signingAppIdentifier; return identity;
+  }
+
+  /** 与 version() 同一份有效观察，用于跨页面比较新旧状态。 */
+  static observedAt(bundleName: string): number {
+    return InstalledAppRegistry.version(bundleName) >= 0 ?
+      InstalledAppRegistry.savedVersions.get(bundleName)?.at ?? 0 : 0;
+  }
+
+  /** Stable estimation baseline, independent of unavailable signing metadata. */
+  static installationTime(bundleName: string, versionCode: number): number {
+    const entry = InstalledAppRegistry.savedVersions.get(bundleName);
+    if (!entry || entry.version !== versionCode || versionCode <= 0 ||
+      InstalledAppRegistry.version(bundleName) !== versionCode) return 0;
+    return entry.installationUpdateTime || entry.firstSeenAt || entry.at;
   }
 
   /** 版本名仅属于被核对的那个构建，不能套用商店最新版本或旧安装历史。 */
@@ -264,14 +331,22 @@ export class InstalledAppRegistry {
 
   /** -g 来自调试签名清单，不能用 applicationInfo.debug（编译模式）替代。 */
   static parseSideloadedNames(output: string): string[] | undefined {
+    return InstalledAppRegistry.parseCompletedNames(output);
+  }
+
+  /** 原生 shell 仅在 bm 成功结束后写入标记；断连留下的完整行也不能证明卸载。 */
+  private static parseCompletedNames(output: string): string[] | undefined {
     if (!output.endsWith('\n')) return undefined;
+    const lines = output.trimEnd().split('\n');
+    if (lines.pop()?.trim() !== '__QINGQI_BUNDLE_LIST_END__') return undefined;
     let header = false;
     const names = new Set<string>();
-    for (const raw of output.split('\n')) {
+    for (const raw of lines) {
       const line = raw.trim();
       if (line.length === 0) continue;
       if (/^ID:\s*\d+:$/.test(line)) { header = true; continue; }
-      if (!header || !/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(line)) return undefined;
+      // 系统元服务形如 com.atomicservice.6917587889453404644，数字段同样有效。
+      if (!header || !/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(line)) return undefined;
       names.add(line);
     }
     return header ? Array.from(names) : undefined;
@@ -301,14 +376,11 @@ export class InstalledAppRegistry {
 
   /** -a 是存在性清单，不含版本；缺席才可以记为未安装。 */
   static parseNames(output: string): Map<string, number> | undefined {
-    if (!/^ID:\s*\d+:\s*$/m.test(output) || /\[Fail\]|error:/i.test(output)) return undefined;
+    const names = InstalledAppRegistry.parseCompletedNames(output);
+    if (names === undefined) return undefined;
     const found = new Map<string, number>();
-    for (const raw of output.split('\n')) {
-      const name = raw.trim();
-      if (/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(name)) found.set(name, 0);
-    }
-    // 空/截断输出无法证明卸载，避免清空安装记录。
-    return found.size > 0 ? found : undefined;
+    for (const name of names) found.set(name, 0);
+    return found;
   }
 
   static parseVersion(output: string, bundleName: string): number {
@@ -338,6 +410,8 @@ export class InstalledAppRegistry {
       if (fingerprint.length !== 64 && appIdentifier.length === 0) return undefined;
       const identity = new InstalledSigningIdentity();
       identity.versionCode = version;
+      const updateTime = Number(row['updateTime'] ?? 0);
+      identity.updateTime = Number.isSafeInteger(updateTime) && updateTime > 0 ? updateTime : 0;
       identity.fingerprint = fingerprint.length === 64 ? fingerprint : '';
       identity.appIdentifier = appIdentifier;
       return identity;

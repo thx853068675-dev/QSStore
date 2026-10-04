@@ -97,7 +97,8 @@ test('reconciliation ignores a stale display version and confirms the actual ins
 });
 test('runtime confirms installed version locally and only uses HDC when the system cannot answer', async () => {
   const f = localBundles(); let probes = 0;
-  const { NativeJobRuntime } = load('jobs/NativeJobRuntime', { './LocalBundles': { LocalBundles: f.LocalBundles } });
+  const { NativeJobRuntime } = load('jobs/NativeJobRuntime', { './LocalBundles': { LocalBundles: f.LocalBundles },
+    './InstalledAppRegistry': load('jobs/InstalledAppRegistry') });
   const runtime = new NativeJobRuntime({}, {}, undefined, {
     installedVersion: async () => { probes++; return 3; }
   });
@@ -107,4 +108,28 @@ test('runtime confirms installed version locally and only uses HDC when the syst
   assert.equal(f.LocalBundles.installedVersion('com.example.other'), 1);
   assert.equal(await runtime.installedVersion('com.example.other'), 3);
   assert.equal(probes, 2, 'a stale display cache must not trigger a second installation');
+});
+
+test('native system install confirmation replaces and persists an old uninstall tombstone', async () => {
+  const disk = new Map(); let writes = 0;
+  const mocks = { '@kit.ArkData': { preferences: { getPreferences: async () => ({
+    get: async (key, fallback) => disk.get(key) ?? fallback,
+    put: async (key, value) => { disk.set(key, value); writes++; }, flush: async () => {}
+  }) } } };
+  const registry = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  const bundle = 'com.example.local';
+  await registry.load({}); registry.remember(bundle, 0); await registry.persist({});
+  const Runtime = load('jobs/NativeJobRuntime', {
+    './LocalBundles': { LocalBundles: { liveInstalledVersion: () => 42, isKnown: v => v >= 0,
+      installedVersionName: () => '1.2.3' } },
+    './InstalledAppRegistry': { InstalledAppRegistry: registry }
+  }).NativeJobRuntime;
+  const runtime = new Runtime({}, {}, undefined, { installedVersion: async () => { throw Error('unnecessary HDC query'); } });
+  assert.equal(await runtime.installedVersion(bundle), 42);
+  const savedWrites = writes;
+  assert.equal(await runtime.installedVersion(bundle), 42);
+  assert.equal(writes, savedWrites, 'unchanged install polling does not write preferences again');
+  const restarted = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry;
+  await restarted.load({}); assert.equal(restarted.version(bundle), 42);
+  assert.equal(restarted.versionName(bundle, 42), '1.2.3');
 });

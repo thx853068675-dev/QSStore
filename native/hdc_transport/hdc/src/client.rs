@@ -82,18 +82,22 @@ impl Client {
 
     async fn recv(&mut self) -> io::Result<Vec<u8>> {
         debug!("channel recv buf");
-        let len_bytes = self.read_exact_bytes(4).await?;
+        let len_bytes = self.read_exact_bytes(4, true).await?;
         let expected_size = u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
-        self.read_exact_bytes(expected_size).await
+        self.read_exact_bytes(expected_size, false).await
     }
 
-    async fn read_exact_bytes(&mut self, size: usize) -> io::Result<Vec<u8>> {
+    async fn read_exact_bytes(&mut self, size: usize, frame_boundary: bool) -> io::Result<Vec<u8>> {
         let rd = self.rd.as_mut().ok_or_else(|| Error::new(ErrorKind::Other, "stream closed"))?;
         let mut buf = vec![0u8; size];
         let mut read = 0;
         while read < size {
             match rd.read(&mut buf[read..]).await {
-                Ok(0) => return Err(Error::new(ErrorKind::ConnectionAborted, "peer closed")),
+                Ok(0) => return Err(if frame_boundary && read == 0 {
+                    Error::new(ErrorKind::ConnectionAborted, "peer closed")
+                } else {
+                    Error::new(ErrorKind::UnexpectedEof, "peer closed during response frame")
+                }),
                 Ok(n) => read += n,
                 Err(e) => return Err(e),
             }
@@ -307,19 +311,10 @@ impl Client {
     }
 
     async fn app_uninstall_task(&mut self) -> io::Result<()> {
-        let params = self.params.clone();
-        self.send(params.join(" ").as_bytes()).await;
-        loop {
-            match self.recv().await {
-                Ok(recv) => {
-                    match String::from_utf8(recv) {
-                        Ok(msg) => println!("{msg}"),
-                        Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{e}"))),
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
+        self.send(self.params.join(" ").as_bytes()).await;
+        // The daemon closes the command channel after replying. Preserve that
+        // reply for callers; a clean EOF is not an uninstall failure.
+        self.loop_recv().await
     }
 
     async fn app_sideload_task(&mut self) -> io::Result<()> {
@@ -705,4 +700,69 @@ pub async fn run_client_mode(parsed_cmd: ParsedCommand) -> io::Result<()> {
         return Err(e);
     }
     client.execute_command().await
+}
+
+#[cfg(test)]
+mod uninstall_tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        [&(payload.len() as u32).to_be_bytes()[..], payload].concat()
+    }
+
+    async fn uninstall_reply(reply: Vec<u8>) -> (io::Result<()>, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let writer = tokio::spawn(async move {
+            let size = peer.read_u32().await.unwrap() as usize;
+            let mut command = vec![0; size];
+            peer.read_exact(&mut command).await.unwrap();
+            assert_eq!(command, b"uninstall com.example.test");
+            peer.write_all(&reply).await.unwrap();
+            peer.shutdown().await.unwrap();
+        });
+        let (rd, wr) = stream.into_split();
+        let mut client = Client {
+            command: HdcCommand::AppUninstall,
+            params: vec!["uninstall".into(), "com.example.test".into()],
+            connect_key: String::new(), rd: Some(rd), wr: Some(wr), output: String::new(),
+        };
+        let result = client.execute_command().await;
+        writer.await.unwrap();
+        (result, client.take_output())
+    }
+
+    #[tokio::test]
+    async fn preserves_uninstall_receipt_before_clean_eof() {
+        let mut reply = frame(b"uninstall bundle ");
+        reply.extend(frame(b"successfully.\n"));
+        let (result, output) = uninstall_reply(reply).await;
+        result.unwrap();
+        assert_eq!(output, "uninstall bundle successfully.\n");
+    }
+
+    #[tokio::test]
+    async fn retains_device_rejection_for_the_caller() {
+        let (result, output) = uninstall_reply(frame(b"[Fail]permission denied\n")).await;
+        result.unwrap();
+        assert_eq!(output, "[Fail]permission denied\n");
+    }
+
+    #[tokio::test]
+    async fn empty_eof_does_not_fabricate_a_success_receipt() {
+        let (result, output) = uninstall_reply(vec![]).await;
+        result.unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_truncated_response_frames() {
+        for reply in [vec![0, 0], 10_u32.to_be_bytes().to_vec(),
+            [&10_u32.to_be_bytes()[..], b"abc"].concat()] {
+            let (result, _) = uninstall_reply(reply).await;
+            assert_eq!(result.unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        }
+    }
 }

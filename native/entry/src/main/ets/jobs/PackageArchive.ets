@@ -1,7 +1,8 @@
+import { PackagePresentation } from './PackagePresentation';
 import { StorageBudget } from './StorageBudget';
 import { fileIo } from '@kit.CoreFileKit';
 import { listPackageEntries, extractPackageEntry } from 'libhap_core.so';
-import { inspectPackage, PackageIdentity, PackageInspectError, iconReference, readIconBytes, requestedPermissions } from './PackageInspector';
+import { inspectPackage, PackageIdentity, PackageInspectError, requestedPermissions } from './PackageInspector';
 
 class PreparedApp {
   fingerprint: string = '';
@@ -153,9 +154,13 @@ export class PackageArchive {
     return Math.max(size, listPackageEntries(path).reduce((total: number, entry) => total + entry.size, 0)) * 3;
   }
 
+  static async modulePaths(path: string): Promise<string[]> {
+    return PackageArchive.extension(path) === '.app' ? (await PackageArchive.prepare(path)).paths.slice() : [path];
+  }
+
   static async icon(path: string): Promise<ArrayBuffer | undefined> {
-    if (PackageArchive.extension(path) !== '.app') return readIconBytes(path, iconReference(path));
+    if (PackageArchive.extension(path) !== '.app') return PackagePresentation.icon(path);
     const cached = await PackageArchive.prepare(path);
-    return readIconBytes(cached.primary, iconReference(cached.primary));
+    return PackagePresentation.icon(cached.primary);
   }
 }

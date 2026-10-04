@@ -93,7 +93,16 @@ export class ReleaseChannelRegistry {
     const latest = releases.find((release: ReleaseInfo) => release.prerelease === preview &&
       release.assets.length > 0);
     target.latestName = latest?.name ?? '';
-    target.assets = latest?.assets ?? [];
+    // A mirror may update only one package in a multi-package listing. Keep
+    // each bundle's newest release without losing its other package variants.
+    const seen: string[] = [];
+    for (const release of releases) {
+      if (release.prerelease !== preview) continue;
+      const added = release.assets.filter((asset: HapAsset) =>
+        !seen.includes(asset.bundleName || asset.name));
+      target.assets = target.assets.concat(added);
+      for (const asset of added) seen.push(asset.bundleName || asset.name);
+    }
     ReleaseChannelRegistry.fetchedAt.set(appId, Date.now());
     if (JSON.stringify(ReleaseChannelRegistry.targets.get(appId)) === JSON.stringify(target)) return;
     ReleaseChannelRegistry.targets.set(appId, target);

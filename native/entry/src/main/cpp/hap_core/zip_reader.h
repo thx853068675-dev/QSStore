@@ -3,14 +3,20 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace qingqi::hap {
 
 struct ArchiveEntry { std::string name; uint64_t size; };
 std::vector<ArchiveEntry> ListPackageEntries(const std::string& archive_path);
+std::vector<ArchiveEntry> ListProfileEntries(const std::string& archive_path);
 // Streams to a caller-chosen sandbox path; archive names never become paths.
 void ExtractPackageEntry(const std::string& archive_path, const std::string& name,
                          const std::string& output);
+
+void RewriteArchive(const std::string& input, const std::string& output,
+                    const std::vector<std::pair<std::string, std::string>>& replacements,
+                    const std::string& previous_bundle = "", const std::string& next_bundle = "");
 
 // Reads only the manifest entry. It never extracts arbitrary ZIP paths and
 // caps both compressed and expanded metadata before allocation.

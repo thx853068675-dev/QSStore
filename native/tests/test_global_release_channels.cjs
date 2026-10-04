@@ -37,6 +37,16 @@ function fixture(disk = new Map()) {
   return f;
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+test('a mirror updating one bundle keeps the other primary preview package and all current variants', async () => {
+  const f = fixture(), newest = f.release(4), primary = f.release(3), older = f.release(2);
+  newest.sourceKind = 'secondary';
+  primary.assets.push(Object.assign({}, primary.assets[0], { bundleName:'com.example.helper', name:'helper.hap' }));
+  newest.assets.push(Object.assign({}, newest.assets[0], { name:'tablet.hap' }));
+  await f.registry.select({}, 7, true, [newest,primary,older]);
+  const selected = f.registry.apply(f.app());
+  assert.deepEqual(Array.from(selected.latestAssets, a => [a.name,a.versionCode]),
+    [['app.hap',4],['tablet.hap',4],['helper.hap',3]]);
+});
 test('a successful channel change supplies one preview target to Discover and Management without mutating the server catalog', async () => {
   const f = fixture(), catalog = f.app(); await f.registry.restore({});
   await f.registry.select({}, 7, true, [f.release()]);
@@ -89,7 +99,7 @@ test('Discovery and Management calculate the same preview update entirely from o
   const methods = names.map(name => { const start = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
     assert.ok(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4); });
   const box = { ReleaseChannelRegistry: f.registry, UpdateTarget: class {},
-    InstalledAppRegistry: { version: () => -1, versionName: () => '' }, InstallStage: { INSTALLED: 'INSTALLED' },
+    InstalledAppRegistry: { observedAt: () => 0, version: () => -1, versionName: () => '' }, InstallStage: { INSTALLED: 'INSTALLED' },
     LocalBundles: { isKnown: v => v >= 0, installedVersion() { throw Error('render invoked synchronous system query'); } } };
   vm.runInNewContext(ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, box);

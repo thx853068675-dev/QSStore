@@ -30,6 +30,7 @@ function fixture(visibleAfter) {
     verifiedCache: true, validProfile: true, verifiedSignature: true, deviceConnected: true }),
     installedVersion: async () => f.installedAt && f.now - f.installedAt >= visibleAfter ? 2 : 1,
     install: async () => { f.installs++; f.installedAt = f.now; } };
+  f.runtime = runtime;
   f.runner = new (load('JobRunner').JobRunner)(store, runtime); f.stages = InstallStage; return f;
 }
 test('an installation that becomes visible after 250 ms finishes without waiting 1.5 s or installing again', async () => {
@@ -42,4 +43,23 @@ test('slow confirmation backs off, respects its total bound, and does not reinst
   assert.equal(f.job.stage, f.stages.RETRYABLE_ERROR); assert.equal(f.installs, 1);
   assert.deepEqual(f.waits.slice(0, 4), [250, 500, 1000, 1500]);
   assert.equal(f.now - f.installedAt, 15000);
+});
+test('same-version renewal waits for authorization replacement instead of completing on version alone', async () => {
+  const f = fixture(0);
+  f.job.renewalRequestedAt = 100; f.job.reinstallRequired = true;
+  f.runtime.installedVersion = async () => f.job.versionCode;
+  let checks = 0;
+  f.runtime.confirmRenewal = async () => ++checks === 3;
+  await f.runner.run('job');
+  assert.equal(f.job.stage, f.stages.INSTALLED); assert.equal(f.installs, 1);
+  assert.equal(checks, 3); assert.deepEqual(f.waits, [250, 500]);
+});
+test('same-version renewal stays resumable when replacement cannot be confirmed', async () => {
+  const f = fixture(0);
+  f.job.renewalRequestedAt = 100; f.job.reinstallRequired = true;
+  f.runtime.installedVersion = async () => f.job.versionCode;
+  f.runtime.confirmRenewal = async () => false;
+  await f.runner.run('job');
+  assert.equal(f.job.stage, f.stages.RETRYABLE_ERROR); assert.equal(f.installs, 1);
+  assert.equal(f.job.reinstallRequired, true); assert.match(f.job.lastError, /尚未确认授权替换/);
 });

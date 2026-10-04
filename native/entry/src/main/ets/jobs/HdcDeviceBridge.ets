@@ -257,6 +257,21 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     }
   }
 
+  async installedDetails(bundleName: string): Promise<Record<string, Object>> {
+    if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) throw new Error('应用包名无效');
+    if (!await this.connected()) throw new Error('无线调试已断开');
+    const output = await this.command(3, bundleName);
+    InstalledAppRegistry.parseVersion(output, bundleName);
+    const start = output.indexOf('{'), end = output.lastIndexOf('}');
+    const result = JSON.parse(output.substring(start, end + 1)) as Record<string, Object>;
+    if (result['name'] !== bundleName) throw new Error('设备信息与应用身份不一致');
+    try {
+      const label=(await this.command(14,bundleName)).trim();
+      if(label.length>0 && label.length<=256 && !/[\r\n]|\[Fail\]|error:|^\$string:/i.test(label)) {result['displayName']=label;InstalledAppRegistry.rememberDisplayName(bundleName,label);}
+    }catch(_){}
+    return result;
+  }
+
   /** 查询设备上的真实签名身份，供重签覆盖安装前比对。查询失败不推断为未安装。 */
   async installedSigningIdentity(bundleName: string): Promise<InstalledSigningIdentity | undefined> {
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) {
@@ -264,7 +279,12 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     }
     if (!await this.connected()) throw new Error('无线调试已断开');
     const output = await this.command(3, bundleName);
-    return InstalledAppRegistry.parseSigningIdentity(output, bundleName);
+    const identity = InstalledAppRegistry.parseSigningIdentity(output, bundleName);
+    if (identity) {
+      InstalledAppRegistry.remember(bundleName, identity.versionCode);
+      InstalledAppRegistry.rememberLauncher(output, bundleName);
+    }
+    return identity;
   }
 
   async install(signedHapPath: string,
@@ -342,11 +362,35 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) {
       throw new Error('应用包名无效');
     }
-    if (!await this.connected()) throw new Error('无线调试已断开');
-    const output = await this.command(7, bundleName);
-    if (output.includes('[Fail]') || /\berror\s*:|\bfailed\b|\bcode\s*:\s*[1-9]\d*/i.test(output) ||
-      !/successfully|AppMod finish/i.test(output)) {
-      throw new Error(output.trim().length > 0 ? output.trim() : '设备未确认卸载结果');
+    // Keep background idle-disconnect from running between the uninstall and
+    // its read-only confirmation. Submit the destructive command only once.
+    HdcDeviceBridge.scans++;
+    try {
+      if (!await this.connected()) throw new Error('无线调试已断开');
+      let detail = '';
+      let rejected = false;
+      try {
+        const output = await this.command(7, bundleName);
+        rejected = /\[Fail\]|\berror\s*:|\bfailed\b|\bcode\s*:\s*[1-9]\d*/i.test(output);
+        if (!rejected && /successfully|AppMod finish/i.test(output)) return;
+        detail = output.trim();
+      } catch (error) { detail = String(error); }
+      // A lost reply cannot tell us whether removal finished. Only a complete
+      // system inventory can prove absence; an offline/truncated list cannot.
+      for (let attempt = 0; attempt < 6; attempt++) {
+        let found: Map<string, number> | undefined;
+        try { found = InstalledAppRegistry.parseNames(await this.command(6)); } catch (_) {}
+        if (found === undefined) {
+          throw new Error('暂时无法确认卸载结果，请重连无线调试后刷新应用列表');
+        }
+        if (!found.has(bundleName)) return;
+        if (rejected || attempt === 5) break;
+        await new Promise<void>((resolve: () => void) => { setTimeout(resolve, 500); });
+      }
+      throw new Error(detail || '设备上仍安装着该应用，请稍后重试');
+    } finally {
+      HdcDeviceBridge.scans--;
+      HdcDeviceBridge.idleHandler?.();
     }
   }
 

@@ -40,6 +40,8 @@ export interface JobRuntime {
   ensureDevice(): Promise<boolean>;
   install(job: InstallJob): Promise<void>;
   installedVersion(bundleName: string): Promise<number>;
+  confirmRenewal(job: InstallJob): Promise<boolean>;
+  rememberInstalledAuthorization?(job: InstallJob): Promise<void>;
 }
 
 export class JobRunner {
@@ -135,8 +137,13 @@ export class JobRunner {
           // 版本仍旧并不等于无线调试断了。尤其安装器更新自己时，包管理器
           // 可能先完成安装、随后才结束旧进程；这时要求用户反复配对只会重装。
           throw new JobFailure(FailureKind.TRANSIENT,
-            '安装已提交，但新版本尚未生效。请重新打开应用确认；若版本仍旧，再点继续安装');
+            job.renewalRequestedAt > 0 ?
+              (job.allowDataLoss ? '重装续签已提交，但尚未确认新授权，请连接无线调试后继续核对' :
+                '续签已提交，但尚未确认授权替换结果。旧应用数据已保留，请连接无线调试后继续核对') :
+              '安装已提交，但新版本尚未生效。请重新打开应用确认；若版本仍旧，再点继续安装');
         }
+        // Auxiliary expiry metadata must never turn a confirmed install into a retry.
+        try { await this.runtime.rememberInstalledAuthorization?.(job); } catch (_) {}
         job.reinstallRequired = false;
         await this.advance(job, InstallStage.INSTALLED);
       }
@@ -192,7 +199,8 @@ export class JobRunner {
         throw new JobFailure(FailureKind.TRANSIENT,
           '安装结果暂时无法核实：' + String(error));
       }
-      if (current === job.versionCode) return true;
+      if (current === job.versionCode &&
+        (!(job.renewalRequestedAt > 0) || await this.runtime.confirmRenewal(job))) return true;
       if (Date.now() >= deadline) return false;
       await new Promise<void>((resolve) =>
         setTimeout(resolve, Math.min(interval, Math.max(0, deadline - Date.now()))));

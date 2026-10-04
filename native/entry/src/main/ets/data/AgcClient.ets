@@ -25,6 +25,20 @@ class CreateProfileBody {
   certList: string[] = [];
   packageName: string = '';
 }
+class CreateManagedProfileBody {
+  provisionName: string = '';
+  certList: string[] = [];
+  deviceList: string[] = [];
+  aclPermissionList: string[] = [];
+  provisionType: number = 1;
+  appId: string = '';
+  reqSource: string = 'IDE';
+}
+
+export class CreatedAgcProfile {
+  id: string = '';
+  downloadUrl: string = '';
+}
 
 export class AgcClient {
   private account: DeveloperAccount;
@@ -32,7 +46,8 @@ export class AgcClient {
   constructor(account: DeveloperAccount) { this.account = account; }
 
   private async request(path: string, body?: Object,
-    method?: http.RequestMethod, retried: boolean = false): Promise<Record<string, Object>> {
+    method?: http.RequestMethod, retried: boolean = false, appId: string = '',
+    form?: string): Promise<Record<string, Object>> {
     const request = http.createHttp();
     const startedAt = Date.now();
     const verb = method ?? (body ? http.RequestMethod.POST : http.RequestMethod.GET);
@@ -43,18 +58,20 @@ export class AgcClient {
           'oauth2Token': this.account.accessToken,
           'teamId': this.account.teamId,
           'uid': this.account.userId,
-          'Content-Type': 'application/json'
+          'Content-Type': form === undefined ? 'application/json' : 'application/x-www-form-urlencoded'
         },
         connectTimeout: 8000,
         readTimeout: 15000,
         maxLimit: 1024 * 1024
       };
+      if (appId.length > 0) (options.header as Record<string, string>)['appId'] = appId;
       // HarmonyOS rejects extraData: '' before a bodyless GET reaches AGC.
       if (body) options.extraData = JSON.stringify(body);
+      if (form !== undefined) options.extraData = form;
       const response = await request.request(AGC_API + path, options);
       if (response.responseCode === 401 && !retried) {
         await AccountService.refresh(this.account, true);
-        return this.request(path, body, method, true);
+        return this.request(path, body, method, true, appId, form);
       }
       if (response.responseCode !== 200 || typeof response.result !== 'string') {
         const code = response.responseCode;
@@ -69,7 +86,7 @@ export class AgcClient {
         const code = Number(ret['code']);
         if (code === 401 && !retried) {
           await AccountService.refresh(this.account, true);
-          return this.request(path, body, method, true);
+          return this.request(path, body, method, true, appId, form);
         }
         throw new ServiceFailure(code === 401 ? FailureKind.ACCOUNT : FailureKind.INTERNAL,
           'AGC 拒绝请求：' + String(ret['msg'] ?? ret['code']), code);
@@ -164,7 +181,7 @@ export class AgcClient {
   }
 
   async createProfile(name: string, certId: string, deviceIds: string[],
-    permissions: string[], bundleName: string): Promise<string> {
+    permissions: string[], bundleName: string): Promise<CreatedAgcProfile> {
     const body = new CreateProfileBody();
     body.provisionName = name;
     body.certList = [certId];
@@ -172,8 +189,97 @@ export class AgcClient {
     body.aclPermissionList = permissions;
     body.packageName = bundleName;
     const data = await this.request('/cps/provision-manage/v1/ide/test/provision/add', body);
-    const url = String(data['provisionFileUrl'] ?? '');
-    if (url.length === 0) throw new Error('AGC 未返回设备授权文件');
-    return url;
+    const info = data['provisionInfo'] as Record<string, Object> | undefined;
+    const created = new CreatedAgcProfile();
+    const ret = data['ret'] as Record<string, Object> | undefined;
+    const recordId = info?.['id'] || info?.['provisionId'] || data['id'] || data['provisionId'] || ret?.['id'];
+    // Cloud IDs exceed JS's safe integer range. Never round one into another
+    // record's ID when the server has unexpectedly encoded it as a number.
+    if (typeof recordId === 'string') created.id = recordId;
+    else if (typeof recordId === 'number' && Number.isSafeInteger(recordId)) created.id = String(recordId);
+    created.downloadUrl = String(info?.['provisionFileUrl'] || data['provisionFileUrl'] || ret?.['downloadUrl'] || '');
+    // Basic IDE authorization can return a file without a persistent cloud row.
+    // A receipt is optional: verify and retain the signed file in either case.
+    // Never substitute a CMS UUID or rounded number for a deletion receipt.
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(created.id)) {
+      created.id = '';
+    }
+    console.info('AGC Profile receipt=' + (created.id.length > 0 ? 'present' : 'absent'));
+    return created;
+  }
+
+  async deleteProfile(id: string): Promise<void> {
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(id)) throw new Error('AGC 授权记录编号无效');
+    await this.request('/cps/provision-manage/v1/provision/delete?id=' + encodeURIComponent(id),
+      undefined, http.RequestMethod.DELETE);
+  }
+
+  async registeredApps(bundleName: string): Promise<Array<Record<string, Object>>> {
+    const data = await this.request('/amis/app-manage/v1/manage/app/brief-info/list?packageNames=' +
+      encodeURIComponent(bundleName));
+    return data['appInfos'] as Array<Record<string, Object>> ?? [];
+  }
+
+  async signingProjects(): Promise<Array<Record<string, Object>>> {
+    const rows: Array<Record<string, Object>> = [];
+    for (let page = 1; page <= 10; page++) {
+      const data = await this.request('/project-service/v1/projects?uid=' +
+        encodeURIComponent(this.account.userId) + '&teamId=' + encodeURIComponent(this.account.teamId) +
+        '&queryFlag=0&fromPage=' + page + '&pageSize=100');
+      const part = data['projectList'] as Array<Record<string, Object>> ?? [];
+      rows.push(...part);
+      if (part.length < 100 || rows.length >= Number(data['totalCount'] ?? Infinity)) return rows;
+    }
+    throw new Error('AGC 项目过多，无法完整核对已有签名项目');
+  }
+
+  async createSigningProject(): Promise<string> {
+    // DevEco's registration endpoints use form encoding, unlike Profile creation.
+    const form = 'uid=' + encodeURIComponent(this.account.userId) + '&teamId=' +
+      encodeURIComponent(this.account.teamId) + '&name=' + encodeURIComponent('轻启本地签名') +
+      '&createAllianceProjectFlag=1&createDevProjectFlag=0&createTenantProjectFlag=0';
+    const data = await this.request('/cpms/project-management-service/v1/projects', undefined,
+      http.RequestMethod.POST, false, '', form);
+    const mapping = data['mapping'] as Record<string, Object> | undefined;
+    return AgcClient.cloudId(mapping?.['projectId']);
+  }
+
+  async createSigningApp(projectId: string, bundleName: string): Promise<string> {
+    const form = 'teamId=' + encodeURIComponent(this.account.teamId) + '&projectId=' +
+      encodeURIComponent(projectId) + '&appName=' + encodeURIComponent(('轻启-' + bundleName).substring(0, 64)) +
+      '&packageName=' + encodeURIComponent(bundleName) + '&parentType=13&installationFree=0';
+    const data = await this.request('/publish/v3/app', undefined, http.RequestMethod.POST, false, '', form);
+    return AgcClient.cloudId(data['appId']);
+  }
+
+  static cloudId(value: Object | undefined): string {
+    if (typeof value === 'string' && /^\d{1,64}$/.test(value)) return value;
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return String(value);
+    throw new Error('AGC 未返回有效的云端记录编号');
+  }
+
+  async managedProfiles(appId: string): Promise<Array<Record<string, Object>>> {
+    const data = await this.request(
+      '/cps/provision-manage/v1/provision/list?encodeFlag=0&start=1&pageSize=100&certTypes=1',
+      undefined, undefined, false, appId);
+    const rows = data['list'] as Array<Record<string, Object>> ?? [];
+    if (Number(data['totalCount'] ?? rows.length) > 100) throw new Error('AGC 授权列表未完整返回');
+    return rows;
+  }
+
+  async approvedAcls(appId: string): Promise<string[]> {
+    const data = await this.request('/cps/provision-manage/v1/user/permission',
+      undefined, undefined, false, appId);
+    const user = data['userPermission'] as Record<string, Object> | undefined;
+    return String(user?.['aclPermissionList'] ?? '').split(',').map((acl: string) => acl.trim())
+      .filter((acl: string) => acl.length > 0);
+  }
+
+  async createManagedProfile(name: string, appId: string, certId: string, deviceIds: string[],
+    acls: string[]): Promise<void> {
+    const body = new CreateManagedProfileBody();
+    body.provisionName = name; body.appId = appId; body.certList = [certId];
+    body.deviceList = deviceIds; body.aclPermissionList = acls;
+    await this.request('/cps/provision-manage/v1/provision/add', body, undefined, false, appId);
   }
 }

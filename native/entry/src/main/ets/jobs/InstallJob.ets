@@ -55,8 +55,18 @@ export class InstallJob {
   signedProfileSha256: string = '';
   /** 任务选用的证书 ID，恢复时不能无意改用新的默认身份。 */
   signingCertId: string = '';
-  /** 同版本修复内嵌工作模块时，不能只凭外包版本相同跳过安装。 */
+  /** 用户明确提交的本地包/修复包，不能只凭版本相同跳过安装。 */
   reinstallRequired: boolean = false;
+  /** Durable renewal intent; preparedAt equals requestedAt only after fresh authorization is verified. */
+  renewalRequestedAt: number = 0;
+  renewalPreparedAt: number = 0;
+  renewalPreviousExpiry: number = 0;
+  renewalExpiresAt: number = 0;
+  renewalInstallBaseline: number = 0;
+  /** Verified authorization for this exact installed build; invalidated by any external reinstall. */
+  authorizationExpiresAt: number = 0;
+  installedUpdateTime: number = 0;
+  installedFingerprint: string = '';
   /** 用户明确接受卸载重装导致应用数据丢失，只对当前任务生效。 */
   allowDataLoss: boolean = false;
   approvedInstalledVersion: number = 0;

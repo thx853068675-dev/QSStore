@@ -1,4 +1,5 @@
 export interface PackageEntry { name: string; size: number; }
+export const listProfileEntries: (path: string) => PackageEntry[];
 export const listPackageEntries: (path: string) => PackageEntry[];
 export const extractPackageEntry: (path: string, entry: string, output: string) => Promise<void>;
 export const readModuleJson: (path: string) => string;
@@ -22,3 +23,6 @@ export const hdcCommand: (keyRoot: string, operation: number, parameter: string)
 export const hdcInstallProgress: (path: string, reset?: boolean) => string;
 /** 断开所有设备调试链路，返回断开数量。失败按 0 处理。 */
 export const hdcDisconnect: () => number;
+
+export const readArchiveFile: (path: string, name: string) => Uint8Array;
+export const rewriteArchive: (input: string, output: string, names: string[], files: string[], previousBundle?: string, nextBundle?: string) => Promise<void>;

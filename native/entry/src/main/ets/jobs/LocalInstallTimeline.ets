@@ -34,14 +34,15 @@ export class LocalInstallTimeline {
     if (task === undefined) return view;
     const job = task.job;
     const done = job.stage === InstallStage.INSTALLED;
+    const queued = job.stage === InstallStage.QUEUED;
     const waiting = LocalInstallTimeline.isWaiting(job.stage);
     view.visible = true;
     view.running = task.running && !done && !waiting;
     view.title = job.bundleName || job.assetName;
     view.version = job.versionName || (job.versionCode > 0 ? String(job.versionCode) : '');
     view.status = done ? '安装完成' : InstallTaskState.label(task, now);
-    if (!task.running && !done && !waiting) view.status = '安装已暂停，可在管理页继续';
-    view.tone = done ? 'success' : (waiting || !task.running ? 'warning' : 'normal');
+    if (!task.running && !done && !waiting && !queued) view.status = '安装已暂停，可在管理页继续';
+    view.tone = done ? 'success' : (waiting || (!task.running && !queued) ? 'warning' : 'normal');
     view.message = !task.running && !done ? job.lastError : '';
     const marks = job.stageHistory.slice();
     // 兼容没有时间轴的旧记录，以及阶段已更新但历史未补齐的记录。

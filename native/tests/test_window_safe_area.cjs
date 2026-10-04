@@ -20,7 +20,12 @@ function fixture() {
     },
     getWindowProperties: () => ({ displayId: 7 }),
     getUIContext: () => { state.uiReads++; throw Error('UI content not loaded'); },
-    setSpecificSystemBarEnabled: async (name, enabled) => { state.enabledBars[name] = enabled; },
+    setSpecificSystemBarEnabled: async (name, enabled) => {
+      state.enabledBars[name] = enabled;
+      state.events.push(name);
+      // Restoring system navigation can restore its default opaque background.
+      if(enabled)state.bars={navigationBarColor:'#FFFFFFFF'};
+    },
     setWindowBackgroundColor: color => { state.backgroundColor = color; },
     setWindowSystemBarProperties: async bars => { state.events.push('bars'); state.bars = bars; },
     setWindowLayoutFullScreen: async enabled => {
@@ -119,22 +124,25 @@ test('theme changes keep the status bar transparent while switching text contras
   await new Promise(resolve => setImmediate(resolve));
   const lightText = f.state.bars.statusBarContentColor;
   f.ability.onConfigurationUpdate({ colorMode: 1 });
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.storage.get('darkMode'), true);
   assert.equal(f.state.bars.statusBarColor, '#00000000');
   assert.equal(f.state.bars.navigationBarColor, '#00000000');
   assert.notEqual(f.state.bars.statusBarContentColor, lightText);
 });
 
-test('returning from settings restores transparent bars and hides restored navigation chrome', async () => {
+test('returning from settings retains the gesture indicator and clears the background after restoring it', async () => {
   const f = fixture();
   f.ability.onWindowStageCreate(f.stage);
   await new Promise(resolve => setImmediate(resolve));
-  f.state.enabledBars.navigation = true;
-  f.state.enabledBars.navigationIndicator = true;
+  f.state.enabledBars.navigation = false;
+  f.state.enabledBars.navigationIndicator = false;
   f.state.bars = { statusBarColor: '#FFFFFFFF' };
   f.ability.onForeground();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.state.bars.statusBarColor, '#00000000');
-  assert.equal(f.state.enabledBars.navigation, false);
-  assert.equal(f.state.enabledBars.navigationIndicator, false);
+  assert.equal(f.state.bars.navigationBarColor, '#00000000');
+  assert.equal(f.state.enabledBars.navigation, true);
+  assert.equal(f.state.enabledBars.navigationIndicator, true);
+  assert.deepEqual(f.state.events.slice(-3), ['navigation', 'navigationIndicator', 'bars']);
 });

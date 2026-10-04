@@ -1,3 +1,4 @@
+import { PackagePresentation } from './PackagePresentation';
 import { readModuleJson, readPackInfo, readHapIcon, readInstallPermissions } from 'libhap_core.so';
 
 export class PackageInspectError extends Error {
@@ -8,6 +9,7 @@ export class PackageInspectError extends Error {
 
 export class PackageIdentity {
   bundleName: string = '';
+  displayName: string = '';
   versionCode: number = 0;
   /** 清单里的 `app.versionName`，如 0.4.13；缺省时为空。 */
   versionName: string = '';
@@ -25,6 +27,7 @@ export function inspectPackage(path: string): PackageIdentity {
     const app = manifest['app'] as Record<string, Object> | undefined;
     const identity = new PackageIdentity();
     identity.bundleName = String(app?.['bundleName'] ?? '');
+    identity.displayName = PackagePresentation.label(path);
     identity.versionCode = Number(app?.['versionCode'] ?? 0);
     // 版本名要一起取出来。界面上显示 versionCode 会得到 2026092910 这种
     // 看着像日期的数字；本地安装没有目录可比对，只能从包里读。

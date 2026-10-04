@@ -39,7 +39,7 @@ curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/v1/apps` | 列表。支持 `q` `category` `sort` `featured` `page` `page_size` |
+| GET | `/api/v1/apps` | 列表。支持 `q` `category` `sort` `featured` `page` `page_size`。`sort=discover` 在分页前将超过 100 星的应用按星数降序置顶，其余按更新时间排序 |
 | GET | `/api/v1/apps/{id}` | 详情 |
 | GET | `/api/v1/apps/{id}/releases` | 版本列表（含 asset 与镜像链）。支持 `page` `page_size`（上限 50），默认仅正式版；`prerelease=1` 手动查看预览版 |
 | GET | `/api/v1/apps/{id}/releases/{tag}` | 单版本 |
@@ -69,6 +69,8 @@ curl -k "https://47.98.250.230/api/v1/apps/1/releases?page_size=3"
 {"ok": true,  "data": {...}, "server_time": "...", "api_version": 1}
 {"ok": false, "error": {"code": "...", "message": "...", "hint": "..."}}
 ```
+
+独立监控 HAP 使用 `GET /api/v1/monitor`，通过 HTTPS 的 Basic 认证提交用户名 `monitor` 和监控密码。服务端仅保存加盐 PBKDF2-SHA256 摘要 `HAPSTORE_MONITOR_PASSWORD_HASH`（600,000 次迭代），写入权限 `0600` 的 `/etc/hapstore/monitor.env` 并由 systemd `EnvironmentFile` 加载。摘要未配置返回 503，密码错误返回 401，每 IP 每分钟最多 10 次，超限返回 429。旧监控 HAP 可将同一密码作为 Bearer 值提交；原随机 Token 失效。资源快照不包含凭证，GitHub 额度缓存 60 秒。客户端见 [monitor/README.md](../monitor/README.md)。
 
 三个列表接口（`/apps`、`/apps/{id}/releases`、`/apps/{id}/reviews`）的 `data` 都是同一个分页信封：
 

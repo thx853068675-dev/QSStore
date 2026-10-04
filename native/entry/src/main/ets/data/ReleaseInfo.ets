@@ -30,7 +30,13 @@ export class ReleaseInfo {
   publishedAt: string = '';
   notes: string = '';
   prerelease: boolean = false;
+  sourceKind: string = 'primary';
+  sourceRepo: string = '';
   assets: HapAsset[] = [];
+
+  identity(): string { return this.sourceRepo + ':' + this.tag; }
+
+  sourceLabel(): string { return this.sourceKind === 'secondary' ? '子仓' : '主仓'; }
 
   static fromJson(row: Record<string, Object>): ReleaseInfo {
     const release = new ReleaseInfo();
@@ -39,6 +45,8 @@ export class ReleaseInfo {
     release.publishedAt = String(row['published_at'] ?? '');
     release.notes = String(row['body'] ?? '');
     release.prerelease = row['prerelease'] === true;
+    release.sourceKind = row['source_kind'] === 'secondary' ? 'secondary' : 'primary';
+    release.sourceRepo = String(row['source_repo'] ?? '');
     const raw = row['assets'] as Array<Record<string, Object>> | undefined;
     release.assets = (raw ?? [])
       .map((asset: Record<string, Object>) => HapAsset.fromJson(asset))

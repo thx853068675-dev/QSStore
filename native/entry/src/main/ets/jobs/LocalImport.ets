@@ -84,6 +84,19 @@ export class LocalImport {
     }
   }
 
+  /** Own a separate preview before the package editor releases its work files. */
+  static async editedPreview(context: common.UIAbilityContext, path: string, name: string): Promise<InstallJob> {
+    const prefix=context.cacheDir+'/package-editor/';
+    if(!path.startsWith(prefix)||path.includes('/../')||!/\.(hap|app)$/i.test(path))throw new Error('编辑文件无效');
+    const size=fileIo.statSync(path).size;
+    if(size<=0||size>2*1024*1024*1024)throw new Error('安装文件大小无效');
+    await StorageBudget.require(context.cacheDir,size*2);
+    const dir=context.cacheDir+'/local-hap-previews';if(!fileIo.accessSync(dir))fileIo.mkdirSync(dir,true);
+    const output=dir+'/local-'+Date.now()+'-'+Math.floor(Math.random()*1000000)+PackageArchive.extension(path);
+    try{await fileIo.copyFile(path,output);return await LocalImport.preview(output,name);}
+    catch(error){PackageArchive.release(output);if(fileIo.accessSync(output))fileIo.unlinkSync(output);throw error as Error;}
+  }
+
   private static async preview(path: string, name: string): Promise<InstallJob> {
     const sha256 = (await hash.hash(path, 'sha256')).toLowerCase();
     const identity = await PackageArchive.inspect(path);
@@ -118,7 +131,7 @@ export class LocalImport {
 
   /** Only an explicit Install action promotes the file and persists a task. */
   static async commitPreview(context: common.UIAbilityContext, store: JobStore,
-    preview: InstallJob): Promise<InstallJob> {
+    preview: InstallJob, renewal: boolean = false): Promise<InstallJob> {
     const prefix = context.cacheDir + '/local-hap-previews/local-';
     if (!preview.cachePath.startsWith(prefix) || preview.cachePath.includes('/../') ||
       !/^[0-9a-f]{64}$/.test(preview.expectedSha256)) throw new Error('本地安装预览无效，请重新选择');
@@ -132,6 +145,7 @@ export class LocalImport {
     const signedPath = dir + '/local-' + sha256 + '.signed' + extension;
     await StorageBudget.require(context.filesDir, fileIo.statSync(preview.cachePath).size * 2);
     const temporary = cachePath + '.' + Date.now() + '.part';
+    const releasePackage = JobStore.reservePackage(cachePath);
     try {
       const valid = fileIo.accessSync(cachePath) &&
         (await hash.hash(cachePath, 'sha256')).toLowerCase() === sha256;
@@ -141,12 +155,32 @@ export class LocalImport {
       }
       const job = await store.enqueueLocal(cachePath, signedPath, sha256,
         identity.bundleName, identity.versionCode, identity.versionName,
-        identity.moduleName, identity.mainAbility);
+        identity.moduleName, identity.mainAbility, renewal);
       job.assetName = preview.assetName;
+      job.renewalInstallBaseline = 0;
+      // A new explicit import cannot inherit consent to erase an older installation.
+      job.allowDataLoss = false;
+      job.approvedInstalledVersion = 0;
+      job.approvedInstalledFingerprint = '';
+      job.approvedInstalledAppIdentifier = '';
+      if (renewal) {
+        job.renewalRequestedAt = job.renewalRequestedAt || Date.now();
+        job.renewalPreparedAt = 0;
+        job.renewalPreviousExpiry = job.renewalPreviousExpiry || 0;
+        job.renewalExpiresAt = 0;
+        job.reinstallRequired = true;
+        job.signedProfileSha256 = '';
+      } else {
+        job.renewalRequestedAt = 0;
+        job.renewalPreparedAt = 0;
+        job.renewalPreviousExpiry = 0;
+        job.renewalExpiresAt = 0;
+      }
       await store.save(job);
       LocalImport.discardPreview(context, preview);
       return job;
     } finally {
+      releasePackage();
       if (fileIo.accessSync(temporary)) fileIo.unlinkSync(temporary);
     }
   }

@@ -36,8 +36,15 @@ export struct DiscoverHeader {
   @Prop statusInset: number = 0;
   @Prop inset: number = 20;
   @Prop titleHeight: number = 88;
+  @Prop active: boolean = true;
+  @State private searchWidth: number = 0;
   onTitleSize: (height: number) => void = () => {};
   @BuilderParam searchContent: () => void;
+
+  @Builder
+  private floatingSearch() {
+    Stack() { this.searchContent() }.width('100%').height(46)
+  }
 
   build() {
     Column() {
@@ -61,14 +68,20 @@ export struct DiscoverHeader {
         .padding({ left: this.inset, right: this.inset }).clip(true)
       Stack({ alignContent: Alignment.Top }) {
         if (deviceInfo.sdkApiVersion >= 26 && uiMaterial.isImmersiveMaterialSupported()) {
-          Stack() { this.searchContent() }
+          // API 26 renders floating immersive material in Popup, not an ordinary Stack.
+          Column() {}
             .width('calc(100% - ' + (this.inset * 2) + 'vp)')
             .constraintSize({ maxWidth: StoreLayout.contentWidth }).height(46).margin({ top: 8 })
-            .borderRadius(23).clip(true)
-            .systemMaterial(new uiMaterial.ImmersiveMaterial({
-              style: uiMaterial.ImmersiveStyle.THIN, colorInvert: true, applyShadow: true,
-              lightEffect: { color: Palette.forMode(this.darkMode).surface }
-            }))
+            .onSizeChange((_old: SizeOptions, size: SizeOptions) => { this.searchWidth = Number(size.width); })
+            .bindPopup(this.active && this.searchWidth > 0, {
+              builder: this.floatingSearch, width: this.searchWidth, radius: 23,
+              placement: Placement.Bottom, targetSpace: 0, offset: { x: 0, y: -46 },
+              enableArrow: false, autoCancel: false, focusable: false, mask: false,
+              systemMaterial: new uiMaterial.ImmersiveMaterial({
+                style: uiMaterial.ImmersiveStyle.THIN, colorInvert: true, applyShadow: true, interactive: true,
+                lightEffect: { color: Palette.forMode(this.darkMode).surface }
+              })
+            })
         } else {
           Stack() { this.searchContent() }
             .width('calc(100% - ' + (this.inset * 2) + 'vp)')

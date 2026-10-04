@@ -44,6 +44,7 @@ export class AccountService {
     account.teamId = fresh.teamId;
     account.displayName = fresh.displayName;
     account.avatarUrl = fresh.avatarUrl;
+    account.realNameVerified = fresh.realNameVerified;
     return account;
   }
 }

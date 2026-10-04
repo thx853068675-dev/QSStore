@@ -28,9 +28,10 @@ const native = {
   readModuleJson: p => execFileSync(cli,[p], {encoding:'utf8'}),
   readPackInfo: p => execFileSync(cli,[p,'pack'], {encoding:'utf8'}), readHapIcon: () => new Uint8Array()
 };
-const inspector = load('jobs/PackageInspector', { 'libhap_core.so': native });
+const presentation = load('jobs/PackagePresentation', { 'libhap_core.so': native });
+const inspector = load('jobs/PackageInspector', { 'libhap_core.so': native, './PackagePresentation':presentation });
 const storage = { StorageBudget: { require: async () => {} } };
-const archive = load('jobs/PackageArchive', { './StorageBudget': storage, 'libhap_core.so': native, '@kit.CoreFileKit': {fileIo:io}, './PackageInspector': inspector });
+const archive = load('jobs/PackageArchive', { './StorageBudget': storage, 'libhap_core.so': native, '@kit.CoreFileKit': {fileIo:io}, './PackageInspector': inspector, './PackagePresentation':presentation });
 const jobs = load('jobs/InstallJob', {});
 function fixtures(name) {
   const sub = path.join(dir,name); fs.mkdirSync(sub);
@@ -64,7 +65,8 @@ function local(sub,source) {
   let selected = source, saved;
   const core = {fileIo:io,hash:{hash:async p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')},
     picker:{DocumentViewPicker: class { async select(options) {assert.match(options.fileSuffixFilters[0], /\.app,\.zip/);return [selected];}}}};
-  const {LocalImport}=load('jobs/LocalImport',{'./StorageBudget': storage, '@kit.CoreFileKit':core,'./PackageArchive':archive,'./InstallJob':jobs,'libhap_core.so':native});
+  const {LocalImport}=load('jobs/LocalImport',{'./JobStore':{JobStore:{reservePackage:()=>()=>{}}},
+    './StorageBudget': storage, '@kit.CoreFileKit':core,'./PackageArchive':archive,'./InstallJob':jobs,'libhap_core.so':native});
   const store={save:async job=>saved=job,enqueueLocal:async(cachePath,signedPath,hash,bundleName,versionCode,versionName,moduleName,mainAbility)=>
     ({cachePath,signedPath,expectedSha256:hash,bundleName,versionCode,versionName,moduleName,mainAbility})};
   return {context,LocalImport,store,saved:()=>saved};

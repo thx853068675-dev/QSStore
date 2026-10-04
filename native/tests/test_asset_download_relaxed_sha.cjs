@@ -12,13 +12,19 @@ function loadAssetDownload(mocks, globals = {}) {
     '../entry/src/main/ets/jobs/JobCancellation.ets'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText, { exports: cancellation });
+  const routes = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
+    '../entry/src/main/ets/jobs/DownloadRoutes.ets'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+  }).outputText, { exports: routes, require: name => mocks[name] || {}, setTimeout, clearTimeout });
   const file = path.join(__dirname, '../entry/src/main/ets/jobs/AssetDownload.ets');
   const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText;
   const exports = {};
   vm.runInNewContext(code, { exports, require: name => mocks[name] ||
-    (name === './JobCancellation' ? cancellation : {}),
+    (name === './JobCancellation' ? cancellation : name === './DownloadRoutes' ? routes : {}),
+    console: { info: () => {} },
     setTimeout, clearTimeout, ...globals });
   return exports.AssetDownload;
 }
@@ -217,4 +223,61 @@ test('final network interruption retains the partial transfer for restart', asyn
   downloader.discardTransfer = async () => { job.transferTaskId = ''; };
   await assert.rejects(downloader.downloadAndVerify(job), /网络中断/);
   assert.equal(files.has(job.cachePath + '.part'), true); assert.equal(job.transferTaskId, 'live-agent');
+});
+
+function routeFixture({ vpn=false, resumed=false, slow=true, noBytes=false, only=false,
+ rate=512, total=1024*1024 }={}) {
+ let now=0, taskNo=0;const created=[],removed=[],files=new Set();
+ const tasks=new Map();
+ const origin='https://github.com/o/r/releases/download/v1/app.hap',mirror='https://gh-proxy.com/'+origin;
+ const job={id:'adaptive',appId:1,assetName:'app.hap',cachePath:'/sandbox/app.hap',signedPath:'',expectedSha256:'',
+  sourceUrl:mirror,mirrorUrls:only?[]:[origin],transferTaskId:resumed?'resume':''};
+ const initial={tid:'resume',config:{url:mirror,saveas:job.cachePath+'.part'},started:true,at:0};tasks.set('resume',initial);
+ if(resumed)files.add(job.cachePath+'.part');
+ const State={INITIALIZED:0,RUNNING:1,COMPLETED:2,FAILED:3,REMOVED:4,RETRYING:5};
+ const pause=async()=>{};
+ const Download=loadAssetDownload({
+  '@kit.NetworkKit':{connection:{getAllNets:async()=>[{netId:1}],NetBearType:{BEARER_VPN:4},
+    getNetCapabilities:async()=>({bearerTypes:vpn?[4]:[1]})}},
+  '@kit.BasicServicesKit':{request:{agent:{State,Action:{DOWNLOAD:1},Mode:{BACKGROUND:1},
+   create:async(_ctx,config)=>{assert.equal(config.metered,true);const t={tid:'task'+(++taskNo),config,started:false,at:now,
+    start:async()=>{t.started=true;t.at=now;files.add(config.saveas);},pause};tasks.set(t.tid,t);created.push(config.url);return t;},
+   getTask:async (_ctx,id)=>({...tasks.get(id),pause}),
+   show:async id=>{const t=tasks.get(id);const elapsed=now-t.at;
+    const processed=t.config.url===origin?total:noBytes?0:resumed&&elapsed>=180000?total:slow?Math.floor(elapsed/1000)*rate:total;
+    return{progress:{state:!t.started?0:processed>=total?2:noBytes?5:1,processed,sizes:[total]}};},
+   remove:async id=>removed.push(id)}}},
+  '@kit.CoreFileKit':{fileIo:{accessSync:p=>files.has(p),unlinkSync:p=>files.delete(p),
+   renameSync:(a,b)=>{files.delete(a);files.add(b);}},hash:{hash:async()=> 'e'.repeat(64)}},
+  './InstallTaskState':{InstallTaskState:{downloadProgress:()=>{}}}
+ },{Date:{now:()=>now},setTimeout:(cb,delay)=>{now+=delay;cb();return now;}});
+ return{job,created,removed,files,download:new Download({}, {save:async()=>{}}),time:()=>now};
+}
+test('a new VPN download bypasses the mirror and goes directly to GitHub',async()=>{
+ const f=routeFixture({vpn:true});await f.download.downloadAndVerify(f.job);
+ assert.deepEqual(f.created,['https://github.com/o/r/releases/download/v1/app.hap']);
+});
+test('a trickling first mirror switches after the bounded early speed window',async()=>{
+ const f=routeFixture();await f.download.downloadAndVerify(f.job);
+ assert.equal(f.created.length,2);assert.equal(f.time(),15000);assert.equal(f.removed.length,2);
+});
+test('connection retries with no bytes switch after twelve seconds rather than one minute',async()=>{
+ const f=routeFixture({noBytes:true});await f.download.downloadAndVerify(f.job);
+ assert.equal(f.created.length,2);assert.equal(f.time(),12000);
+});
+test('a resumed slow download keeps its original URL and partial file even when VPN is now on',async()=>{
+ const f=routeFixture({vpn:true,resumed:true});await f.download.downloadAndVerify(f.job);
+ assert.equal(f.created.length,0);assert.equal(f.time(),180000);assert.equal(f.files.has(f.job.cachePath),true);
+});
+test('the last available source is not discarded merely because it is slow',async()=>{
+ const f=routeFixture({only:true});await f.download.downloadAndVerify(f.job);
+ assert.equal(f.created.length,1);assert.ok(f.time()>15000);
+});
+test('a large package trickling at the measured VPN speed also tries another source',async()=>{
+ const f=routeFixture({rate:16*1024,total:13*1024*1024});await f.download.downloadAndVerify(f.job);
+ assert.equal(f.created.length,2);assert.equal(f.time(),15000);
+});
+test('a small package already a quarter downloaded is allowed to finish on its current source',async()=>{
+ const f=routeFixture({rate:16*1024,total:512*1024});await f.download.downloadAndVerify(f.job);
+ assert.equal(f.created.length,1);assert.equal(f.time(),32000);
 });

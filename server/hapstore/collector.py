@@ -7,12 +7,13 @@
 1) **可信元数据与镜像下载**
    release 摘要和下载地址只从 GitHub API 直连取得。旧附件没有摘要时只允许官方
    HTTPS 直连计算摘要。镜像只用于下载已有可信摘要的 HAP；
-   下载后必须匹配 GitHub 摘要才会解析包内元数据。直连不可用时同步失败，
+   镜像下载后必须匹配 GitHub 摘要才会解析包内元数据。大 HAP 的清单只通过
+   官方 API/CDN 的有界 Range 请求读取，不把局部读取宣称为整包哈希校验。直连不可用时同步失败，
    防止第三方镜像同时伪造安装包与校验值。
 
 2) **不落盘 HAP 本体**
    为了从包里读出 bundleName / versionCode（用于兼容性与更新判断），
-   需要读 HAP 内的小文件。做法是把包下到临时文件后**只读需要的条目**，
+   需要读 HAP 内的小文件。小包下到临时文件后**只读需要的条目**，大 HAP 仅读取清单范围，
    随后立即删除 —— 服务器只保留索引，不保留安装包。
 
 关于 versionCode 的坑：
@@ -627,8 +628,14 @@ def fetch_releases(repo: str, *, token: str = "", limit: int = 300,
     for r in raw:
         if r.get('draft'):
             continue
+        # Count the repository's release attachments before filtering or expanding
+        # installable packages. A ZIP with several HAPs is still one download.
+        raw_assets = r.get("assets") or []
+        counts = [a.get("download_count") for a in raw_assets]
+        github_downloads = (sum(counts) if all(type(n) is int and n >= 0 for n in counts)
+                            else None)
         assets = []
-        for a in r.get("assets") or []:
+        for a in raw_assets:
             if not is_hap_asset(a.get("name", "")):
                 continue
             # GitHub 会为 release asset 计算摘要（形如 "sha256:..."）。
@@ -641,6 +648,8 @@ def fetch_releases(repo: str, *, token: str = "", limit: int = 300,
                 "size": int(a.get("size") or 0),
                 "sha256": sha,
                 "download_url": a.get("browser_download_url", ""),
+                "_github_api_url": f"https://api.github.com/repos/{repo}/releases/assets/{a['id']}"
+                    if type(a.get('id')) is int and a['id'] > 0 else '',
             })
         out.append({
             "tag": r.get("tag_name") or "",
@@ -650,6 +659,7 @@ def fetch_releases(repo: str, *, token: str = "", limit: int = 300,
             "prerelease": bool(r.get("prerelease")),
             "html_url": r.get("html_url") or "",
             "etag": r.get("id") and str(r.get("id")) or "",
+            "github_downloads": github_downloads,
             "assets": assets,
         })
     return sorted(out, key=lambda r: r["published_at"], reverse=True)
@@ -694,6 +704,42 @@ def enrich_assets_with_hap_metadata(
             cached = artifact_cache.get(a.get('sha256', ''), 'hap')
             if cached is not None:
                 a.update(cached[0])
+                continue
+            if int(a.get('size') or 0) > MAX_HAP_SCAN:
+                # Large HAPs only need small manifests to recognize installed
+                # versions. Keep the full-download limit and use official ranges.
+                cached = artifact_cache.get(a.get('sha256', ''), 'hap-range')
+                if cached is not None:
+                    a.update(cached[0])
+                    # Old negative cache entries did not distinguish I/O failure
+                    # from absence. Recheck those once; keep successful icons.
+                    checked = cached[0].get('_icon_checked') is True
+                    current = cached[0].get('_icon_status_revision') == 1
+                    if (checked and (current or cached[0].get('_icon')) or
+                            float(cached[0].get('_icon_retry_at') or 0) > time.time()):
+                        continue
+                try:
+                    from .remote_hap import inspect
+                    metadata = inspect(a, token)
+                    attempts = min(6, int(a.get('_icon_attempts') or 0) + 1)
+                    metadata['_icon_attempts'] = 0 if metadata['_icon_checked'] else attempts
+                    metadata['_icon_retry_at'] = (0 if metadata['_icon_checked'] else
+                        time.time() + min(3600, 300 * 2 ** (attempts - 1)))
+                    a.update(metadata)
+                    artifact_cache.put(a.get('sha256', ''), 'hap-range', [metadata])
+                except (OSError, ValueError, urllib.error.URLError) as error:
+                    if cached is not None:
+                        # A failed retry must not discard the proven manifest or
+                        # hammer GitHub on every refresh of the same digest.
+                        metadata = dict(cached[0])
+                        attempts = min(6, int(metadata.get('_icon_attempts') or 0) + 1)
+                        metadata.update(_icon_checked=False, _icon_status_revision=1,
+                            _icon_attempts=attempts,
+                            _icon_retry_at=time.time() + min(3600, 300 * 2 ** (attempts - 1)))
+                        a.update(metadata)
+                        artifact_cache.put(a.get('sha256', ''), 'hap-range', [metadata])
+                    if progress:
+                        progress(f"  {a['name']}: 大包清单暂不可读，保留原有信息（{type(error).__name__}）")
                 continue
             trusted_sha = a.get("sha256") or ""
             # GitHub 的旧附件可能没有 digest；只能从官方 HTTPS 下载并计算，

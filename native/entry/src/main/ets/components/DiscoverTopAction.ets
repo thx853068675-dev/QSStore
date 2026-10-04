@@ -102,6 +102,8 @@ export struct DiscoverTopAction {
     }.width('100%').height(48).padding({ left: this.inset, right: this.inset })
       .justifyContent(this.leftHand ? FlexAlign.Start : FlexAlign.End)
       .animation({ duration: 220, curve: Curve.EaseOut })
-      .hitTestBehavior(HitTestMode.Transparent)
+      // Only the 48vp control participates. The empty row must pass drags to
+      // the list; Transparent still enrolls the row in hit testing.
+      .hitTestBehavior(HitTestMode.None)
   }
 }

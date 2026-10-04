@@ -85,6 +85,14 @@ def process_prepare_one(token: str = '') -> bool:
         prepared = __import__('json').loads(task['prepared_json'])
         snapshot = inspect_snapshot(prepared['snapshot'], token)
         candidate = next(r for r in snapshot['releases'] if r.get('assets'))
+        if prepared.get('require_identity'):
+            # Source association must inspect plain HAPs too. Filenames, GitHub
+            # tags and user supplied bundle names are never identity evidence.
+            collector.enrich_assets_with_hap_metadata([candidate], token=token, limit=1)
+            candidate['assets'] = [a for a in candidate['assets'] if a.get('bundle_name') and
+                a.get('version_code', 0)>0 and len(a.get('sha256', '')) == 64]
+            if not candidate['assets']:
+                raise collector.CollectError('子仓安装包的包名尚无法核验，请检查安装包后重试')
         prepared['choices'] = [dict(tag=candidate['tag'], **{k: a.get(k, '') for k in
             ('name', 'size', 'bundle_name', 'version_name', 'version_code', 'min_api', 'display_name', 'sha256')})
             for a in candidate['assets']]

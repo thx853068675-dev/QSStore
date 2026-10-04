@@ -21,7 +21,7 @@ function fixture() {
   }).outputText, box);
   box.InstallConfirmation = { deactivate() {} }; box.InstallReconnect = { deactivate() {} };
   const ui = new box.Page(); Object.assign(ui, { pageVisible: false, topActionEpoch: 3,
-    currentTab: 0, signedIn: true, account: {}, myApps: [{ id: 1, category: '工具' }],
+    currentTab: 0, signedIn: true, account: {}, myApps: [{ id: 1, category: '工具' }], syncManagementIcons() {},
     myAppsLoaded: true, myAppsBusy: false, myAppsRefreshing: false, myAppsMessage: '',
     apps: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
     updateCatalog: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
@@ -29,7 +29,7 @@ function fixture() {
     discoverShowTop: true, scrollOffset: 1234, activeQuery: 'saved search',
     observeReconnect() {}, observeInstallTasks() {}, drainInstallQueue() {},
     refreshCatalogInstallState() {}, reconcileInterruptedInstalls: async () => {}, reconcileStuckJobs() {},
-    scanDeviceInstalled() { f.scans++; },
+    scanDeviceInstalled() { f.scans++; }, loadSigningExpiries() {},
     loadApps() { throw Error('return must not restart paginated network loading'); },
     loadAppIcon(_client, app) { f.icons.push(app); } });
   f.ui = ui; return f;
@@ -79,3 +79,52 @@ test('empty publication is confirmed only after successful loading; a failed ref
   f.myAppsFetch = async () => []; await ui.loadMyApps();
   assert.equal(ui.myApps.length, 0); assert.equal(ui.myAppsLoaded, true); assert.equal(ui.myAppsMessage, '');
 });
+test('installed information closes material popups before returning to Management', () => {
+  const detail = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/InstalledDetail.ets'), 'utf8');
+  const start = detail.indexOf('  private back():void{');
+  const back = detail.slice(start, detail.indexOf('\n  }', start) + 4);
+  let timer, routed;
+  const box = { setTimeout: fn => { timer = fn; return 1; }, router: { back: args => {
+    assert.equal(ui.headerVisible, false); routed = args;
+  } } };
+  vm.runInNewContext(ts.transpileModule(`class Page { ${back} }; globalThis.Page = Page;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 }
+  }).outputText, box);
+  const ui = new box.Page(); Object.assign(ui, { disposed: false, returning: false, headerVisible: true });
+  ui.back(); assert.equal(ui.headerVisible, false); assert.equal(routed, undefined);
+  timer(); assert.equal(routed.url, 'pages/Index');
+});
+for (const file of ['Detail', 'LocalInstall', 'PackageTools']) {
+  test(file + ' closes the shared material once before routing, even if popup and page both receive Back', () => {
+    const detail = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/' + file + '.ets'), 'utf8');
+    const start = detail.search(/^  private back\(/m);
+    assert.ok(start >= 0);
+    const back = detail.slice(start, detail.indexOf('\n  }', start) + 4);
+    const timers = []; let routed = 0;
+    const box = { setTimeout: fn => { timers.push(fn); return timers.length; }, router: { back: () => {
+      assert.equal(ui.headerVisible, false); routed++;
+    } } };
+    vm.runInNewContext(ts.transpileModule('class Page { ' + back + ' };globalThis.Page=Page;', {
+      compilerOptions: { target: ts.ScriptTarget.ES2020 }
+    }).outputText, box);
+    const ui = new box.Page(); Object.assign(ui, { disposed: false, returning: false, headerVisible: true });
+    ui.back(); ui.back(); assert.equal(timers.length, 1); assert.equal(ui.headerVisible, false);
+    assert.equal(routed, 0); timers[0](); assert.equal(routed, 1);
+  });
+}
+for (const file of ['LocalInstall', 'PackageTools']) {
+  test(file + ' retains the page receiver when the shared header invokes its tools builder', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/' + file + '.ets'), 'utf8');
+    // A bare BuilderParam method acquires StorePageHeader as its receiver on
+    // device. Its popup Back/plus callbacks then call nonexistent page methods.
+    const wrapper = source.match(/tools:\s*(\(\)\s*=>\s*\{\s*this\.headerTools\(\);?\s*\})/);
+    assert.ok(wrapper, 'capture the page receiver before passing the tools builder');
+    let received;
+    const box = {};
+    vm.runInNewContext('globalThis.make = function(){ return ' + wrapper[1] + '; };', box);
+    const page = { headerTools() { received = this; } };
+    const tools = box.make.call(page);
+    tools.call({ title: 'shared header' });
+    assert.equal(received, page);
+  });
+}

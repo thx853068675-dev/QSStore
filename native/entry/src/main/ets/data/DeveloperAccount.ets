@@ -9,6 +9,8 @@ export class DeveloperAccount {
   teamId: string = '';
   displayName: string = '';
   avatarUrl: string = '';
+  /** Huawei's realName flag; undefined means the status has not been returned. */
+  realNameVerified: boolean | undefined = undefined;
 
   get label(): string {
     return this.displayName.length > 0 && !this.displayName.includes('*') &&
@@ -24,6 +26,8 @@ export class DeveloperAccount {
     account.displayName = String(row['displayName'] ?? row['nickName'] ?? '');
     const avatar = String(row['avatarUrl'] ?? '');
     account.avatarUrl = /^https:\/\//.test(avatar) ? avatar : '';
+    const realName = row['realNameVerified'] ?? row['realName'];
+    if (typeof realName === 'boolean') account.realNameVerified = realName;
     return account;
   }
 
@@ -34,7 +38,8 @@ export class DeveloperAccount {
       userId: this.userId,
       teamId: this.teamId,
       displayName: this.displayName,
-      avatarUrl: this.avatarUrl
+      avatarUrl: this.avatarUrl,
+      realNameVerified: this.realNameVerified
     });
   }
 }

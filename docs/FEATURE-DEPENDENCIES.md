@@ -24,3 +24,5 @@
 ## 头像
 
 客户端优先用 DevEco 开发者登录态的 access token，向华为开放资料接口 `GOpen.User.getInfo` 以 HTTPS POST 请求昵称 `displayName` 和头像 `headPictureURL`；请求 `getNickName=1`，只使用昵称，不使用证书实名。实机已成功显示头像并在升级后恢复，无须额外 AGC Client ID。若该接口未返回头像，用户点头像可尝试 Account Kit `profile` 授权；这个备用路径仍需要 AGC Client ID。客户端仅接受 HTTPS 头像 URL，保存在本机账号状态中。服务端另用已核验的账号资料保存头像 URL，并在评论列表中返回；账号再次核验后，其已有评论也会显示头像。
+
+「我的」实名状态标签使用现有 DevEco 登录核验响应 `userInfo.realName` 的布尔值，不增加网络请求，也不读取实名姓名。该状态随账号保存在本机；旧会话缺失字段时等待核验，刷新未返回字段时保留上次已核验状态，避免误标成「未实名」。

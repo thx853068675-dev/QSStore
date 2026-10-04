@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright QuietStart contributors. SPDX-License-Identifier: MIT
-"""GitHub release 采集器。
+"""GitHub / Gitee release 采集器。
 
 两个关键设计：
 
@@ -92,7 +92,12 @@ def _http_get(url: str, *, token: str = "", accept: str = "application/vnd.githu
         headers['If-None-Match'] = cached['etag']
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as resp:
+        # Domestic Gitee endpoints should not inherit the GitHub outbound proxy.
+        response = (urllib.request.build_opener(urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=_CTX)).open(req, timeout=timeout)
+            if urlparse(url).hostname == 'gitee.com' else
+            urllib.request.urlopen(req, timeout=timeout, context=_CTX))
+        with response as resp:
             body = resp.read(8 * 1024 * 1024 + 1)
             if len(body) > 8 * 1024 * 1024:
                 raise CollectError('GitHub 元数据响应超限')
@@ -502,6 +507,17 @@ def _unlink_quiet(path: str | None) -> None:
         pass
 
 
+class _GiteeRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        if parsed.scheme != 'https' or parsed.hostname not in ('gitee.com', 'foruda.gitee.com'):
+            raise OSError('Gitee 安装包跳转到了非官方地址')
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected:
+            redirected.remove_header('Authorization')
+        return redirected
+
+
 def _download_to_temp(url: str, *, token: str = "", direct_only: bool = False) -> str | None:
     """把 HAP 下到临时文件用于解析。失败返回 None（不阻断采集）。
 
@@ -511,21 +527,25 @@ def _download_to_temp(url: str, *, token: str = "", direct_only: bool = False) -
     """
     if direct_only:
         parsed = urlparse(url)
-        if parsed.scheme != 'https' or parsed.hostname != 'github.com' or '/releases/download/' not in parsed.path:
+        if parsed.scheme != 'https' or parsed.hostname not in ('github.com', 'gitee.com') or '/releases/download/' not in parsed.path:
             return None
-    for prefix in (('',) if direct_only else API_MIRRORS):
+    gitee = urlparse(url).hostname == 'gitee.com'
+    for prefix in (('',) if direct_only or gitee else API_MIRRORS):
         target = f"{prefix}{url}" if prefix else url
         tmp: str | None = None
         try:
             req = urllib.request.Request(target, headers={"User-Agent": USER_AGENT})
-            if token and not prefix:
+            if token and not prefix and urlparse(url).hostname in ('github.com', 'api.github.com'):
                 req.add_header("Authorization", f"Bearer {token}")
             fd, tmp = tempfile.mkstemp(suffix=".hap", prefix="hapstore-")
             os.close(fd)
             length = 0
             total = 0
             truncated = False
-            with urllib.request.urlopen(req, timeout=60, context=_CTX) as resp, open(tmp, "wb") as f:
+            response = (urllib.request.build_opener(urllib.request.ProxyHandler({}), _GiteeRedirects(),
+                urllib.request.HTTPSHandler(context=_CTX)).open(req, timeout=60) if gitee else
+                urllib.request.urlopen(req, timeout=60, context=_CTX))
+            with response as resp, open(tmp, "wb") as f:
                 length = int(resp.headers.get("Content-Length") or 0)
                 if length and length > MAX_HAP_SCAN:
                     _unlink_quiet(tmp)
@@ -564,18 +584,20 @@ def _sha256_file(path: str) -> str:
 
 
 REPO_RE = re.compile(
-    r"^(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+    r"^(?:https?://)?(?:www\.)?(github\.com|gitee\.com)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
 )
 
 
 def normalize_repo(repo_url: str) -> str | None:
-    """把用户输入的 GitHub 地址规范化为 owner/repo。"""
+    """保留旧 GitHub 身份；Gitee 使用平台前缀，避免同名仓库冲突。"""
     repo_url = (repo_url or "").strip()
     if not repo_url:
         return None
     m = REPO_RE.match(repo_url)
     if m:
-        return f"{m.group(1)}/{m.group(2)}"
+        path = f"{m.group(2)}/{m.group(3)}"
+        return ('gitee.com/' + path) if m.group(1).lower() == 'gitee.com' else path
     # 允许直接填 owner/repo
     m = re.match(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$", repo_url)
     if m:
@@ -590,16 +612,32 @@ def is_hap_asset(name: str) -> bool:
 # ───────────────────────── 采集主流程 ─────────────────────────
 
 
+def repository_url(repo: str) -> str:
+    return 'https://' + repo if repo.startswith('gitee.com/') else 'https://github.com/' + repo
+
+
+def _repository_json(repo: str, suffix: str = '', *, token: str = '', timeout: int = TIMEOUT):
+    if repo.startswith('gitee.com/'):
+        # GitHub credentials must never be sent to another forge.
+        url = 'https://gitee.com/api/v5/repos/' + repo.removeprefix('gitee.com/') + suffix
+        try:
+            return json.loads(_http_get(url, accept='application/json', timeout=timeout))
+        except (ValueError, OSError) as error:
+            raise CollectError(f'Gitee 仓库读取失败：{error}') from error
+    return _json('/repos/' + repo + suffix, token=token, timeout=timeout)
+
+
 def fetch_app_metadata(repo: str, *, token: str = "", timeout: int = TIMEOUT) -> dict[str, Any]:
     """拉取仓库基础信息。"""
-    data = _json(f"/repos/{repo}", token=token, timeout=timeout)
+    data = _repository_json(repo, token=token, timeout=timeout)
     return {
         "display_name": data.get("name") or repo.split("/")[-1],
         "description": data.get("description") or "",
         "summary": (data.get("description") or "")[:120],
         "stars": int(data.get("stargazers_count") or 0),
         "homepage": data.get("homepage") or "",
-        "license": ((data.get("license") or {}) or {}).get("spdx_id") or "",
+        "license": (data.get("license") or {}).get("spdx_id", "")
+            if isinstance(data.get("license"), dict) else "",
         "tags_json": json.dumps(data.get("topics") or [], ensure_ascii=False),
         "category": classify_repo(data.get("topics") or [], data.get("description") or ""),
         # A repository owner's avatar is not the application's icon.
@@ -615,7 +653,7 @@ def fetch_releases(repo: str, *, token: str = "", limit: int = 300,
     raw = []
     for page in range(1, (limit + page_size - 1) // page_size + 1):
         suffix = '' if page == 1 else f'&page={page}'
-        rows = _json(f"/repos/{repo}/releases?per_page={page_size}{suffix}", token=token, timeout=timeout)
+        rows = _repository_json(repo, f"/releases?per_page={page_size}{suffix}", token=token, timeout=timeout)
         if not isinstance(rows, list):
             raise CollectError('GitHub 版本列表格式异常，保留原有版本')
         raw.extend(rows)
@@ -638,6 +676,12 @@ def fetch_releases(repo: str, *, token: str = "", limit: int = 300,
         for a in raw_assets:
             if not is_hap_asset(a.get("name", "")):
                 continue
+            if repo.startswith('gitee.com/'):
+                parsed = urlparse(a.get('browser_download_url') or '')
+                expected = '/' + repo.removeprefix('gitee.com/') + '/releases/download/'
+                # Gitee also includes source-code archives; these are not installation attachments.
+                if parsed.scheme != 'https' or parsed.hostname != 'gitee.com' or not parsed.path.lower().startswith(expected.lower()):
+                    continue
             # GitHub 会为 release asset 计算摘要（形如 "sha256:..."）。
             # 这是**可信来源**：由 GitHub 生成，采集时只走直连，
             # 因此无需下载即可为**每个** release 提供校验值。
@@ -649,7 +693,7 @@ def fetch_releases(repo: str, *, token: str = "", limit: int = 300,
                 "sha256": sha,
                 "download_url": a.get("browser_download_url", ""),
                 "_github_api_url": f"https://api.github.com/repos/{repo}/releases/assets/{a['id']}"
-                    if type(a.get('id')) is int and a['id'] > 0 else '',
+                    if not repo.startswith('gitee.com/') and type(a.get('id')) is int and a['id'] > 0 else '',
             })
         out.append({
             "tag": r.get("tag_name") or "",
@@ -657,7 +701,8 @@ def fetch_releases(repo: str, *, token: str = "", limit: int = 300,
             "body": (r.get("body") or "")[:8000],
             "published_at": r.get("published_at") or r.get("created_at") or "",
             "prerelease": bool(r.get("prerelease")),
-            "html_url": r.get("html_url") or "",
+            "html_url": r.get("html_url") or (repository_url(repo) + '/releases'
+                if repo.startswith('gitee.com/') else ''),
             "etag": r.get("id") and str(r.get("id")) or "",
             "github_downloads": github_downloads,
             "assets": assets,

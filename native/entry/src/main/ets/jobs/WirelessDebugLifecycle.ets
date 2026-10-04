@@ -6,6 +6,7 @@ import { InstallTaskState, InstallTaskSnapshot } from './InstallTaskState';
 import { InstallJob, InstallStage } from './InstallJob';
 import { isPending } from './RecoveryPlanner';
 import { InstallCoordinator } from './InstallCoordinator';
+import { ForegroundIdle } from './ForegroundIdle';
 
 /** Release an idle host in background; reuse its paired, saved port on return. */
 export class WirelessDebugLifecycle {
@@ -33,6 +34,7 @@ export class WirelessDebugLifecycle {
   }
 
   static onBackground(): void {
+    ForegroundIdle.cancel('wireless-restore');
     WirelessDebugLifecycle.foreground = false;
     WirelessDebugLifecycle.epoch++;
     WirelessDebugLifecycle.checkIdle();
@@ -42,6 +44,14 @@ export class WirelessDebugLifecycle {
     if (WirelessDebugLifecycle.foreground && WirelessDebugLifecycle.restoring) return;
     WirelessDebugLifecycle.foreground = true;
     WirelessDebugLifecycle.epoch++;
+    // Paused installs remain urgent; idle browsing waits for the opening/scroll animation.
+    if (WirelessDebugLifecycle.hasWork()) WirelessDebugLifecycle.startRestore();
+    else ForegroundIdle.defer('wireless-restore', () => {
+      if (WirelessDebugLifecycle.foreground) WirelessDebugLifecycle.startRestore();
+    });
+  }
+
+  private static startRestore(): void {
     const epoch = WirelessDebugLifecycle.epoch;
     if (!WirelessDebugLifecycle.restoring) {
       WirelessDebugLifecycle.restoring = WirelessDebugLifecycle.restore().catch(() => {})

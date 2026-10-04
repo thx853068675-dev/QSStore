@@ -1279,6 +1279,8 @@ def mirror_urls(github_url: str) -> list[str]:
     """给定 GitHub 直链，返回可用镜像候选（原链放最后作兜底）。"""
     if not github_url:
         return []
+    if not github_url.startswith('https://github.com/'):
+        return [github_url]
     out = [f"{p}{github_url}" for p in _MIRROR_PREFIXES]
     out.append(github_url)
     return out

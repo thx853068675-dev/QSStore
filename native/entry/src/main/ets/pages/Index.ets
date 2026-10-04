@@ -1,4 +1,5 @@
 import { InstalledInspection } from '../data/InstalledInspection';
+import { repositoryUrl } from '../data/RepositoryAddress';
 import { InstalledSigningExpiry } from '../jobs/InstalledSigningExpiry';
 import { DiscoverHeader, DiscoverMotion, DiscoverRefreshIndicator } from '../components/DiscoverHeader';
 import { DiscoverTopAction } from '../components/DiscoverTopAction';
@@ -30,6 +31,7 @@ import { JobStore } from '../jobs/JobStore';
 import { LegacyInstalledMigration } from '../jobs/LegacyInstalledMigration';
 import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
 import { JobScheduler } from '../jobs/JobScheduler';
+import { ForegroundIdle } from '../jobs/ForegroundIdle';
 import { isPending } from '../jobs/RecoveryPlanner';
 import { retryDelayMs } from '../jobs/RecoveryPlanner';
 import { LocalTool,LocalTools } from '../data/LocalTools';
@@ -213,8 +215,9 @@ struct Index {
   @StorageProp('signingIdentityRevision') @Watch('onSigningIdentityChanged') private signingIdentityRevision: number = 0;
   @State private pageVisible: boolean = true;
   @State private installerVersionName: string = '';
-  private resumeMaintenanceTimer: number = -1;
-  private resumeNeedsRescan: boolean = false;
+  private resumeMaintenancePending: boolean = false;
+  private catalogProjectionSource?: CatalogApp[];
+  private catalogProjectionChannel: number = -1;
   private catalogStateFlight: Promise<void> | undefined = undefined;
   private catalogStatePending: boolean = false;
   private catalogStateRescan: boolean = false;
@@ -396,6 +399,7 @@ struct Index {
   }
 
   private syncDiscoverScroll(): void {
+    ForegroundIdle.interaction();
     const distance = this.discoverMotion.scroll(this.discoverScroller.currentOffset().yOffset,
       this.discoverTitleHeight);
     const refresh = distance <= 0.5;
@@ -459,30 +463,29 @@ struct Index {
     // 系统在路由离开时关闭 Popup。重新创建其锚点，避免缓存页面仍绑定旧的已隐藏 Popup。
     this.topActionEpoch++;
     this.refreshOpeningSettings = false;
-    // 系统打开动画期间只恢复现有画面；识别与任务投影在动画后合并执行。
-    if (this.resumeMaintenanceTimer !== -1) clearTimeout(this.resumeMaintenanceTimer);
-    this.resumeMaintenanceTimer = setTimeout(() => {
-      this.resumeMaintenanceTimer = -1;
+    // 暖启动先复用当前画面；自动维护等待开场动画和用户的立即滚动结束。
+    ForegroundIdle.onForeground();
+    this.resumeMaintenancePending = true;
+    ForegroundIdle.defer('index-resume', () => {
+      this.resumeMaintenancePending = false;
       if (!this.pageVisible) return;
-      const rescan = this.resumeNeedsRescan;
-      this.resumeNeedsRescan = false;
       this.observeReconnect();
       this.observeInstallTasks();
       this.drainInstallQueue();
       this.syncViewedCatalog();
       this.syncManagementRows();
-      this.refreshCatalogInstallState(rescan);
+      this.refreshCatalogInstallState();
       if (this.currentTab === Index.TAB_MANAGE) {
         this.scanDeviceInstalled(); this.syncManagementIcons(); this.loadSigningExpiries();
       }
       this.reconcileInterruptedInstalls().then(() => this.reconcileStuckJobs());
-    }, 500);
+    });
   }
 
   private cancelResumeMaintenance(): void {
-    if (this.resumeMaintenanceTimer !== -1) clearTimeout(this.resumeMaintenanceTimer);
-    this.resumeMaintenanceTimer = -1;
-    this.resumeNeedsRescan = false;
+    ForegroundIdle.cancel('index-resume');
+    ForegroundIdle.cancel('catalog-wireless');
+    this.resumeMaintenancePending = false;
   }
 
   private syncViewedCatalog(): void {
@@ -1175,14 +1178,14 @@ struct Index {
     for (const name of bundleNames) {
       const version = versions.get(name);
       if (version !== undefined && version <= 0) continue;
-      const entry = new VersionCacheEntry(); entry.version = version ?? 0;
+      const entry = new VersionCacheEntry(); entry.version = version ?? 0; entry.at = Date.now();
       entry.versionName = InstalledAppRegistry.versionName(name, entry.version);
       display.set(name, entry);
     }
     const missing = bundleNames.filter((name: string) => !versions.has(name));
     const dropped = this.installedJobs.filter((job: InstallJob) =>
       job.bundleName.length > 0 && missing.includes(job.bundleName));
-    this.installedJobs = this.installedJobs.filter((job: InstallJob) =>
+    if (dropped.length > 0) this.installedJobs = this.installedJobs.filter((job: InstallJob) =>
       !missing.includes(job.bundleName));
     const next = new Map(this.installedVersions);
     for (const app of this.updateApps()) {
@@ -1193,10 +1196,7 @@ struct Index {
       else if (version > 0) next.set(app.id, version);
       // 包存在但版本查询失败时保留原值，不能误判为未装。
     }
-    this.installedDisplay = display;
-    this.installedVersions = next;
-    this.syncDetectedInstalled();
-    this.checkInstalledUpdates();
+    this.commitCatalogVersions(display, next);
     if (dropped.length > 0) {
       this.forgetInstalledVersions();
       try {
@@ -1791,7 +1791,7 @@ struct Index {
     this.configApp = app;
     this.configCategory = app.category;
     this.configSourceGeneration++;
-    this.configSourceUrl = app.secondaryRepo.length > 0 ? 'https://github.com/' + app.secondaryRepo : '';
+    this.configSourceUrl = repositoryUrl(app.secondaryRepo);
     this.configSourceExpanded = app.secondaryRepo.length > 0;
     this.configSourceDraft = new SubmitDraft();
     this.configSourceRemove = false;
@@ -1836,8 +1836,7 @@ struct Index {
   }
 
   private configSourceChanged(): boolean {
-    const original = this.configApp.secondaryRepo.length > 0 ?
-      'https://github.com/' + this.configApp.secondaryRepo.toLowerCase() : '';
+    const original = repositoryUrl(this.configApp.secondaryRepo).toLowerCase();
     return this.configSourceUrl.trim().replace(/\/+$/, '').toLowerCase() !== original;
   }
 
@@ -2454,6 +2453,8 @@ struct Index {
   /** 上架入口统一在这里：发现页原来那个 ＋ 已改成搜索。 */
   private openSubmitSheet(): void {
     this.submitGeneration++;
+    // Opening a fresh sheet cancels ownership of any previous async check.
+    this.submitBusy = false;
     if (!this.signedIn) {
       this.jobsError = '上架需要先登录华为开发者账号，已切到「我的」';
       this.currentTab = Index.TAB_MINE;
@@ -2601,7 +2602,9 @@ struct Index {
           InstalledAppRegistry.versionName(name, version)) : '';
         display.set(name, entry);
       }
-      if (!LocalBundles.isKnown(live) && (rescanInstalled || !LocalBundles.isKnown(version))) unresolved.add(name);
+      const observedAt = InstalledAppRegistry.observedAt(name);
+      if (!LocalBundles.isKnown(live) && (rescanInstalled || !LocalBundles.isKnown(version) ||
+        Date.now() - observedAt >= Index.VERSION_TTL_MS)) unresolved.add(name);
     }
     for (const app of targets) {
       const asset = app.latestAsset ?? this.installedAssets(app)[0];
@@ -2609,10 +2612,7 @@ struct Index {
       const version = versions.get(asset.bundleName) ?? -1;
       next.set(app.id, LocalBundles.isKnown(version) ? version : (this.installedVersions.get(app.id) ?? -1));
     }
-    this.installedDisplay = display;
-    this.installedVersions = next;
-    this.syncDetectedInstalled();
-    this.checkInstalledUpdates();
+    this.commitCatalogVersions(display, next);
     console.info('InstalledApps async dispatch: unique=' + versions.size + ' systemKnown=' +
       systemKnown + ' wireless=' + unresolved.size + ' elapsedMs=' + (Date.now() - startedAt));
     if (unresolved.size > 0) await this.confirmCatalogVersionsViaDevice(Array.from(unresolved));
@@ -2652,13 +2652,13 @@ struct Index {
 
   onWirelessLinkChanged(): void {
     if (!this.pageVisible || this.wirelessDebugRestoring) return;
-    if (this.resumeMaintenanceTimer !== -1) {
-      this.resumeNeedsRescan = this.resumeNeedsRescan || HdcDeviceBridge.deviceLinked();
-      return;
-    }
+    if (this.resumeMaintenancePending) return;
     if (HdcDeviceBridge.deviceLinked()) {
-      this.refreshCatalogInstallState(true);
-      if (this.currentTab === Index.TAB_MANAGE) this.scanDeviceInstalled();
+      ForegroundIdle.defer('catalog-wireless', () => {
+        if (!this.pageVisible || !HdcDeviceBridge.deviceLinked()) return;
+        this.refreshCatalogInstallState();
+        if (this.currentTab === Index.TAB_MANAGE) this.scanDeviceInstalled();
+      });
     }
     else this.updateInstallScanPrompt();
   }
@@ -2690,9 +2690,11 @@ struct Index {
     while (names.length > 0) {
       this.catalogProbeNames = names;
       try {
+        // 已装包可提前更新按钮；大量缺席包统一提交，避免一个回调重建整张列表几十次。
         const versions = await bridge.installedBundleVersions(names, (_checked: number, _total: number,
           name: string = '', version: number = -1) => {
-          if (name.length > 0 && version >= 0) this.applyDetectedCatalogVersion(name, version);
+          if (name.length > 0 && version >= 0 && (version > 0 ||
+            (this.installedDisplay.get(name)?.version ?? 0) > 0)) this.applyDetectedCatalogVersion(name, version);
         });
         if (versions === undefined) {
           if (!HdcDeviceBridge.deviceLinked() && await this.waitForRefreshConnection()) continue;
@@ -2760,24 +2762,47 @@ struct Index {
   }
 
   private applyDetectedCatalogVersion(bundleName: string, version: number): void {
+    const previous = this.installedDisplay.get(bundleName);
+    const versionName = InstalledAppRegistry.versionName(bundleName, version);
+    if (previous?.version === version && previous.versionName === versionName && this.updateApps().every(
+      (app: CatalogApp) => (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName !== bundleName ||
+        this.installedVersions.get(app.id) === version)) {
+      previous.at = Date.now();
+      return;
+    }
     const next = new Map(this.installedVersions);
     const display = new Map(this.installedDisplay);
     const entry = new VersionCacheEntry(); entry.version = version; entry.at = Date.now();
     entry.versionName = InstalledAppRegistry.versionName(bundleName, version);
-    display.set(bundleName, entry); this.installedDisplay = display;
-    let wasInstalled = false;
+    display.set(bundleName, entry);
     for (const app of this.updateApps()) {
       if ((app.latestAsset ?? this.installedAssets(app)[0])?.bundleName === bundleName) {
-        if ((next.get(app.id) ?? 0) > 0) wasInstalled = true;
         next.set(app.id, version);
       }
     }
-    this.installedVersions = next;
-    // 未安装包只需更新卡片；不要为每个缺席包重算整张管理列表。
-    if (version > 0 || wasInstalled) {
-      this.syncDetectedInstalled(bundleName);
-      this.checkInstalledUpdates();
+    this.commitCatalogVersions(display, next);
+  }
+
+  /** 时间戳是查询证据，不是视觉变化；版本/名称和目录没变时保留原列表引用。 */
+  private commitCatalogVersions(display: Map<string, VersionCacheEntry>, next: Map<number, number>): void {
+    const displayChanged = display.size !== this.installedDisplay.size || Array.from(display.keys()).some(
+      (name: string) => display.get(name)?.version !== this.installedDisplay.get(name)?.version ||
+        display.get(name)?.versionName !== this.installedDisplay.get(name)?.versionName);
+    const versionsChanged = next.size !== this.installedVersions.size || Array.from(next.keys()).some(
+      (id: number) => next.get(id) !== this.installedVersions.get(id));
+    if (displayChanged) this.installedDisplay = display;
+    else for (const name of display.keys()) {
+      const current = this.installedDisplay.get(name);
+      if (current !== undefined) current.at = Math.max(current.at || 0, display.get(name)?.at || 0);
     }
+    if (versionsChanged) this.installedVersions = next;
+    const source = this.updateCatalogReady ? this.updateCatalog : this.apps;
+    if (!displayChanged && !versionsChanged && source === this.catalogProjectionSource &&
+      this.releaseChannelRevision === this.catalogProjectionChannel) return;
+    this.catalogProjectionSource = source;
+    this.catalogProjectionChannel = this.releaseChannelRevision;
+    this.syncDetectedInstalled();
+    this.checkInstalledUpdates();
   }
 
   /** 外部安装条目来自设备，而不是伪造一条本安装器的安装历史。 */
@@ -3149,6 +3174,7 @@ struct Index {
     if (this.showSubmit) {
       if (!this.submitBusy || this.submitDraft.inspectionStatus !== 'ready') {
         this.submitGeneration++;
+        this.submitBusy = false;
         this.animateOverlay(() => { this.showSubmit = false; });
       }
       return true;
@@ -3737,7 +3763,7 @@ struct Index {
                     .fontSize(17).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
                   Text(this.activeQuery.length > 0 ?
                     '换个关键词试试，或清除搜索看全部应用' :
-                    '在「管理」页的「我上架的应用」里可以从 GitHub Release 添加')
+                    '在「管理」页的「我上架的应用」里可以从 GitHub / Gitee 添加')
                     .fontSize(12).fontColor(this.colors().textSecondary).textAlign(TextAlign.Center)
                 }.width('100%').padding(26).backgroundColor(this.colors().surface).borderRadius(20)
               }
@@ -4117,7 +4143,7 @@ struct Index {
               Column({ space: 3 }) {
                 Text('上架新应用').fontSize(15).fontWeight(FontWeight.Medium)
                   .fontColor(this.colors().text).maxLines(1)
-                Text('从 GitHub Release 添加安装包')
+                Text('从 GitHub / Gitee 发行版添加安装包')
                   .fontSize(11).fontColor(this.colors().textTertiary).maxLines(1)
               }.alignItems(HorizontalAlign.Start).layoutWeight(1)
               Text('›').fontSize(20).fontColor(this.colors().textTertiary)
@@ -4217,6 +4243,7 @@ struct Index {
         .width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + this.pageInset() * 2 }).height('100%')
         .contentStartOffset(this.statusBarInset + 56)
         .cachedCount(4)
+        .onDidScroll(() => ForegroundIdle.interaction())
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
@@ -4309,7 +4336,7 @@ struct Index {
         } else {
         Text('用于同步其他渠道搬运的版本，仅接收与主仓包名一致的安装包。')
           .fontSize(11).fontColor(this.colors().textTertiary).width('100%')
-        TextInput({ text: this.configSourceUrl, placeholder: 'https://github.com/用户名/仓库' })
+        TextInput({ text: this.configSourceUrl, placeholder: 'GitHub / Gitee 仓库地址' })
           .height(44).fontSize(13).fontColor(this.colors().text).backgroundColor(this.colors().fill)
           .borderRadius(12).enabled(!this.configBusy).id('app-config-source-url')
           .onChange((value: string) => {
@@ -4353,6 +4380,7 @@ struct Index {
           .fontColor(this.colors().text).layoutWeight(1)
         StoreIconButton({ active: !this.submitBusy || this.submitDraft.inspectionStatus !== 'ready', action: () => {
           this.submitGeneration++;
+          this.submitBusy = false;
           this.animateOverlay(() => { this.showSubmit = false; });
         } })
       }.width('100%')

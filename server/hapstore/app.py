@@ -322,7 +322,7 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
     repo = collector.normalize_repo(str(body.get("repo_url") or ""))
     if not repo:
         raise ApiError(400, "INVALID_REPO_URL",
-                       "请填写形如 https://github.com/<owner>/<repo> 的地址")
+                       "请填写 GitHub 或 Gitee 仓库地址，例如 https://gitee.com/<owner>/<repo>")
 
     # 同一账号五分钟内重复检查复用完整预处理结果，不重采 HAP、不占额度。
     cached = db.recent_submit_draft(repo, identity[0])

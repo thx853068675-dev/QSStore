@@ -34,7 +34,7 @@ function deferred() {
 function fixture() {
   const f = { snapshot: false, snapshots: 0, probes: [], reconciles: [] };
   const ui = page('Index', ['animateOverlay', 'updateInstallScanPrompt', 'openInstallScan',
-    'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'reconcileCatalogInstallState'], {
+    'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'reconcileCatalogInstallState', 'commitCatalogVersions'], {
     Curve: { EaseOut: 'ease-out' },
     getContext: () => ({}),
     InstalledAppRegistry: {

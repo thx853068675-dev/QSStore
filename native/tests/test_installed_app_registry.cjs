@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const root = path.resolve(__dirname, '../entry/src/main/ets');
 function load(file, mocks = {}) {
+  mocks = { './ForegroundIdle': { ForegroundIdle: { wait: async () => {} } }, ...mocks };
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, file + '.ets'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }

@@ -5,6 +5,7 @@ import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
 import { hdcCommand, hdcDisconnect, hdcInstallProgress } from 'libhap_core.so';
 import { NativeDeviceBridge } from './NativeJobRuntime';
+import { ForegroundIdle } from './ForegroundIdle';
 
 // All commands share one in-process Rust HDC host. Serialize install and
 // verification so a second UI action cannot overtake an active transfer.
@@ -240,9 +241,7 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
   private async readInstalledVersion(bundleName: string, persistResult: boolean): Promise<number> {
     const output = await this.command(3, bundleName);
     try {
-      const version = InstalledAppRegistry.parseVersion(output, bundleName);
-      InstalledAppRegistry.remember(bundleName, version);
-      InstalledAppRegistry.rememberLauncher(output, bundleName);
+      const version = InstalledAppRegistry.observe(output, bundleName);
       if (persistResult) await InstalledAppRegistry.persist(this.context);
       return version;
     } catch (_) {
@@ -429,6 +428,7 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
   async installedBundleVersions(bundleNames: string[] = [],
     onProgress?: (checked: number, total: number, bundleName?: string,
       version?: number) => void): Promise<Map<string, number> | undefined> {
+    await ForegroundIdle.wait();
     HdcDeviceBridge.scans++;
     const startedAt = Date.now();
     let checked = 0;
@@ -453,13 +453,12 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
         }
         let version: number = -1;
         try {
+          await ForegroundIdle.wait();
           queried++;
           // 不把单包失败变成未安装；保留它在存在性清单中的位置。
           const output = await this.command(3, name);
           if (output.includes('[Fail]')) break;
-          version = InstalledAppRegistry.parseVersion(output, name);
-          InstalledAppRegistry.remember(name, version);
-          InstalledAppRegistry.rememberLauncher(output, name);
+          version = InstalledAppRegistry.observe(output, name);
           found.set(name, version);
         } catch (error) {
           console.warn('InstalledApps: version query failed for ' + name + ': ' + String(error));
@@ -492,9 +491,7 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
         try {
           const output = await this.command(3, name);
           if (output.includes('[Fail]')) throw new Error('读取应用信息失败');
-          const version = InstalledAppRegistry.parseVersion(output, name);
-          InstalledAppRegistry.remember(name, version);
-          InstalledAppRegistry.rememberLauncher(output, name);
+          const version = InstalledAppRegistry.observe(output, name);
           if (version !== previousVersion || InstalledAppRegistry.displayName(name).length === 0) {
             try { InstalledAppRegistry.rememberDisplayName(name, await this.command(14, name)); } catch (_) {}
           }

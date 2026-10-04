@@ -31,6 +31,7 @@ function fixture() {
   }).outputText, { exports, AppStorage: {
     get: key => f.storage.get(key), setOrCreate: (key, value) => f.storage.set(key, value) },
     require: name => ({
+      './ForegroundIdle': { ForegroundIdle: { defer: (_key, fn) => fn(), cancel() {} } },
       './HdcDeviceBridge': { HdcDeviceBridge: Bridge },
       './JobStore': { JobStore: { open: async () => ({ listAll: () => f.reads() }) } },
       './JobScheduler': { JobScheduler: { runningJobIds: () => f.running } },

@@ -14,7 +14,8 @@ function fixture() {
   const timers = new Map(); let nextTimer = 0;
   f.flushResume = () => { for (const [id, fn] of timers) { timers.delete(id); fn(); } };
   f.timers = timers;
-  const box = { setTimeout: fn => { timers.set(++nextTimer, fn); return nextTimer; },
+  const box = { ForegroundIdle: { onForeground() {},
+    defer: (key, fn) => timers.set(key, fn), cancel: key => timers.delete(key) }, setTimeout: fn => { timers.set(++nextTimer, fn); return nextTimer; },
     clearTimeout: id => timers.delete(id), StoreClient: class {
     static consumeViewedApps() { const rows = f.viewed; f.viewed = []; return rows; }
     myApps() { f.myAppsCalls++; return f.myAppsFetch(); }
@@ -25,7 +26,7 @@ function fixture() {
   }).outputText, box);
   box.InstallConfirmation = { deactivate() {} }; box.InstallReconnect = { deactivate() {} };
   const ui = new box.Page(); Object.assign(ui, { pageVisible: false, topActionEpoch: 3,
-    resumeMaintenanceTimer: -1, resumeNeedsRescan: false,
+    resumeMaintenancePending: false,
     currentTab: 0, signedIn: true, account: {}, myApps: [{ id: 1, category: '工具' }], syncManagementIcons() {},
     myAppsLoaded: true, myAppsBusy: false, myAppsRefreshing: false, myAppsMessage: '',
     apps: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],

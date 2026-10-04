@@ -27,4 +27,5 @@ test('a live reconnect or final submission cannot accidentally exit the applicat
  Object.assign(page,{showReconnect:false,showSubmit:true,submitBusy:true});
  assert.equal(page.onBackPress(),true);assert.equal(page.showSubmit,true);
  page.submitDraft.inspectionStatus='pending';assert.equal(page.onBackPress(),true);assert.equal(page.showSubmit,false);
+ assert.equal(page.submitBusy,false,'canceling inspection must release its busy state');
 });

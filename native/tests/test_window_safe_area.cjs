@@ -50,7 +50,7 @@ function fixture() {
       BackgroundInstallTask: { configure: () => {}, onForeground: () => {} }
     } : name === '../jobs/WirelessDebugLifecycle' ? {
       WirelessDebugLifecycle: { configure() {}, onForeground() {}, onBackground() {} }
-    } : name === '../jobs/ExternalInstallOpen' ? { ExternalInstallOpen: { receive: () => false, openPending() {}, suspendRouting() {} } } : name === '@kit.AbilityKit' ? {
+    } : name === '../jobs/ForegroundIdle' ? { ForegroundIdle: { onForeground() {}, onBackground() {} } } : name === '../jobs/ExternalInstallOpen' ? { ExternalInstallOpen: { receive: () => false, openPending() {}, suspendRouting() {} } } : name === '@kit.AbilityKit' ? {
       UIAbility: class {}, ConfigurationConstant: { ColorMode: { COLOR_MODE_DARK: 1 } }
     } : {
       window: { AvoidAreaType: { TYPE_SYSTEM: 0, TYPE_CUTOUT: 1 } },

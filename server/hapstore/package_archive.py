@@ -109,7 +109,8 @@ def scan_asset(asset, token=''):
     cached = artifact_cache.get(asset.get('sha256', ''), kind)
     if cached is not None:
         return _present_metadata(asset, url, selected, cached)
-    source = collector._download_to_temp(url, token=token)
+    # When the forge supplies no digest, establish it from its official attachment directly.
+    source = collector._download_to_temp(url, token=token, direct_only=not bool(asset.get('sha256')))
     if not source:
         raise collector.CollectError('安装包暂时无法下载，后台检查将重试')
     try:
@@ -117,7 +118,9 @@ def scan_asset(asset, token=''):
         if asset.get('sha256') and digest != asset['sha256']:
             raise collector.CollectError('安装包与 GitHub 摘要不一致')
         if not asset.get('sha256'):
-            raise collector.CollectError('GitHub 尚未提供该安装包的 SHA-256 摘要')
+            asset = dict(asset, sha256=digest)
+        if not asset.get('size'):
+            asset = dict(asset, size=os.path.getsize(source))
         is_zip = url.lower().endswith('.zip') or bool(selected)
         if not is_zip:
             meta = inspect_app(source) if asset['name'].lower().endswith('.app') else inspect_hap(source)

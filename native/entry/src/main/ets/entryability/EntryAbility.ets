@@ -4,6 +4,7 @@ import { UIAbility, Want, AbilityConstant, Configuration, ConfigurationConstant 
 import { window, display } from '@kit.ArkUI';
 import { BackgroundInstallTask } from '../jobs/BackgroundInstallTask';
 import { ExternalInstallOpen } from '../jobs/ExternalInstallOpen';
+import { ForegroundIdle } from '../jobs/ForegroundIdle';
 
 // 背景交给页面连续绘制，系统栏仅按主题切换文字颜色。
 const BARS_LIGHT: window.SystemBarProperties = {
@@ -125,6 +126,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    ForegroundIdle.onForeground();
     BackgroundInstallTask.onForeground();
     WirelessDebugLifecycle.onForeground();
     // 从系统设置返回时也同步，覆盖部分设备在后台没有送达主题回调的情况。
@@ -133,6 +135,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onBackground(): void {
+    ForegroundIdle.onBackground();
     WirelessDebugLifecycle.onBackground();
   }
 }

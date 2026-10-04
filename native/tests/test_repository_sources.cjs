@@ -19,7 +19,7 @@ function page(file,names,globals={}) {
     const start=source.search(new RegExp('^  private (?:async )?'+name+'\\(', 'm'));
     assert.ok(start>=0,name);return source.slice(start,source.indexOf('\n  }',start)+4);
   });
-  const box={displayVersion:load('data/DisplayVersion').displayVersion,...globals};vm.runInNewContext(ts.transpileModule('class Page { '+methods.join('\n')+' };globalThis.Page=Page;',{
+  const box={repositoryUrl:load('data/RepositoryAddress').repositoryUrl,displayVersion:load('data/DisplayVersion').displayVersion,...globals};vm.runInNewContext(ts.transpileModule('class Page { '+methods.join('\n')+' };globalThis.Page=Page;',{
     compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);return new box.Page();
 }
 const row=(repo,kind)=>release.ReleaseInfo.fromJson({tag:'v2',name:'2.0',source_repo:repo,source_kind:kind,
@@ -78,4 +78,11 @@ test('closing an in-flight source check cannot update the next configuration she
   ui.configSourceMessage='next sheet';ui.configBusy=false;
   resolve({inspectionStatus:'ready',choices:[{bundleName:'com.example.app'}],token:'draft'});await work;
   assert.equal(ui.configSourceMessage,'next sheet');assert.equal(ui.configBusy,false);
+});
+
+test('source links retain Gitee identity while preserving old GitHub identities', () => {
+  const url = load('data/RepositoryAddress').repositoryUrl;
+  assert.equal(url('gitee.com/Geriay/yuyuebrowser'), 'https://gitee.com/Geriay/yuyuebrowser');
+  assert.equal(url('o/r'), 'https://github.com/o/r');
+  assert.equal(url('https://evil.test/o/r'), '');
 });

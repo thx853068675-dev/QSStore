@@ -136,7 +136,7 @@ test('returning to the list start reveals the title before refresh and the top a
     const start = source.search(new RegExp(`^  private ${name}\\(`, 'm'));
     assert.ok(start >= 0); return source.slice(start, source.indexOf('\n  }', start) + 4);
   });
-  const box = { exports: {}, Edge: { Top: 'top' } };
+  const box = { ForegroundIdle: { interaction() {} }, exports: {}, Edge: { Top: 'top' } };
   vm.runInNewContext(ts.transpileModule(component.slice(first, last).replace(/@Track /g, '') +
     `\nclass Page { ${methods.join('\n')} }; globalThis.Page = Page; globalThis.Motion = DiscoverMotion;`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }

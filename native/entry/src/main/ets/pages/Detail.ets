@@ -1,3 +1,4 @@
+import { repositoryUrl } from '../data/RepositoryAddress';
 import { displayVersion } from '../data/DisplayVersion';
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
 import { InstallCertificatePrompt } from '../components/InstallCertificatePrompt';
@@ -996,10 +997,11 @@ struct Detail {
   }
 
   private async openSecondaryRepo(): Promise<void> {
-    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(this.app.secondaryRepo)) return;
+    const uri = repositoryUrl(this.app.secondaryRepo);
+    if (uri.length === 0) return;
     try {
       await (getContext(this) as common.UIAbilityContext).startAbility({
-        action: 'ohos.want.action.viewData', uri: 'https://github.com/' + this.app.secondaryRepo,
+        action: 'ohos.want.action.viewData', uri: uri,
         entities: ['entity.system.browsable']
       });
     } catch (error) { this.notify('无法打开仓库：' + errorText(error)); }

@@ -25,11 +25,11 @@ function method(name) {
 }
 const code = ts.transpileModule(`class Index {
   static CATALOG_PAGE_SIZE = 30;
-  static REFRESH_MIN_VISIBLE_MS = 600;
+  static REFRESH_MIN_VISIBLE_MS = 600; static VERSION_TTL_MS = 60000;
   static STAR_FIELD_COUNT = 46;
   static STARRED_MIN_STARS = 100;
   ${['catalogHasMore', 'loadMoreApps', 'prefetchCatalog', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
-    'latestAssets', 'installedAssets', 'assetForBundle', 'refreshCatalogInstallState', 'runCatalogStateRefreshes', 'readCatalogInstallState', 'cancelResumeMaintenance', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion',
+    'latestAssets', 'installedAssets', 'assetForBundle', 'refreshCatalogInstallState', 'runCatalogStateRefreshes', 'readCatalogInstallState', 'cancelResumeMaintenance', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion', 'commitCatalogVersions',
     'displayApps', 'featuredTier', 'featuredColors']
     .map(method).join('\n')}
 }; globalThis.Page = Index;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
@@ -88,7 +88,7 @@ function fixture() {
   f2.deviceUnparsable = false;
   f2.deviceVersions = {};
   f2.knownBundles = [];
-  const sandbox = { ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {}, InstalledBundleState: class { versionCode = -1; versionName = ''; }, setTimeout, clearTimeout, console, Curve: { EaseOut: 'ease-out' },
+  const sandbox = { ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, ForegroundIdle: { cancel() {}, defer: (_key, fn) => setTimeout(fn, 0) }, VersionCacheEntry: class {}, InstalledBundleState: class { versionCode = -1; versionName = ''; }, setTimeout, clearTimeout, console, Curve: { EaseOut: 'ease-out' },
     InstallReconnect: { clear() {}, deactivate() {} }, InstallConfirmation: { deactivate() {} }, InstallCoordinator: { conditionReady() {} }, InstallStage: { WAITING_DEVICE: 'waiting-device' },
     StoreClient: class {
       listApps(number, size, sort, query) {
@@ -106,7 +106,7 @@ function fixture() {
     image: { createImageSource: () => ({ createPixelMap: () => f.decode(),
       release: async () => releases.push('source') }) },
     util: { Base64Helper: class { encodeToStringSync(bytes) { return Buffer.from(bytes).toString('base64'); } } },
-    InstalledAppRegistry: { markCatalogSnapshot: async () => {}, versionName: () => '', version: () => -1 },
+    InstalledAppRegistry: { observedAt: () => 0, markCatalogSnapshot: async () => {}, versionName: () => '', version: () => -1 },
     LocalBundles: f.localBundles,
     HdcDeviceBridge: f.bridgeClass,
     JobStore: { open: async () => f.store }
@@ -114,7 +114,7 @@ function fixture() {
   vm.runInNewContext(code, sandbox);
   sandbox.Page.REFRESH_MIN_VISIBLE_MS = 20;
   const ui = new sandbox.Page();
-  Object.assign(ui, { resumeMaintenanceTimer: -1, catalogStatePending: false, catalogStateRescan: false, catalogToken: 0, activeQuery: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
+  Object.assign(ui, { resumeMaintenancePending: false, catalogStatePending: false, catalogStateRescan: false, catalogToken: 0, activeQuery: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
     catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false, catalogMoreError: '',
     catalogRefreshing: false, catalogRefreshBusy: false, catalogError: '',
     getUIContext: () => ({ animateTo: (_options, change) => change() }),
@@ -648,4 +648,19 @@ test('the asynchronous dispatcher limits system queries to four outstanding call
   gates[0].resolve({ versionCode: 1, versionName: '1' }); await tick(); assert.equal(names.length, 5);
   for (let i = 1; i < 9; i++) { gates[i].resolve({ versionCode: 1, versionName: '1' }); await tick(); }
   await work; assert.equal(ui.installedVersions.size, 9);
+});
+
+test('unchanged device observations preserve visible maps and do not rebuild Management; catalog changes still recompute updates', () => {
+  const f = fixture(), ui = f.ui;
+  ui.apps = [{ id: 1, latestAsset: { bundleName: 'com.example.one' } }];
+  let projections = 0; ui.syncDetectedInstalled = () => projections++;
+  ui.applyDetectedCatalogVersion('com.example.one', 7);
+  const display = ui.installedDisplay, versions = ui.installedVersions;
+  assert.equal(projections, 1);
+  for (let i = 0; i < 30; i++) ui.applyDetectedCatalogVersion('com.example.one', 7);
+  assert.equal(projections, 1); assert.equal(ui.installedDisplay, display); assert.equal(ui.installedVersions, versions);
+  ui.apps = [...ui.apps, { id: 2 }];
+  ui.commitCatalogVersions(new Map(display), new Map(versions)); assert.equal(projections, 2);
+  ui.applyDetectedCatalogVersion('com.example.one', 0);
+  assert.equal(ui.installedVersions.get(1), 0); assert.equal(projections, 3);
 });

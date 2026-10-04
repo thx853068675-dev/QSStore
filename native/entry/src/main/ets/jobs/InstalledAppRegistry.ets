@@ -203,6 +203,10 @@ export class InstalledAppRegistry {
 
   static rememberLauncher(output: string, bundleName: string): void {
     const row = JSON.parse(output.substring(output.indexOf('{'))) as Record<string, Object>;
+    InstalledAppRegistry.rememberLauncherRow(row, bundleName);
+  }
+
+  private static rememberLauncherRow(row: Record<string, Object>, bundleName: string): void {
     if (String(row['name'] ?? '') !== bundleName) return;
     const observed = InstalledAppRegistry.savedVersions.get(bundleName);
     if (observed !== undefined && observed.version === Number(row['versionCode'])) {
@@ -215,7 +219,7 @@ export class InstalledAppRegistry {
       const iconId = Number(icon?.['id'] ?? app?.['iconId'] ?? 0);
       observed.iconId = Number.isSafeInteger(iconId) && iconId > 0 ? iconId : 0;
       observed.iconModuleName = String(icon?.['moduleName'] ?? row['entryModuleName'] ?? '');
-      const signing = InstalledAppRegistry.parseSigningIdentity(output, bundleName);
+      const signing = InstalledAppRegistry.signingIdentityFromRow(row, bundleName);
       // A complete dump that lacks signing evidence invalidates an older guess.
       observed.signingFingerprint = signing?.fingerprint ?? '';
       observed.signingUpdateTime = signing?.updateTime ?? 0;
@@ -394,29 +398,51 @@ export class InstalledAppRegistry {
     return version;
   }
 
+  /** The display scan consumes one validated dump instead of parsing it three times. */
+  static observe(output: string, bundleName: string): number {
+    const startedAt = Date.now();
+    const start = output.indexOf('{');
+    if (start < 0 || output.includes('[Fail]')) throw new Error('设备未返回应用版本信息');
+    const row = JSON.parse(output.substring(start)) as Record<string, Object>;
+    const version = Number(row['versionCode']);
+    if (String(row['name'] ?? '') !== bundleName || !Number.isSafeInteger(version) || version <= 0) {
+      throw new Error('设备返回的应用身份或版本无效');
+    }
+    InstalledAppRegistry.remember(bundleName, version);
+    InstalledAppRegistry.rememberLauncherRow(row, bundleName);
+    const elapsed = Date.now() - startedAt;
+    if (elapsed > 8) console.info('InstalledApps observation: bytes=' + output.length + ' elapsedMs=' + elapsed);
+    return version;
+  }
+
   /** 返回 undefined 表示设备没给出可靠身份，仍由包管理器最终裁决。 */
   static parseSigningIdentity(output: string, bundleName: string): InstalledSigningIdentity | undefined {
     const start = output.indexOf('{');
     if (start < 0 || output.includes('[Fail]')) return undefined;
     try {
       const row = JSON.parse(output.substring(start)) as Record<string, Object>;
-      const version = Number(row['versionCode'] ?? 0);
-      if (String(row['name'] ?? '') !== bundleName || !Number.isSafeInteger(version) || version <= 0) {
-        return undefined;
-      }
-      const app = row['applicationInfo'] as Record<string, Object> | undefined;
-      const fingerprint = String(app?.['fingerprint'] ?? '').replace(/[^0-9a-fA-F]/g, '').toUpperCase();
-      const appIdentifier = String(row['appIdentifier'] ?? '');
-      if (fingerprint.length !== 64 && appIdentifier.length === 0) return undefined;
-      const identity = new InstalledSigningIdentity();
-      identity.versionCode = version;
-      const updateTime = Number(row['updateTime'] ?? 0);
-      identity.updateTime = Number.isSafeInteger(updateTime) && updateTime > 0 ? updateTime : 0;
-      identity.fingerprint = fingerprint.length === 64 ? fingerprint : '';
-      identity.appIdentifier = appIdentifier;
-      return identity;
+      return InstalledAppRegistry.signingIdentityFromRow(row, bundleName);
     } catch (_) {
       return undefined;
     }
   }
+  private static signingIdentityFromRow(row: Record<string, Object>,
+    bundleName: string): InstalledSigningIdentity | undefined {
+    const version = Number(row['versionCode'] ?? 0);
+    if (String(row['name'] ?? '') !== bundleName || !Number.isSafeInteger(version) || version <= 0) {
+      return undefined;
+    }
+    const app = row['applicationInfo'] as Record<string, Object> | undefined;
+    const fingerprint = String(app?.['fingerprint'] ?? '').replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+    const appIdentifier = String(row['appIdentifier'] ?? '');
+    if (fingerprint.length !== 64 && appIdentifier.length === 0) return undefined;
+    const identity = new InstalledSigningIdentity();
+    identity.versionCode = version;
+    const updateTime = Number(row['updateTime'] ?? 0);
+    identity.updateTime = Number.isSafeInteger(updateTime) && updateTime > 0 ? updateTime : 0;
+    identity.fingerprint = fingerprint.length === 64 ? fingerprint : '';
+    identity.appIdentifier = appIdentifier;
+    return identity;
+  }
+
 }

@@ -18,6 +18,7 @@ _cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _inflight: dict[tuple[str, str], Future] = {}
 _slots = threading.BoundedSemaphore(4)
 _wake = threading.Event()
+_prepare_wake = threading.Event()
 _worker_started = False
 
 
@@ -144,6 +145,7 @@ def queue_due(limit: int = 20, progress=None) -> dict[str, Any]:
 
 def wake_worker() -> None:
     _wake.set()
+    _prepare_wake.set()
 
 
 def start_worker(token: str = "") -> None:
@@ -159,14 +161,19 @@ def start_worker(token: str = "") -> None:
     conn.execute("UPDATE submit_draft SET inspection_state='pending' WHERE inspection_state='running'")
     conn.commit()
 
-    def run() -> None:
+    def run(prepare_only: bool) -> None:
+        wake = _prepare_wake if prepare_only else _wake
         while True:
             try:
-                # Give each class of work a turn; archive discovery cannot starve updates.
-                prepared = process_prepare_one(token)
-                enriched = process_one(token)
-                refreshed = process_refresh_one(token)
-                if prepared or enriched or refreshed:
+                # Interactive listing must not queue behind a slow full-repository
+                # refresh. One worker per lane still bounds downloads and parsing.
+                if prepare_only:
+                    worked = process_prepare_one(token)
+                else:
+                    enriched = process_one(token)
+                    refreshed = process_refresh_one(token)
+                    worked = enriched or refreshed
+                if worked:
                     continue
             except Exception as e:
                 print(f"catalog worker error: {type(e).__name__}: {e}", flush=True)
@@ -174,7 +181,8 @@ def start_worker(token: str = "") -> None:
                 if conn is not None:
                     conn.close()
                     del db._local.conn
-            _wake.wait(5)
-            _wake.clear()
+            wake.wait(5)
+            wake.clear()
 
-    threading.Thread(target=run, name="catalog-enrichment", daemon=True).start()
+    threading.Thread(target=run, args=(True,), name="submission-inspection", daemon=True).start()
+    threading.Thread(target=run, args=(False,), name="catalog-enrichment", daemon=True).start()

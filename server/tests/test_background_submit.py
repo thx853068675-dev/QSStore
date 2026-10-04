@@ -400,6 +400,47 @@ class BackgroundSubmitTest(unittest.TestCase):
         self.assertIsNotNone(db.app_icon(app_id))
         self.assertFalse([n for n in os.listdir(self.tmp.name) if n.endswith(".hap")])
 
+    def test_listing_inspection_runs_while_catalog_sync_is_blocked(self):
+        registered = []
+        real_thread = threading.Thread
+        class CaptureThread:
+            def __init__(self, **kwargs): registered.append(kwargs)
+            def start(self): pass
+        class Finished(BaseException): pass
+        catalog_started = threading.Event()
+        release_catalog = threading.Event()
+        inspected = threading.Event()
+        def slow_catalog(token):
+            catalog_started.set()
+            release_catalog.wait(2)
+            raise Finished()
+        def inspect(token):
+            inspected.set()
+            raise Finished()
+        def invoke(worker):
+            try: worker['target'](*worker['args'])
+            except Finished: pass
+        with patch.object(submissions, '_worker_started', False), \
+             patch.object(submissions.threading, 'Thread', CaptureThread), \
+             patch.object(submissions, 'process_one', side_effect=slow_catalog), \
+             patch.object(submissions, 'process_prepare_one', side_effect=inspect):
+            submissions.start_worker()
+            self.assertEqual(len(registered), 2, 'only one bounded worker per lane')
+            catalog = next(w for w in registered if w['name'] == 'catalog-enrichment')
+            preparation = next(w for w in registered if w['name'] == 'submission-inspection')
+            background = real_thread(target=invoke, args=(catalog,))
+            foreground = real_thread(target=invoke, args=(preparation,))
+            background.start()
+            try:
+                self.assertTrue(catalog_started.wait(1))
+                foreground.start()
+                self.assertTrue(inspected.wait(1), 'listing cannot wait for the catalog download')
+                self.assertFalse(release_catalog.is_set())
+            finally:
+                release_catalog.set()
+                background.join(2)
+                if foreground.ident is not None: foreground.join(2)
+
 
 if __name__ == "__main__":
     unittest.main()

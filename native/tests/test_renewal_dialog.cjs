@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const path=require('node:path');
-const ts=require('/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+const ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source=fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/components/RenewalDialog.ets'),'utf8');
 const methods=['aboutToAppear','aboutToDisappear','discard','task','prepareStore','pick','submitFile'].map(name=>{
   const start=source.search(new RegExp('^  (?:private (?:async )?)?'+name+'\\(', 'm'));

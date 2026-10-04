@@ -41,7 +41,11 @@ def main():
     env['PATH'] = str(Path(cargo).parent) + os.pathsep + env.get('PATH', '')
     rust_args = ['--lib', '--locked'] + (['--offline'] if args.offline else [])
     steps = [
-        ('client', ['node', '--test', *map(str, sorted((ROOT / 'native/tests').glob('test_*.cjs')))], 120),
+        # Client coverage includes a cold CMake build of the archive codecs.
+        # Keep a per-file deadline so a stuck asynchronous test is identified,
+        # and allow the complete suite to finish on smaller CI runners.
+        ('client', ['node', '--test', '--test-timeout=300000',
+                    *map(str, sorted((ROOT / 'native/tests').glob('test_*.cjs')))], 360),
         ('server', [sys.executable, '-m', 'unittest', 'discover', '-s', 'server/tests'], 120),
         ('hap-core', [sys.executable, 'native/tests/test_hap_core.py'], 120),
         ('unsigned-artifact', [sys.executable, 'native/tests/test_unsigned_artifact.py'], 60),

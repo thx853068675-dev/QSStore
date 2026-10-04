@@ -1,5 +1,6 @@
 import { isPending } from './RecoveryPlanner';
 import { InstallReconnect } from './InstallReconnect';
+import { InstallCertificateSlots } from './InstallCertificateSlots';
 import { InstallJob, InstallStage } from './InstallJob';
 
 /** 进程内的任务视图：阶段来自已落盘记录，进度来自下载器，执行状态来自调度器。 */
@@ -21,9 +22,21 @@ export class InstallTaskState {
   private static listeners: Map<number, (rows: InstallTaskSnapshot[]) => void> = new Map();
   private static nextListener: number = 0;
   private static pulseTimer: number = -1;
+  private static orderedIds: string[] = [];
+  private static orderDirty: boolean = true;
+  private static jobsRevision: number = 0;
+
+  /** 仅持久化任务变化时递增，字节进度与计时不使安装清单重新排序。 */
+  static jobRevision(): number { return InstallTaskState.jobsRevision; }
 
   static snapshot(): InstallTaskSnapshot[] {
-    return Array.from(InstallTaskState.tasks.values()).sort((a, b) => b.job.updatedAt - a.job.updatedAt);
+    if (InstallTaskState.orderDirty) {
+      InstallTaskState.orderedIds = Array.from(InstallTaskState.tasks.values())
+        .sort((a, b) => b.job.updatedAt - a.job.updatedAt).map((row: InstallTaskSnapshot) => row.job.id);
+      InstallTaskState.orderDirty = false;
+    }
+    // 数组独立，进度快照不可变；无需为每个字节反馈重复排序历史任务。
+    return InstallTaskState.orderedIds.map((id: string) => InstallTaskState.tasks.get(id)!);
   }
 
   static subscribe(listener: (rows: InstallTaskSnapshot[]) => void): number {
@@ -50,9 +63,15 @@ export class InstallTaskState {
 
   /** 无数字反馈的阶段每秒重绘用时；无订阅者或没有活动任务即停止。 */
   private static syncPulse(): void {
-    const active = InstallTaskState.listeners.size > 0 &&
-      InstallTaskState.snapshot().some((row: InstallTaskSnapshot) =>
-        row.running && row.job.stage !== InstallStage.INSTALLED && !InstallTaskState.determinate(row));
+    let active = false;
+    if (InstallTaskState.listeners.size > 0) {
+      for (const row of InstallTaskState.tasks.values()) {
+        if (row.running && row.job.stage !== InstallStage.INSTALLED && !InstallTaskState.determinate(row)) {
+          active = true;
+          break;
+        }
+      }
+    }
     if (active && InstallTaskState.pulseTimer === -1) {
       InstallTaskState.pulseTimer = setInterval(() => InstallTaskState.emit(), 1000);
     } else if (!active && InstallTaskState.pulseTimer !== -1) {
@@ -66,15 +85,17 @@ export class InstallTaskState {
     for (const job of jobs) {
       if (!InstallTaskState.tasks.has(job.id) && !InstallTaskState.removed.has(job.id)) {
         InstallTaskState.tasks.set(job.id, InstallTaskState.make(job));
+        InstallTaskState.orderDirty = true;
+        InstallTaskState.jobsRevision++;
       }
     }
     InstallTaskState.emit();
   }
 
-  private static make(job: InstallJob): InstallTaskSnapshot {
+  private static make(job: InstallJob, cloneJob: boolean = true): InstallTaskSnapshot {
     const row = new InstallTaskSnapshot();
     // 与运行器持有的可变对象隔离；页面拿到的阶段只会在 save 成功后改变。
-    row.job = JSON.parse(JSON.stringify(job)) as InstallJob;
+    row.job = cloneJob ? JSON.parse(JSON.stringify(job)) as InstallJob : job;
     row.running = InstallTaskState.running.has(job.id);
     row.finishing = InstallTaskState.finishing.has(job.id);
     row.percent = InstallTaskState.stagePercent(job.stage);
@@ -87,15 +108,22 @@ export class InstallTaskState {
     if (old !== undefined && job.stage === old.job.stage) InstallTaskState.copyProgress(old, row);
     InstallTaskState.removed.delete(job.id);
     InstallTaskState.tasks.set(job.id, row);
+    InstallTaskState.orderDirty = true;
+    InstallTaskState.jobsRevision++;
     if (job.stage === InstallStage.WAITING_DEVICE && row.running) InstallReconnect.request(job.id);
     else if (job.stage !== InstallStage.WAITING_DEVICE) InstallReconnect.clear(job.id);
+    if (job.stage !== InstallStage.WAITING_CERTIFICATE) InstallCertificateSlots.clear(job.id);
     InstallTaskState.emit();
   }
 
   static remove(id: string): void {
     InstallReconnect.clear(id);
+    InstallCertificateSlots.clear(id);
     InstallTaskState.removed.add(id);
-    InstallTaskState.tasks.delete(id);
+    if (InstallTaskState.tasks.delete(id)) {
+      InstallTaskState.orderDirty = true;
+      InstallTaskState.jobsRevision++;
+    }
     InstallTaskState.emit();
   }
 
@@ -106,7 +134,7 @@ export class InstallTaskState {
     else InstallTaskState.finishing.delete(id);
     const old = InstallTaskState.tasks.get(id);
     if (old !== undefined) {
-      const row = InstallTaskState.make(old.job);
+      const row = InstallTaskState.make(old.job, false);
       InstallTaskState.copyProgress(old, row);
       InstallTaskState.tasks.set(id, row);
     }
@@ -127,7 +155,8 @@ export class InstallTaskState {
     const bytes = Math.min(total, Math.max(0, received));
     const percent = Math.floor(bytes * 100 / total);
     if (percent === old.percent && bytes === old.received && total === old.total) return;
-    const row = InstallTaskState.make(old.job);
+    // 沿用已落盘的不可变任务，只新建轻量进度快照。
+    const row = InstallTaskState.make(old.job, false);
     row.phase = 'download'; row.received = bytes; row.total = total; row.percent = percent;
     InstallTaskState.tasks.set(id, row);
     InstallTaskState.emit();
@@ -142,7 +171,7 @@ export class InstallTaskState {
     const bytes = Number.isFinite(received) ? Math.min(size, Math.max(0, received)) : 0;
     const percent = phase === 'transfer' && size > 0 ? Math.floor(bytes * 100 / size) : 0;
     if (phase === old.phase && bytes === old.received && size === old.total) return;
-    const row = InstallTaskState.make(old.job);
+    const row = InstallTaskState.make(old.job, false);
     row.phase = phase; row.received = bytes; row.total = size; row.percent = percent;
     InstallTaskState.tasks.set(id, row);
     InstallTaskState.emit();
@@ -224,6 +253,7 @@ export class InstallTaskState {
       case InstallStage.INSTALLED: return '完成';
       case InstallStage.WAITING_DEVICE: return '连接';
       case InstallStage.WAITING_ACCOUNT: return '登录';
+      case InstallStage.WAITING_CERTIFICATE: return '证书';
       case InstallStage.WAITING_CONFIRMATION: return '确认';
       case InstallStage.WAITING_NETWORK: return '网络';
       case InstallStage.RETRYABLE_ERROR: return '暂停';
@@ -255,6 +285,7 @@ export class InstallTaskState {
       case InstallStage.INSTALLED: return '安装完成';
       case InstallStage.WAITING_DEVICE: return '等待连接';
       case InstallStage.WAITING_ACCOUNT: return '等待登录';
+      case InstallStage.WAITING_CERTIFICATE: return '等待释放证书名额';
       case InstallStage.WAITING_CONFIRMATION: return '等待确认数据清除';
       case InstallStage.WAITING_NETWORK: return '等待网络';
       case InstallStage.RETRYABLE_ERROR: return '安装暂停';

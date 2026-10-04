@@ -1,4 +1,5 @@
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
+import { InstallCertificatePrompt } from '../components/InstallCertificatePrompt';
 import { CatalogInstallIdentity } from '../jobs/CatalogInstallIdentity';
 import { InstallCoordinator } from '../jobs/InstallCoordinator';
 import { InstallReconnect } from '../jobs/InstallReconnect';
@@ -87,7 +88,9 @@ struct Detail {
    */
   @State private installedUnknown: boolean = false;
   /** 「检查更新」的进行状态与结果提示。 */
-  private pageVisible: boolean = true;
+  @State private pageVisible: boolean = true;
+  @State private showCertificatePrompt: boolean = false;
+  @State private certificatePromptDismiss: number = 0;
   @State private headerVisible: boolean = true;
   private returning: boolean = false;
   private disposed: boolean = false;
@@ -162,11 +165,14 @@ struct Detail {
   onPageHide(): void {
     this.headerVisible = false;
     this.pageVisible = false;
+    if (this.installSubscription >= 0) InstallTaskState.unsubscribe(this.installSubscription);
+    this.installSubscription = -1;
     InstallConfirmation.deactivate(this.confirmationSubscription);
     InstallReconnect.deactivate(this.reconnectSubscription);
   }
 
   onBackPress(): boolean {
+    if (this.showCertificatePrompt) { this.certificatePromptDismiss++; return true; }
     if (this.showReconnect) {
       if (!this.reconnectBusy) {
         InstallReconnect.clear(this.reconnectJobId);
@@ -222,7 +228,7 @@ struct Detail {
         job.stage === InstallStage.INSTALLED);
       const changed = installed.map((job: InstallJob) => job.id + ':' + job.updatedAt).join(',') !==
         this.installedJobs.map((job: InstallJob) => job.id + ':' + job.updatedAt).join(',');
-      this.installedJobs = installed;
+      if (changed) this.installedJobs = installed;
       this.syncInstallTask();
       if (changed) this.refreshInstalledVersion();
     });
@@ -1048,7 +1054,7 @@ struct Detail {
   @Builder
   private detailHeader() {
     StorePageHeader({ title: '应用详情', statusInset: this.statusBarInset,
-      fadeOpacity: this.detailTopBlurOpacity, visible: this.headerVisible && !this.showReconnect,
+      fadeOpacity: this.detailTopBlurOpacity, visible: this.headerVisible && !this.showReconnect && !this.showCertificatePrompt,
       action: () => this.back(), backAction: () => { this.onBackPress(); } })
       .position({ x: 0, y: 0 })
   }
@@ -1404,7 +1410,7 @@ struct Detail {
               this.detailTopBlurOpacity = progress * progress * (3 - 2 * progress);
             })
           Column({ space: 7 }) {
-            StoreImmersiveAction({ visible: this.headerVisible && !this.showReconnect,
+            StoreImmersiveAction({ visible: this.headerVisible && !this.showReconnect && !this.showCertificatePrompt,
               tint: this.colors().accent, backAction: () => { this.onBackPress(); },
               content: (immersive: boolean): void => this.installActionContent(immersive) })
           }.width('calc(100% - 48vp)').constraintSize({ maxWidth: 560 }).margin({ bottom: 20 })
@@ -1419,6 +1425,8 @@ struct Detail {
         .backgroundColor(this.colors().scrim)
         .transition(TransitionEffect.opacity(0))
     }
+    InstallCertificatePrompt({ active: this.pageVisible, showing: this.showCertificatePrompt,
+      dismissRequest: this.certificatePromptDismiss })
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])

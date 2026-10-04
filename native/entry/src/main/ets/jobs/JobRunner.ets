@@ -189,19 +189,27 @@ export class JobRunner {
   private async confirmInstalledVersion(job: InstallJob): Promise<boolean> {
     const deadline = Date.now() + JobRunner.PROBE_TOTAL_MS;
     let interval = 250;
+    let queryFailures = 0;
     for (;;) {
       JobCancellation.assertActive(job.id);
       let current = -1;
+      let queryFailure: JobFailure | undefined;
       try {
         current = await this.runtime.installedVersion(job.bundleName);
       } catch (error) {
-        if (error instanceof JobFailure) throw error;
-        throw new JobFailure(FailureKind.TRANSIENT,
-          '安装结果暂时无法核实：' + String(error));
+        queryFailure = error instanceof JobFailure ? error :
+          new JobFailure(FailureKind.TRANSIENT, '安装结果暂时无法核实：' + String(error));
+        // 已提交后的短暂查询故障只重查结果，不重签、不重新传包。
+        // 明确断连、身份或权限失败仍立即交给现有恢复入口。
+        if (![FailureKind.TRANSIENT, FailureKind.NETWORK].includes(queryFailure.kind) ||
+          ++queryFailures > 2 || Date.now() >= deadline) throw queryFailure;
       }
       if (current === job.versionCode &&
         (!(job.renewalRequestedAt > 0) || await this.runtime.confirmRenewal(job))) return true;
-      if (Date.now() >= deadline) return false;
+      if (Date.now() >= deadline) {
+        if (queryFailure !== undefined) throw queryFailure;
+        return false;
+      }
       await new Promise<void>((resolve) =>
         setTimeout(resolve, Math.min(interval, Math.max(0, deadline - Date.now()))));
       interval = Math.min(interval * 2, JobRunner.PROBE_INTERVAL_MS);

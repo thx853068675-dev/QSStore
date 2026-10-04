@@ -590,7 +590,7 @@ export class NativeJobRuntime implements JobRuntime {
       const progress = (phase: string, sent: number, total: number): void =>
         InstallTaskState.installProgress(job.id, phase, sent, total);
       if (replacing) await this.device.installStaged(staged, job.bundleName, progress);
-      else await this.device.install(path, progress);
+      else await this.installWithRecovery(job, path, progress);
       this.confirmedSubmission = job.id;
       InstallTaskState.installProgress(job.id, 'verifying', 0, 0);
     }
@@ -617,6 +617,74 @@ export class NativeJobRuntime implements JobRuntime {
         try { await this.store.save(job); } catch (_) {}
       }
     }
+  }
+
+  /** Retry only the device submission; the verified package and Profile stay pinned. */
+  private async installWithRecovery(job: InstallJob, path: string,
+    progress: (phase: string, sent: number, total: number) => void): Promise<void> {
+    const startedAt = Date.now();
+    let baseline: InstalledSigningIdentity | undefined;
+    let baselineKnown = false;
+    if (job.reinstallRequired && !(job.renewalRequestedAt > 0)) {
+      try {
+        baseline = await this.device.installedSigningIdentity(job.bundleName);
+        baselineKnown = true;
+      } catch (_) {}
+    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      JobCancellation.assertActive(job.id);
+      try {
+        await this.device.install(path, progress);
+        return;
+      } catch (error) {
+        JobCancellation.assertActive(job.id);
+        // A real signature, authorization, storage or package rejection cannot
+        // be repaired by resubmitting the same bytes. Unknown errors stay visible.
+        if (!this.recoverableInstallError(error as Error)) throw error as Error;
+        if (!await this.device.connected()) throw error as Error;
+        progress('verifying', 0, 0);
+        // The daemon can finish after its receipt is lost. Confirm before any
+        // repeat; same-version edits/renewals need stronger proof than a version.
+        for (let probe = 0; probe < 3; probe++) {
+          JobCancellation.assertActive(job.id);
+          try {
+            const confirmed = await this.installResultAfterError(job, baseline, baselineKnown);
+            JobCancellation.assertActive(job.id);
+            if (confirmed) return;
+          } catch (_) { throw error as Error; }
+          if (probe < 2) {
+            await new Promise<void>((resolve: () => void) => setTimeout(resolve, probe === 0 ? 300 : 700));
+          }
+        }
+        // A native command already has a five-minute budget. Do not start
+        // another long command after that budget was spent; only early
+        // failures get a repeat within the runner's existing six-minute window.
+        if (attempt === 1 || Date.now() - startedAt > 30000) throw error as Error;
+        JobCancellation.assertActive(job.id);
+        if (!await this.device.connected()) throw error as Error;
+        console.warn('Install submission recovering once: ' + String(error));
+        progress('waiting', 0, 0);
+      }
+    }
+  }
+
+  private recoverableInstallError(error: Error): boolean {
+    if (error instanceof JobFailure || (error as ClassifiedFailure).failureKind !== undefined) return false;
+    const reason = String(error);
+    if (/\bcode\s*:\s*[1-9]\d*|signature|certificate|profile|private\s*key|unauthorized|permission|denied|EACCES|EPERM|no space|ENOSPC|read.only|not found|no such file|invalid (?:package|bundle|hap)/i.test(reason)) return false;
+    return /check[\s_-]*dir\s*(?:failed|failure|error)|(?:APP module transfer|replacement package transfer) checksum differs|HDC command timed out|Timeout waiting for (?:app install result|AppBegin)|设备未在 60 秒内开始安装|Response channel closed|\bChannel closed\b|connection (?:reset|aborted)|broken pipe|peer closed|Expected AppBegin, got Kernel(?:ChannelClose|Echo)/i.test(reason);
+  }
+
+  private async installResultAfterError(job: InstallJob,
+    baseline: InstalledSigningIdentity | undefined, baselineKnown: boolean): Promise<boolean> {
+    if (await this.installedVersion(job.bundleName) !== job.versionCode) return false;
+    if (job.renewalRequestedAt > 0) return this.confirmRenewal(job);
+    if (!job.reinstallRequired) return true;
+    if (!baselineKnown || !job.profilePath) return false;
+    const installed = await this.device.installedSigningIdentity(job.bundleName);
+    return installed !== undefined && installed.versionCode === job.versionCode &&
+      installed.updateTime > (baseline?.updateTime ?? 0) &&
+      installed.fingerprint === await AgcProfile.signingFingerprint(job.profilePath);
   }
 
   async installedVersion(bundleName: string): Promise<number> {

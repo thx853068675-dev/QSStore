@@ -87,7 +87,7 @@ export class LocalInstallTimeline {
   }
 
   private static isWaiting(stage: InstallStage): boolean {
-    return stage === InstallStage.WAITING_ACCOUNT || stage === InstallStage.WAITING_DEVICE ||
+    return stage === InstallStage.WAITING_CERTIFICATE || stage === InstallStage.WAITING_ACCOUNT || stage === InstallStage.WAITING_DEVICE ||
       stage === InstallStage.WAITING_CONFIRMATION ||
       stage === InstallStage.WAITING_NETWORK || stage === InstallStage.RETRYABLE_ERROR ||
       stage === InstallStage.TERMINAL_ERROR;
@@ -115,6 +115,7 @@ export class LocalInstallTimeline {
       case InstallStage.SIGNATURE_VERIFIED: return '签名校验通过';
       case InstallStage.WAITING_NETWORK: return '网络中断，等待重试';
       case InstallStage.WAITING_ACCOUNT: return '等待登录开发者账号';
+      case InstallStage.WAITING_CERTIFICATE: return '等待释放证书名额';
       case InstallStage.WAITING_CONFIRMATION: return '等待确认是否清除应用数据';
       case InstallStage.WAITING_DEVICE: return '等待无线调试连接';
       case InstallStage.INSTALLING: return last ? '正在安装到设备' : '已提交设备安装';

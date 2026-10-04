@@ -8,6 +8,7 @@ export enum InstallStage {
   SIGNATURE_VERIFIED = 'signature_verified',
   WAITING_NETWORK = 'waiting_network',
   WAITING_ACCOUNT = 'waiting_account',
+  WAITING_CERTIFICATE = 'waiting_certificate',
   WAITING_DEVICE = 'waiting_device',
   WAITING_CONFIRMATION = 'waiting_confirmation',
   INSTALLING = 'installing',
@@ -103,6 +104,7 @@ export class RecoveryEvidence {
 export enum FailureKind {
   NETWORK = 'network',
   ACCOUNT = 'account',
+  CERTIFICATE_LIMIT = 'certificate_limit',
   DEVICE = 'device',
   CONFIRMATION = 'confirmation',
   TRANSIENT = 'transient',

@@ -36,6 +36,7 @@ export function stageForFailure(kind: FailureKind): InstallStage {
   switch (kind) {
     case FailureKind.NETWORK: return InstallStage.WAITING_NETWORK;
     case FailureKind.ACCOUNT: return InstallStage.WAITING_ACCOUNT;
+    case FailureKind.CERTIFICATE_LIMIT: return InstallStage.WAITING_CERTIFICATE;
     case FailureKind.DEVICE: return InstallStage.WAITING_DEVICE;
     case FailureKind.CONFIRMATION: return InstallStage.WAITING_CONFIRMATION;
     case FailureKind.TRANSIENT: return InstallStage.RETRYABLE_ERROR;

@@ -28,18 +28,11 @@ export enum EnrollmentOutcome {
 export class EnrollmentResult {
   outcome: EnrollmentOutcome = EnrollmentOutcome.RESTORED;
   identity: LocalSigningIdentity = new LocalSigningIdentity();
-  /** 账号下还剩几张可用的调试证书槽位。 */
-  freeSlots: number = 0;
 }
 
 export class EnrollmentOptions {
   /** 重置时核对 AGC，不能把已被远端删除的本机证书当成可复用身份。 */
   refreshCertificate: boolean = false;
-  /**
-   * 账号只剩最后一个调试证书槽位时是否仍要新建。
-   * 默认 false：先让用户确认，避免一次误点占掉团队最后一个槽位。
-   */
-  allowLastSlot: boolean = false;
   /** 用户主动续期时，跳过此时间之前到期的证书。 */
   renewBeforeSeconds: number = 0;
 }
@@ -402,7 +395,6 @@ export class SigningIdentityRecovery {
     account: DeveloperAccount): Promise<void> {
     const options = new EnrollmentOptions();
     options.refreshCertificate = true;
-    options.allowLastSlot = true;
     await SigningIdentityRecovery.enroll(context, account, options);
   }
 
@@ -418,12 +410,12 @@ export class SigningIdentityRecovery {
    *   ⑤ 都没有才向 AGC 申请新证书
    *
    * 第 ⑤ 步是唯一会占槽位的动作，并且先列出账号现有证书逐个试配对。
-   * 槽位满或只剩最后一个而未获确认时，宁可报错也不占用。
+   * 是否超限由 AGC 的申请结果决定，不根据文档里的数量提前拒绝。
    */
   static async enroll(context: common.UIAbilityContext, account: DeveloperAccount,
     options: EnrollmentOptions = new EnrollmentOptions()): Promise<EnrollmentResult> {
     const scope = JSON.stringify([context.filesDir, account.userId, account.teamId,
-      options.allowLastSlot, options.renewBeforeSeconds, options.refreshCertificate]);
+      options.renewBeforeSeconds, options.refreshCertificate]);
     const pending = SigningIdentityRecovery.enrollment;
     if (pending !== undefined) {
       if (SigningIdentityRecovery.enrollmentScope === scope) return await pending;
@@ -446,7 +438,6 @@ export class SigningIdentityRecovery {
   static async ensureForInstall(context: common.UIAbilityContext,
     account: DeveloperAccount): Promise<LocalSigningIdentity> {
     const options = new EnrollmentOptions();
-    options.allowLastSlot = true;
     const startedAt = Date.now();
     try {
       return (await SigningIdentityRecovery.enroll(context, account, options)).identity;
@@ -459,7 +450,6 @@ export class SigningIdentityRecovery {
   static async ensureForRenewal(context: common.UIAbilityContext, account: DeveloperAccount,
     minimumExpiry: number): Promise<LocalSigningIdentity> {
     const options = new EnrollmentOptions();
-    options.allowLastSlot = true;
     options.refreshCertificate = true;
     options.renewBeforeSeconds = minimumExpiry;
     return (await SigningIdentityRecovery.enroll(context, account, options)).identity;
@@ -508,7 +498,6 @@ export class SigningIdentityRecovery {
     const agc = new AgcClient(account);
     const rows = await agc.certificates();
     const valid = SigningIdentityRecovery.validDebugCerts(rows);
-    const freeSlots = Math.max(0, SigningIdentityRecovery.DEBUG_SLOT_LIMIT - valid.length);
     const index = await preferences.getPreferences(context, INDEX_NAME);
     let deletion = await index.get('deleting-cert', '') as string;
     const pendingPrefix = 'pending:' + account.userId + ':';
@@ -543,24 +532,13 @@ export class SigningIdentityRecovery {
       if (!SigningIdentityRecovery.pairsWithKey(privateKeyPath, downloaded, dir)) continue;
       return SigningIdentityRecovery.persist(context, account, id, downloaded,
         String(row['certName'] ?? ''), SigningIdentityRecovery.expirySeconds(row['expireTime']),
-        EnrollmentOutcome.RESTORED, freeSlots);
+        EnrollmentOutcome.RESTORED);
     }
 
     if (undownloaded > 0) {
       throw new Error('有 ' + undownloaded +
         ' 张账号证书暂时下载失败，无法确认本机私钥能否与它们配对。' +
         '为避免重复占用调试证书槽位，本次不申请新证书，请稍后重试。');
-    }
-
-    if (freeSlots <= 0) {
-      if (options.renewBeforeSeconds > 0) {
-        throw new Error('AGC 调试证书槽位已满，现有证书有效期不足以续签。旧证书和应用已保留，请在证书管理中释放不用的证书后重试');
-      }
-      throw new Error('AGC 的 ' + SigningIdentityRecovery.DEBUG_SLOT_LIMIT +
-        ' 个调试证书槽位已满，且都不与本机私钥配对。请在证书管理中删除一张不用的证书后重试');
-    }
-    if (freeSlots === 1 && !options.allowLastSlot) {
-      throw new Error('AGC 只剩最后一个调试证书槽位。确认要为这台设备新建时，请再次点击「占用最后槽位并申请」');
     }
 
     // CSR 必须由刚落盘的那把私钥产生，否则证书回来配不上。
@@ -582,11 +560,8 @@ export class SigningIdentityRecovery {
     }
     return SigningIdentityRecovery.persist(context, account, createdId, createdBytes,
       String(created['certName'] ?? certName), SigningIdentityRecovery.expirySeconds(
-        created['expireTime']), EnrollmentOutcome.CREATED, freeSlots - 1);
+        created['expireTime']), EnrollmentOutcome.CREATED);
   }
-
-  /// AGC 调试证书槽位上限（团队共享资源，不做自动删除别人的证书）。
-  private static readonly DEBUG_SLOT_LIMIT: number = 3;
 
   /**
    * 同一时刻只准备一份材料；相同请求共享结果，其他策略等待后再核验。
@@ -683,7 +658,7 @@ export class SigningIdentityRecovery {
   /// 校验并落盘一份新身份，同时写入证书名与到期时间供界面展示。
   private static async persist(context: common.UIAbilityContext, account: DeveloperAccount,
     certId: string, certificate: ArrayBuffer, certName: string, certExpiry: number,
-    outcome: EnrollmentOutcome, freeSlots: number): Promise<EnrollmentResult> {
+    outcome: EnrollmentOutcome): Promise<EnrollmentResult> {
     const dir = SigningIdentityRecovery.materialDir(context);
     const certTmp = dir + '/identity.cer.new';
     const identity = new LocalSigningIdentity();
@@ -710,7 +685,6 @@ export class SigningIdentityRecovery {
     const result = new EnrollmentResult();
     result.outcome = outcome;
     result.identity = identity;
-    result.freeSlots = freeSlots;
     return result;
   }
 

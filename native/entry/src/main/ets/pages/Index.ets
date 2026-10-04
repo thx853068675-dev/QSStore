@@ -4,11 +4,13 @@ import { DiscoverHeader, DiscoverMotion, DiscoverRefreshIndicator } from '../com
 import { DiscoverTopAction } from '../components/DiscoverTopAction';
 import { RepositoryStats } from '../components/RepositoryStats';
 import { CatalogAppTitle } from '../components/CatalogAppTitle';
+import { ListDataSource } from '../data/ListDataSource';
 import { RenewalDialog } from '../components/RenewalDialog';
 import { LocalProfileDialog } from '../components/LocalProfileDialog';
 import { appendCatalogPage, shouldPrefetchCatalog } from '../data/CatalogPaging';
 import { ReleaseChannelRegistry } from '../data/ReleaseChannelRegistry';
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
+import { InstallCertificatePrompt } from '../components/InstallCertificatePrompt';
 import { CatalogInstallIdentity } from '../jobs/CatalogInstallIdentity';
 import { ClassifiedFailure } from '../data/ServiceFailure';
 import { AccountService } from '../data/AccountService';
@@ -170,14 +172,14 @@ struct Index {
   @State private viewportWidth: number = 0;
   @State private featuredHeights: Map<number, number> = new Map();
   @State private currentTab: number = 0;
-  @State private pendingJobs: InstallJob[] = [];
-  @State private installedJobs: InstallJob[] = [];
+  @State @Watch('syncManagementRows') private pendingJobs: InstallJob[] = [];
+  @State @Watch('syncManagementRows') private installedJobs: InstallJob[] = [];
   /** 商店目录里、本机已安装但非轻启安装的应用（无 job 记录）。 */
-  @State private storeInstalled: InstallJob[] = [];
-  @State private deviceInstalled: InstallJob[] = [];
+  @State @Watch('syncManagementRows') private storeInstalled: InstallJob[] = [];
+  @State @Watch('syncManagementRows') private deviceInstalled: InstallJob[] = [];
   @State private installedLocalOnly: boolean = false;
-  @State private signingExpiries: Map<string, number> = new Map();
-  @State private signingExpiryEstimates: Map<string, number> = new Map();
+  @State @Watch('syncManagementRows') private signingExpiries: Map<string, number> = new Map();
+  @State @Watch('syncManagementRows') private signingExpiryEstimates: Map<string, number> = new Map();
   @State private bulkUpdating: boolean = false;
   private expiryReadToken: number = 0;
   private deviceInventoryFlight: Promise<void> | undefined = undefined;
@@ -202,7 +204,7 @@ struct Index {
   @State private activeQuery: string = '';
   /** 目录里每个应用在本机的版本（来自系统 bundleManager），0/缺失表示没装。 */
   @State private installedVersions: Map<number, number> = new Map<number, number>();
-  @State private installedDisplay: Map<string, VersionCacheEntry> = new Map();
+  @State @Watch('syncManagementRows') private installedDisplay: Map<string, VersionCacheEntry> = new Map();
   @StorageProp('releaseChannelRevision') @Watch('onReleaseChannelsChanged') private releaseChannelRevision: number = 0;
   @State private needsInstallScan: boolean = false;
   @StorageProp('wirelessLinkRevision') @Watch('onWirelessLinkChanged') private wirelessLinkRevision: number = 0;
@@ -226,6 +228,7 @@ struct Index {
   @State private renewalExistingJobId: string = '';
   @State private renewalPreparing: string[] = [];
   private installSubscription: number = -1;
+  private installJobsRevision: number = -1;
   private confirmationSubscription: number = -1;
   private reconnectSubscription: number = -1;
   /** 与设备核对卸载状态。 */
@@ -238,7 +241,9 @@ struct Index {
   /** 「设备连接」卡片里的一次性提示（如「已释放调试链路」）。 */
   @State private deviceMessage: string = '';
   @State private cancellingJobs: string[] = [];
-  @State private apps: CatalogApp[] = [];
+  @State @Watch('syncDiscoverRows') private apps: CatalogApp[] = [];
+  private discoverRows: ListDataSource<CatalogApp> = new ListDataSource<CatalogApp>(
+    (app: CatalogApp): string => String(app.id), (app: CatalogApp): string => JSON.stringify(app));
   @State private appIcons: AppIcon[] = [];
   /** 管理页按需保留图标，不随发现页搜索或首屏刷新清空。 */
   @State private managementIcons: AppIcon[] = [];
@@ -299,7 +304,7 @@ struct Index {
   /** 已在架时那条记录的编号与名称，供提示使用。 */
   @State private submitExistingId: number = 0;
   @State private submitExistingName: string = '';
-  @State private myApps: CatalogApp[] = [];
+  @State @Watch('syncManagementRows') private myApps: CatalogApp[] = [];
   @State private myAppsMessage: string = '';
   @State private removingId: number = 0;
   @State private showAppConfig: boolean = false;
@@ -321,10 +326,22 @@ struct Index {
   @State private reconnectBusy: boolean = false;
   @State private reconnectMessage: string = '';
   @State private resumeJobId: string = '';
-  @State private updates: UpdateTarget[] = [];
+  @State @Watch('syncManagementRows') private updates: UpdateTarget[] = [];
   /** 更新目录独立于发现页的搜索和分页，整轮获取成功才替换。 */
-  @State private updateCatalog: CatalogApp[] = [];
-  @State private updateCatalogReady: boolean = false;
+  @State @Watch('syncManagementRows') private updateCatalog: CatalogApp[] = [];
+  @State @Watch('syncManagementRows') private updateCatalogReady: boolean = false;
+  private queueRows: ListDataSource<InstallJob> = new ListDataSource<InstallJob>(
+    (job: InstallJob): string => job.id, (job: InstallJob): string => JSON.stringify(job));
+  private onlineInstalledRows: ListDataSource<InstallJob> = new ListDataSource<InstallJob>(
+    (job: InstallJob): string => job.id, (job: InstallJob): string => JSON.stringify(job));
+  private offlineInstalledRows: ListDataSource<InstallJob> = new ListDataSource<InstallJob>(
+    (job: InstallJob): string => job.id, (job: InstallJob): string => JSON.stringify(job));
+  private publishedRows: ListDataSource<CatalogApp> = new ListDataSource<CatalogApp>(
+    (app: CatalogApp): string => String(app.id), (app: CatalogApp): string => JSON.stringify(app));
+  @State private queueRowCount: number = 0;
+  @State private onlineInstalledCount: number = 0;
+  @State private offlineInstalledCount: number = 0;
+  private managementRowsTimer: number = -1;
   private updateCatalogBusy: boolean = false;
   @State private updateCatalogError: string = '';
   @State private deviceConnected: boolean = false;
@@ -335,6 +352,8 @@ struct Index {
   @State private certExpiry: string = '';
   @State private certMessage: string = '';
   @State private showCertSheet: boolean = false;
+  @State private showCertificatePrompt: boolean = false;
+  @State private certificatePromptDismiss: number = 0;
   @State private showLocalProfiles: boolean = false;
   @State private certRows: CertRow[] = [];
   @State private certSheetBusy: boolean = false;
@@ -344,7 +363,6 @@ struct Index {
   /** 到期后才显示重建入口；有效期内不重复提示。 */
   @State private certExpired: boolean = false;
   /** 只剩最后一个槽位时的二次确认：为 true 才会真的申请。 */
-  @State private certLastSlotConfirmed: boolean = false;
   /** 左滑后等待确认删除的证书 ID。 */
   @State private certConfirmDelete: string = '';
 
@@ -353,6 +371,7 @@ struct Index {
   private pageInset(): number { return StoreLayout.inset(this.viewportWidth); }
 
   private onReleaseChannelsChanged(): void {
+    this.syncDiscoverRows();
     if (this.pageVisible) this.refreshCatalogInstallState();
     else {
       this.syncDetectedInstalled();
@@ -435,6 +454,7 @@ struct Index {
     this.observeInstallTasks();
     this.drainInstallQueue();
     this.syncViewedCatalog();
+    this.syncManagementRows();
     this.refreshCatalogInstallState();
     if (this.currentTab === Index.TAB_MANAGE) { this.scanDeviceInstalled(); this.syncManagementIcons(); this.loadSigningExpiries(); }
     this.reconcileInterruptedInstalls().then(() => this.reconcileStuckJobs());
@@ -472,6 +492,8 @@ struct Index {
     this.reconnectSubscription = -1;
     InstallTaskState.unsubscribe(this.installSubscription);
     this.installSubscription = -1;
+    if (this.managementRowsTimer !== -1) clearTimeout(this.managementRowsTimer);
+    this.managementRowsTimer = -1;
     // 页面离开时取消搜索防抖，避免定时器在后台空转
     if (this.searchTimer !== -1) {
       clearTimeout(this.searchTimer);
@@ -581,7 +603,6 @@ struct Index {
         getContext(this) as common.UIAbilityContext, account, true);
       if (this.signedIn && this.account.userId === account.userId) {
         this.certReady = identity !== undefined;
-        this.certLastSlotConfirmed = false;
         // 复用成功是正常状态，不需要一行说明文字；这个字段继续用于报错与
         // 需要用户动作的提示（未配对、重置失败等）。
         this.identityMessage = displayed ? '' :
@@ -673,8 +694,7 @@ struct Index {
   /**
    * 首次签名 / 证书重建：复用优先，确无可用证书才向 AGC 申请。
    *
-   * 只剩最后一个槽位时第一次点击只给出确认提示，再点一次才真的申请，
-   * 避免误触占掉团队的最后一个调试证书槽位。
+   * 申请额度由 AGC 判定，避免本机固定数量误拦截。
    */
   private async prepareSigningIdentity(): Promise<void> {
     if (!this.signedIn || this.identityBusy || this.certDeleting.length > 0) return;
@@ -685,12 +705,10 @@ struct Index {
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const options = new EnrollmentOptions();
-      options.allowLastSlot = this.certLastSlotConfirmed;
       options.renewBeforeSeconds = this.certExpired ? Math.floor(Date.now() / 1000) : 0;
       const result = await SigningIdentityRecovery.enroll(context, account, options);
       if (!this.signedIn || this.account.userId !== account.userId) return;
       this.certReady = true;
-      this.certLastSlotConfirmed = false;
       await this.loadCertificateDetail(result.identity);
       await this.syncIdentityToCloud(context, result.identity);
       const label = this.certLabel.length > 0 ? this.certLabel : result.identity.certId;
@@ -700,8 +718,6 @@ struct Index {
     } catch (error) {
       if (!this.signedIn || this.account.userId !== account.userId) return;
       const message = errorText(error);
-      // 「只剩最后一个槽位」是可确认的状态，不是失败；把按钮切换成确认态。
-      this.certLastSlotConfirmed = message.includes('最后一个调试证书槽位');
       this.identityMessage = message;
     } finally {
       this.identityBusy = false;
@@ -884,14 +900,15 @@ struct Index {
 
   @Builder
   private certDeleteAction(row: CertRow) {
-    Column() {
+    Column({ space: 6 }) {
+      SymbolGlyph($r('sys.symbol.trash')).fontSize(18).fontColor([this.colors().onAccent])
       Text(this.certDeleting === row.id ? '删除中…' : '删除')
         .fontSize(13).fontColor(this.colors().onAccent).fontWeight(FontWeight.Medium)
         .maxLines(1)
     }
-    .width(64).height('100%').justifyContent(FlexAlign.Center)
+    .width(64).height('100%').margin({ left: 8 }).justifyContent(FlexAlign.Center)
     .backgroundColor(this.certDeleting === row.id ? this.colors().textTertiary : this.colors().danger)
-    .borderRadius(14)
+    .borderRadius(14).enabled(this.certDeleting.length === 0)
     .onClick(() => {
       // 左滑删除是破坏性且不可撤销的动作，先要一次明确确认。
       this.certConfirmDelete = row.id;
@@ -939,18 +956,11 @@ struct Index {
                       .textOverflow({ overflow: TextOverflow.Ellipsis })
                   }
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-                if (row.inUse) {
-                  Text('已使用')
-                    .fontSize(11).fontColor(this.colors().success)
-                    .padding({ left: 8, right: 8, top: 5, bottom: 5 })
-                    .backgroundColor(this.colors().successSoft).borderRadius(8)
-                } else {
-                  Button(this.certUsing === row.id ? '配对中…' : '使用')
-                    .height(44).fontSize(12)
+                  Button(row.inUse ? '已使用' : this.certUsing === row.id ? '配对中…' : '使用')
+                    .height(44).width(72).fontSize(12)
                     .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
                     .borderRadius(8).enabled(this.certUsing.length === 0)
-                    .onClick(() => this.useCertificate(row))
-                }
+                    .onClick(() => { if (!row.inUse) this.useCertificate(row); })
               }.width('100%').padding(13)
                 .backgroundColor(this.colors().surface).borderRadius(14)
             }
@@ -961,7 +971,7 @@ struct Index {
             .swipeAction({
               end: {
                 builder: () => { this.certDeleteAction(row) },
-                actionAreaDistance: 64
+                actionAreaDistance: 72
               },
               edgeEffect: SwipeEdgeEffect.Spring
             })
@@ -1247,7 +1257,7 @@ struct Index {
       if (bytes === undefined || !this.isCurrentCatalogIcon(app, query)) return undefined;
       const source = image.createImageSource(bytes);
       try {
-        const pixels = await source.createPixelMap();
+        const pixels = await source.createPixelMap({ desiredSize: { width: 192, height: 192 } });
         if (!this.isCurrentCatalogIcon(app, query) ||
           this.appIcons.some((icon: AppIcon) => icon.id === app.id && icon.rev === app.iconRev)) {
           await pixels.release();
@@ -1295,7 +1305,7 @@ struct Index {
     icons.forEach((bytes: ArrayBuffer, id: number) => {
       try {
         const source = image.createImageSource(bytes);
-        source.createPixelMap().then((pixels: image.PixelMap) => {
+        source.createPixelMap({ desiredSize: { width: 192, height: 192 } }).then((pixels: image.PixelMap) => {
           const expected = cached.find((app: CatalogApp) => app.id === id)?.iconRev;
           if (!expected || !this.apps.some((app: CatalogApp) =>
             app.id === id && app.iconRev === expected) || this.iconFor(id) !== undefined) {
@@ -1307,7 +1317,7 @@ struct Index {
           icon.rev = expected;
           icon.pixels = pixels;
           this.appIcons = this.appIcons.concat([icon]);
-        }).catch((e: Object) => {
+        }).finally(() => source.release()).catch((e: Object) => {
         });
       } catch (e) {
       }
@@ -1442,7 +1452,7 @@ struct Index {
       if (bytes === undefined) return;
       const source = image.createImageSource(bytes);
       try {
-        const pixels = await source.createPixelMap();
+        const pixels = await source.createPixelMap({ desiredSize: { width: 192, height: 192 } });
         const icon = new LocalIcon();
         icon.jobId = job.id;
         icon.pixels = pixels;
@@ -1486,6 +1496,7 @@ struct Index {
       case InstallStage.SIGNATURE_VERIFIED: return '签名有效，正在连接设备';
       case InstallStage.WAITING_NETWORK: return '网络中断，稍后自动重试';
       case InstallStage.WAITING_ACCOUNT: return '等待登录华为开发者账号';
+      case InstallStage.WAITING_CERTIFICATE: return '等待释放调试证书名额';
       case InstallStage.WAITING_CONFIRMATION: return '等待确认是否清除应用数据';
       case InstallStage.WAITING_DEVICE: return '等待无线调试连接';
       case InstallStage.INSTALLING: return '正在安装到设备';
@@ -1959,6 +1970,9 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
+    // 路由缓存中的首页不跟随下载进度重绘；执行与队列仍由 Coordinator 持有。
+    if (this.installSubscription >= 0) InstallTaskState.unsubscribe(this.installSubscription);
+    this.installSubscription = -1;
     if (this.refreshConnectionWaiter !== undefined && !this.refreshOpeningSettings) {
       this.completeRefreshConnection(false);
       if (this.resumeJobId.length === 0) this.showReconnect = false;
@@ -1999,9 +2013,13 @@ struct Index {
     if (this.installSubscription !== -1) return;
     this.installSubscription = InstallTaskState.subscribe((rows: InstallTaskSnapshot[]) => {
       this.installTasks = rows;
-      this.pendingJobs = rows.map((row: InstallTaskSnapshot) => row.job).filter((job: InstallJob) =>
-        job.stage !== InstallStage.INSTALLED && job.stage !== InstallStage.TERMINAL_ERROR)
-        .sort((a: InstallJob, b: InstallJob) => this.queueTime(a) - this.queueTime(b));
+      const revision = InstallTaskState.jobRevision();
+      if (this.installJobsRevision !== revision) {
+        this.installJobsRevision = revision;
+        this.pendingJobs = rows.map((row: InstallTaskSnapshot) => row.job).filter((job: InstallJob) =>
+          job.stage !== InstallStage.INSTALLED && job.stage !== InstallStage.TERMINAL_ERROR)
+          .sort((a: InstallJob, b: InstallJob) => this.queueTime(a) - this.queueTime(b));
+      }
       const installed = rows.map((row: InstallTaskSnapshot) => row.job).filter((job: InstallJob) =>
         job.stage === InstallStage.INSTALLED);
       const previous = this.installedJobs.map((job: InstallJob) => job.id + ':' + job.updatedAt).join(',');
@@ -2657,7 +2675,7 @@ struct Index {
     return new Promise<boolean>((resolve: (connected: boolean) => void) => {
       this.refreshConnectionWaiter = resolve;
       this.initialScanDismissed = true;
-      if (!this.showReconnect) this.resumeJobId = '';
+      if (!this.showReconnect && !this.showCertificatePrompt) this.resumeJobId = '';
       this.reconnectMessage = '自动重连未成功，连接后继续刷新';
       this.animateOverlay(() => { this.showReconnect = true; });
     });
@@ -2817,6 +2835,11 @@ struct Index {
    */
   private displayApps(): CatalogApp[] {
     return this.apps.map((app: CatalogApp) => ReleaseChannelRegistry.apply(app));
+  }
+
+  private syncDiscoverRows(): void {
+    this.discoverRows.update(this.displayApps());
+    this.syncManagementRows();
   }
 
   private openJobDetails(job: InstallJob): void {
@@ -3045,6 +3068,7 @@ struct Index {
   }
 
   onBackPress(): boolean {
+    if (this.showCertificatePrompt) { this.certificatePromptDismiss++; return true; }
     if (this.showLocalProfiles) {
       this.animateOverlay(() => { this.showLocalProfiles = false; });
       return true;
@@ -3306,20 +3330,34 @@ struct Index {
   }
 
   private recentInstalledJobs(): InstallJob[] {
-    return this.installedJobs.filter((job: InstallJob, index: number, jobs: InstallJob[]) =>
-      job.bundleName.length === 0 || jobs.findIndex((entry: InstallJob) =>
-        entry.bundleName === job.bundleName) === index);
+    const seen = new Set<string>();
+    return this.installedJobs.filter((job: InstallJob) => {
+      if (job.bundleName.length === 0) return true;
+      if (seen.has(job.bundleName)) return false;
+      seen.add(job.bundleName);
+      return true;
+    });
   }
 
   private managementInstalledJobs(localOnly: boolean = this.installedLocalOnly): InstallJob[] {
+    // 构建一次索引，避免每张卡片重复投影整个目录、遍历所有待装任务。
+    const catalogBundles = new Set<string>();
+    for (const app of this.updateApps()) {
+      for (const asset of this.installedAssets(app)) catalogBundles.add(asset.bundleName);
+    }
+    const pendingBundles = new Set<string>();
+    const pendingApps = new Set<number>();
+    for (const pending of this.pendingJobs) {
+      if (pending.renewalRequestedAt > 0) continue;
+      if (pending.bundleName.length > 0) pendingBundles.add(pending.bundleName);
+      if (pending.catalogBundleName.length > 0) pendingBundles.add(pending.catalogBundleName);
+      if (pending.bundleName.length === 0 && pending.catalogBundleName.length === 0 && pending.appId > 0) {
+        pendingApps.add(pending.appId);
+      }
+    }
     const installed = this.allInstalledJobs().filter((installed: InstallJob) =>
-      localOnly !== this.updateApps().some((app: CatalogApp) =>
-        this.installedAssets(app).some((asset: HapAsset) => asset.bundleName === installed.bundleName)) &&
-      !this.pendingJobs.some((pending: InstallJob) =>
-        !(pending.renewalRequestedAt > 0) &&
-        ((pending.bundleName === installed.bundleName || pending.catalogBundleName === installed.bundleName) ||
-        (pending.bundleName.length === 0 && pending.catalogBundleName.length === 0 &&
-          installed.appId > 0 && pending.appId === installed.appId))));
+      localOnly !== catalogBundles.has(installed.bundleName) &&
+      !pendingBundles.has(installed.bundleName) && !pendingApps.has(installed.appId));
     // Read each cached deadline once. Sorting never queries the device or AGC.
     const deadlines = new Map<string, number>();
     const updatable = new Set<string>();
@@ -3330,6 +3368,20 @@ struct Index {
     return installed.sort((a: InstallJob, b: InstallJob) => Number(updatable.has(b.bundleName)) -
       Number(updatable.has(a.bundleName)) ||
       (deadlines.get(a.bundleName) ?? 0) - (deadlines.get(b.bundleName) ?? 0));
+  }
+
+  private syncManagementRows(): void {
+    if (this.managementRowsTimer !== -1) return;
+    this.managementRowsTimer = setTimeout(() => {
+      this.managementRowsTimer = -1;
+      this.queueRows.update(this.managementQueueJobs());
+      this.onlineInstalledRows.update(this.managementInstalledJobs(false));
+      this.offlineInstalledRows.update(this.managementInstalledJobs(true));
+      this.publishedRows.update(this.myApps);
+      this.queueRowCount = this.queueRows.totalCount();
+      this.onlineInstalledCount = this.onlineInstalledRows.totalCount();
+      this.offlineInstalledCount = this.offlineInstalledRows.totalCount();
+    }, 0);
   }
 
   private olderInstalledJobs(bundleName: string, newestId: string): InstallJob[] {
@@ -3560,7 +3612,7 @@ struct Index {
         statusInset: this.statusBarInset, titleHeight: this.discoverTitleHeight })
       DiscoverHeader({ motion: this.discoverMotion, darkMode: this.darkMode,
         active: this.pageVisible && this.currentTab === Index.TAB_DISCOVER && this.signedIn &&
-          !this.showRenewal && !this.showAppConfig && !this.showSubmit && !this.showReconnect && !this.showCertSheet &&
+          !this.showRenewal && !this.showAppConfig && !this.showSubmit && !this.showReconnect && !this.showCertificatePrompt && !this.showCertSheet &&
           !this.showCardActions && !this.showLocalProfiles,
         statusInset: this.statusBarInset, inset: this.pageInset(), titleHeight: this.discoverTitleHeight,
         onTitleSize: (height: number): void => {
@@ -3628,7 +3680,7 @@ struct Index {
                 }.width('100%').padding(26).backgroundColor(this.colors().surface).borderRadius(20)
               }
             }
-            ForEach(this.displayApps(), (app: CatalogApp) => {
+            LazyForEach(this.discoverRows, (app: CatalogApp) => {
               ListItem() {
                 Column() {
                   if (app.stars > 100) {
@@ -3650,7 +3702,7 @@ struct Index {
                       Column({ space: 5 }) {
                         CatalogAppTitle({ title: app.displayName, version: this.latestVersionTag(app),
                           color: '#FFFFFF', versionColor: this.featuredColors(app.stars)[0][0],
-                          versionBackground: '#FFFFFF' })
+                          versionBackground: '#FFFFFF', active: this.pageVisible && this.currentTab === 0 })
                         Text(app.summary).fontSize(12)
                           .fontColor('#E5ECFF').maxLines(1)
                         Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center,
@@ -3691,7 +3743,7 @@ struct Index {
                         Column({ space: 5 }) {
                           CatalogAppTitle({ title: app.displayName, version: this.latestVersionTag(app),
                             color: this.colors().text, versionColor: this.colors().surface,
-                            versionBackground: this.colors().text })
+                            versionBackground: this.colors().text, active: this.pageVisible && this.currentTab === 0 })
                           Text(app.summary).fontSize(12).fontColor(this.colors().textSecondary).maxLines(1)
                           Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center,
                             space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(5) } }) {
@@ -3711,9 +3763,7 @@ struct Index {
                 }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + this.pageInset() * 2 })
                   .align(Alignment.Top).padding({ left: this.pageInset(), right: this.pageInset() })
               }
-            }, (app: CatalogApp) => String(app.id) + ':' + app.stars + ':' + app.githubDownloads + ':' +
-              app.category + ':' + app.displayName + ':' + app.iconRev + ':' +
-              (app.latestAsset?.sha256 ?? '') + ':' + (app.latestAsset?.versionCode ?? 0))
+            }, (app: CatalogApp) => this.discoverRows.key(app))
             // 接近页尾预取；固定高度的尾项避免加载状态切换改变滚动范围。
             if (this.catalogPage * Index.CATALOG_PAGE_SIZE < this.catalogTotal) {
               ListItem() {
@@ -3817,7 +3867,7 @@ struct Index {
         if (this.installedLocalOnly === localOnly) {
           SymbolGlyph($r('sys.symbol.checkmark')).fontSize(10).fontColor([this.colors().accent])
         }
-        Text(label + ' ' + this.managementInstalledJobs(localOnly).length).fontSize(12)
+        Text(label + ' ' + (localOnly ? this.offlineInstalledCount : this.onlineInstalledCount)).fontSize(12)
           .fontWeight(this.installedLocalOnly === localOnly ? FontWeight.Bold : FontWeight.Medium)
           .fontColor(this.installedLocalOnly === localOnly ? this.colors().accent : this.colors().textSecondary)
           .maxLines(1)
@@ -3868,6 +3918,58 @@ struct Index {
   }
 
   @Builder
+  private managementInstalledCards(rows: ListDataSource<InstallJob>) {
+    LazyForEach(rows, (job: InstallJob) => {
+      ListItem() {
+        Column({ space: 10 }) {
+          Row({ space: 12 }) {
+            if (this.jobIcon(job)) {
+              Image(this.jobIcon(job)).width(46).height(46).borderRadius(13)
+            } else {
+              Text(this.jobTitle(job).length > 0 ? this.jobTitle(job).substring(0, 1) : '应')
+                .fontSize(19).fontColor(this.colors().accent).textAlign(TextAlign.Center)
+                .width(46).height(46).backgroundColor(this.colors().accentSoft).borderRadius(13)
+            }
+            Column({ space: 4 }) {
+              CatalogAppTitle({ title: this.jobTitle(job), version: this.managementVersion(job),
+                color: this.colors().text, versionColor: this.colors().surface,
+                versionBackground: this.colors().text, active: this.pageVisible && this.currentTab === Index.TAB_MANAGE })
+              Row({ space: 5 }) {
+                Text(this.renewalLabel(job)).fontSize(10)
+                  .fontColor(this.renewalDueSoon(job) ? this.colors().danger : this.colors().textTertiary)
+                  .maxLines(1).flexShrink(1)
+                if (this.renewalButtonLabel(job) === '续签中') {
+                  Text('续签中').fontSize(11)
+                    .fontWeight(FontWeight.Medium).fontColor(this.colors().accent)
+                    .padding({ left: 3, right: 3, top: 5, bottom: 5 }).flexShrink(0)
+                    .responseRegion({ x: -2, y: 0, width: '100%', height: 44 })
+                    .id('installed-renew-' + job.bundleName).onClick(() => this.renewInstalled(job))
+                }
+              }.width('100%')
+            }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+            Button(this.installedActionLabel(job), { type: ButtonType.Normal })
+              .width(StoreLayout.cardActionWidth).height(44).padding({ left: 8, right: 8 }).fontSize(12)
+              .fontColor(this.updateFor(job.bundleName) !== undefined ? this.colors().onAccent : this.colors().accent)
+              .backgroundColor(this.updateFor(job.bundleName) !== undefined ? this.colors().accent : this.colors().accentSoft)
+              .borderRadius(StoreLayout.cardActionRadius).id('installed-open-' + job.bundleName)
+              .enabled(this.uninstallingBundle !== job.bundleName)
+              .onClick(() => this.performInstalledAction(job))
+          }.width('100%')
+        }.alignItems(HorizontalAlign.Start).width('100%')
+          .padding(15).backgroundColor(this.renewalDueSoon(job) ? this.colors().renewalWarning :
+            this.colors().surface).borderRadius(17)
+          .id('installed-card-' + job.bundleName)
+          .onClick(() => this.openJobDetails(job))
+          .gesture(LongPressGesture({ duration: 500, repeat: false }).onAction(() => {
+            this.showInstalledActions(job);
+          }))
+      }.swipeAction({ end: { builder: () => {
+        this.cardSwipeActions(this.installedActions(job), job.bundleName, (key: string): void => { this.showInstalledActions(job, key); });
+      }, actionAreaDistance: this.installedActions(job).length * 72 }, edgeEffect: SwipeEdgeEffect.Spring })
+    }, (job: InstallJob) => rows.key(job))
+  }
+
+  @Builder
   private managementList() {
     Column() {
       List({ space: 11, scroller: this.managementScroller }) {
@@ -3880,16 +3982,16 @@ struct Index {
               .onClick(() => this.loadUpdateCatalog())
           }
         }
-        if (this.managementQueueJobs().length > 0) {
+        if (this.queueRowCount > 0) {
           ListItem() {
             Row({ space: 8 }) {
               Text('安装队列').fontSize(19).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
-              Text(String(this.managementQueueJobs().length)).fontSize(12).fontColor(this.colors().accent)
+              Text(String(this.queueRowCount)).fontSize(12).fontColor(this.colors().accent)
                 .padding({ left: 7, right: 7, top: 3, bottom: 3 })
                 .backgroundColor(this.colors().accentSoft).borderRadius(7)
             }.width('100%').padding({ top: 3, bottom: 6 })
           }
-          ForEach(this.managementQueueJobs(), (job: InstallJob) => {
+          LazyForEach(this.queueRows, (job: InstallJob) => {
             ListItem() {
               Column({ space: 2 }) {
                 Row({ space: 12 }) {
@@ -3903,7 +4005,7 @@ struct Index {
                   Column({ space: 5 }) {
                     CatalogAppTitle({ title: this.jobTitle(job), version: this.managementVersion(job),
                       color: this.colors().text, versionColor: this.colors().surface,
-                      versionBackground: this.colors().text })
+                      versionBackground: this.colors().text, active: this.pageVisible && this.currentTab === Index.TAB_MANAGE })
                     if (job.stage === InstallStage.QUEUED) {
                       Text(this.taskJobLabel(job)).fontSize(10)
                         .fontColor(this.colors().textSecondary).maxLines(1)
@@ -3927,7 +4029,7 @@ struct Index {
             }.swipeAction({ end: { builder: () => {
               this.cardSwipeActions(this.queueActions(job), job.id, (key: string): void => { this.showQueueActions(job, key); });
             }, actionAreaDistance: this.queueActions(job).length * 72 }, edgeEffect: SwipeEdgeEffect.Spring })
-          }, (job: InstallJob) => job.id + ':' + job.stage + ':' + job.updatedAt)
+          }, (job: InstallJob) => this.queueRows.key(job))
         }
         if (this.signedIn) {
           ListItem() {
@@ -3973,7 +4075,7 @@ struct Index {
                 .width('100%').padding({ top: 6, bottom: 8 })
             }
           }
-          ForEach(this.myApps, (app: CatalogApp) => {
+          LazyForEach(this.publishedRows, (app: CatalogApp) => {
             ListItem() {
               Row({ space: 12 }) {
                 if (this.managedIconFor(app)) {
@@ -3997,8 +4099,7 @@ struct Index {
                   .onClick(() => this.openAppConfig(app))
               }.width('100%').padding(15).backgroundColor(this.colors().surface).borderRadius(16)
             }
-          }, (app: CatalogApp) => String(app.id) + ':' + app.category + ':' +
-            app.displayName + ':' + app.iconRev)
+          }, (app: CatalogApp) => this.publishedRows.key(app))
         }
         // 中断任务恢复入口：只在确实有未完成任务时出现，无任务不占版面。
         if (this.jobsError.length > 0) {
@@ -4010,7 +4111,7 @@ struct Index {
         }
         ListItem() {
           Row() {
-            Text('已安装 · ' + (this.managementInstalledJobs(false).length + this.managementInstalledJobs(true).length)).fontSize(19).fontWeight(FontWeight.Bold)
+            Text('已安装 · ' + (this.onlineInstalledCount + this.offlineInstalledCount)).fontSize(19).fontWeight(FontWeight.Bold)
               .fontColor(this.colors().text).layoutWeight(1)
             Button(this.bulkUpdating ? '正在加入…' : '一键更新', { type: ButtonType.Normal })
               .height(32).fontSize(12).padding({ left: 10, right: 10 })
@@ -4031,7 +4132,7 @@ struct Index {
           }.width('100%').padding({ top: 18, bottom: 4 })
         }
         ListItem() { this.installedSourceSelector() }
-        if (this.managementInstalledJobs().length === 0) {
+        if ((this.installedLocalOnly ? this.offlineInstalledCount : this.onlineInstalledCount) === 0) {
           ListItem() {
             Text(this.installedLocalOnly ? '暂无本地侧载应用' : '暂无已安装的商店应用')
               .fontSize(12).fontColor(this.colors().textTertiary).padding({ top: 12, bottom: 12 })
@@ -4043,59 +4144,17 @@ struct Index {
               .width('100%').maxLines(3).padding({ bottom: 4 })
           }
         }
-        ForEach(this.managementInstalledJobs(), (job: InstallJob) => {
-          ListItem() {
-            Column({ space: 10 }) {
-              Row({ space: 12 }) {
-                if (this.jobIcon(job)) {
-                  Image(this.jobIcon(job)).width(46).height(46).borderRadius(13)
-                } else {
-                  Text(this.jobTitle(job).length > 0 ? this.jobTitle(job).substring(0, 1) : '应')
-                    .fontSize(19).fontColor(this.colors().accent).textAlign(TextAlign.Center)
-                    .width(46).height(46).backgroundColor(this.colors().accentSoft).borderRadius(13)
-                }
-                Column({ space: 4 }) {
-                  CatalogAppTitle({ title: this.jobTitle(job), version: this.managementVersion(job),
-                    color: this.colors().text, versionColor: this.colors().surface,
-                    versionBackground: this.colors().text })
-                  Row({ space: 5 }) {
-                    Text(this.renewalLabel(job)).fontSize(10)
-                      .fontColor(this.renewalDueSoon(job) ? this.colors().danger : this.colors().textTertiary)
-                      .maxLines(1).flexShrink(1)
-                    if (this.renewalButtonLabel(job) === '续签中') {
-                      Text('续签中').fontSize(11)
-                        .fontWeight(FontWeight.Medium).fontColor(this.colors().accent)
-                        .padding({ left: 3, right: 3, top: 5, bottom: 5 }).flexShrink(0)
-                        .responseRegion({ x: -2, y: 0, width: '100%', height: 44 })
-                        .id('installed-renew-' + job.bundleName).onClick(() => this.renewInstalled(job))
-                    }
-                  }.width('100%')
-                }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-                Button(this.installedActionLabel(job), { type: ButtonType.Normal })
-                  .width(StoreLayout.cardActionWidth).height(44).padding({ left: 8, right: 8 }).fontSize(12)
-                  .fontColor(this.updateFor(job.bundleName) !== undefined ? this.colors().onAccent : this.colors().accent)
-                  .backgroundColor(this.updateFor(job.bundleName) !== undefined ? this.colors().accent : this.colors().accentSoft)
-                  .borderRadius(StoreLayout.cardActionRadius).id('installed-open-' + job.bundleName)
-                  .enabled(this.uninstallingBundle !== job.bundleName)
-                  .onClick(() => this.performInstalledAction(job))
-              }.width('100%')
-            }.alignItems(HorizontalAlign.Start).width('100%')
-              .padding(15).backgroundColor(this.renewalDueSoon(job) ? this.colors().renewalWarning :
-                this.colors().surface).borderRadius(17)
-              .id('installed-card-' + job.bundleName)
-              .onClick(() => this.openJobDetails(job))
-              .gesture(LongPressGesture({ duration: 500, repeat: false }).onAction(() => {
-                this.showInstalledActions(job);
-              }))
-          }.swipeAction({ end: { builder: () => {
-            this.cardSwipeActions(this.installedActions(job), job.bundleName, (key: string): void => { this.showInstalledActions(job, key); });
-          }, actionAreaDistance: this.installedActions(job).length * 72 }, edgeEffect: SwipeEdgeEffect.Spring })
-        }, (job: InstallJob) => job.id)
+        if (this.installedLocalOnly) {
+          this.managementInstalledCards(this.offlineInstalledRows)
+        } else {
+          this.managementInstalledCards(this.onlineInstalledRows)
+        }
         // 为悬浮导航留出可滚走的尾部空间，不缩小列表的触摸/显示区域。
         ListItem() { Row().height(110).width('100%') }
       }.padding({ left: this.pageInset(), right: this.pageInset() })
         .width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + this.pageInset() * 2 }).height('100%')
         .contentStartOffset(this.statusBarInset + 56)
+        .cachedCount(4)
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
@@ -4404,19 +4463,19 @@ struct Index {
             // 还没有可用证书时给出唯一的申请入口：复用优先，确无可用证书才占槽位。
             if (this.signedIn && !this.certReady && !this.certExpired) {
               Button(this.identityBusy ? '正在准备…' :
-                (this.certLastSlotConfirmed ? '占用最后槽位并申请' : '获取调试证书'))
+                '获取调试证书')
                 .height(44).width('100%').fontSize(13)
-                .backgroundColor(this.certLastSlotConfirmed ? this.colors().danger : this.colors().accent)
+                .backgroundColor(this.colors().accent)
                 .fontColor(this.colors().onAccent).borderRadius(12)
                 .enabled(!this.identityBusy)
                 .onClick(() => this.prepareSigningIdentity())
             }
             if (this.signedIn && this.certExpired) {
               Button(this.identityBusy ? '正在重建…' :
-                (this.certLastSlotConfirmed ? '占用最后槽位并重建' : '重建签名身份'))
+                '重建签名身份')
                 .height(44).width('100%').fontSize(12)
-                .backgroundColor(this.certLastSlotConfirmed ? this.colors().danger : this.colors().accentSoft)
-                .fontColor(this.certLastSlotConfirmed ? this.colors().onAccent : this.colors().accent)
+                .backgroundColor(this.colors().accentSoft)
+                .fontColor(this.colors().accent)
                 .borderRadius(12).enabled(!this.identityBusy)
                 .onClick(() => this.prepareSigningIdentity())
             }
@@ -4717,6 +4776,8 @@ struct Index {
     } else if (!this.signedIn) {
       this.loginGate()
     }
+    InstallCertificatePrompt({ active: this.pageVisible, showing: this.showCertificatePrompt,
+      dismissRequest: this.certificatePromptDismiss })
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
       .onSizeChange((_old: SizeOptions, size: SizeOptions) => { this.viewportWidth = Number(size.width); })
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])

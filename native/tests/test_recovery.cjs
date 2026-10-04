@@ -64,6 +64,8 @@ async function fixture({ expiry = 1, backup = true, key = true,
     async certificateUrl(id) { return id; }
     async download(id) { if (state.downloadError) throw Error('offline'); return id; }
     async createCertificate(_csr, name) {
+      state.createRequests = (state.createRequests || 0) + 1;
+      if (state.createError) throw state.createError;
       if (state.rows.some(row => row.certName === name)) throw Error('duplicate certificate name');
       state.certNames.push(name);
       state.creates++;
@@ -244,11 +246,13 @@ test('manual renewal reuses a sufficiently long matching certificate without occ
   assert.equal((await f.R.ensureForRenewal(f.context, f.account, 2000000000)).certId, '100');
   assert.equal(f.state.creates, 0); assert.equal(f.state.generated, 0);
 });
-test('full certificate slots during renewal leave existing certificate and key intact', async () => {
+test('an AGC certificate-quota rejection during renewal leaves existing certificate and key intact', async () => {
   const f = await fixture({ expiry: 2000000000 });
   f.state.rows.push({ id: '998', certType: 1, expireTime: 2000000000, certObjectId: 'unrelated' },
     { id: '999', certType: 1, expireTime: 2000000000, certObjectId: 'unrelated' });
+  f.state.createError = Error('AGC 调试证书槽位已满');
   await assert.rejects(f.R.ensureForRenewal(f.context, f.account, 2000000000), /槽位已满/);
+  assert.equal(f.state.createRequests, 1);
   assert.equal(f.state.creates, 0); assert.equal(f.state.generated, 0);
   assert.equal(f.files.get(f.keyPath), KEY);
   assert.equal((await f.R.load(f.context, f.account)).certId, '100');
@@ -274,10 +278,18 @@ test('automatic preparation can use the final free slot without an extra user co
   assert.equal(identity.certId, '102'); assert.equal(f.state.creates, 1);
   assert.equal(f.state.rows.length, 3);
 });
-test('a full account is reported without deleting unrelated certificates or issuing another one', async () => {
+test('a rejected request is reported without deleting unrelated certificates or changing the key', async () => {
   const f = await firstInstallFixture(3); const before = JSON.stringify(f.state.rows);
+  f.state.createError = Error('AGC 调试证书槽位已满');
   await assert.rejects(() => f.R.ensureForInstall(f.context, f.account), /槽位已满/);
   assert.equal(f.state.creates, 0); assert.equal(JSON.stringify(f.state.rows), before);
+  assert.equal(f.state.createRequests, 1); assert.equal(f.files.get(f.keyPath), KEY);
+});
+test('four existing certificates do not impose a client-invented quota on a permitted AGC request', async () => {
+  const f = await firstInstallFixture(4);
+  assert.equal((await f.R.ensureForInstall(f.context, f.account)).certId, '102');
+  assert.equal(f.state.creates, 1); assert.equal(f.state.rows.length, 5);
+  assert.equal(f.state.generated, 1);
 });
 test('concurrent automatic preparation shares one generated key and one certificate', async () => {
   const f = await firstInstallFixture();

@@ -14,6 +14,7 @@ import { LocalBundles } from '../jobs/LocalBundles';
 import { AccountService } from '../data/AccountService';
 import { InstalledIconCache } from '../data/InstalledIconCache';
 import { InstallPrompts } from '../components/InstallPrompts';
+import { InstallCertificatePrompt } from '../components/InstallCertificatePrompt';
 import { Palette } from '../theme/Palette';
 import { StoreImmersiveIconButton,StoreLayout,StorePageHeader } from '../theme/StoreDesign';
 import { errorText } from '../jobs/ErrorText';
@@ -39,6 +40,8 @@ struct LocalInstall {
   @State private pageActive:boolean=true;
   @State private headerVisible:boolean=true;
   @State private showReconnect:boolean=false;
+  @State private showCertificatePrompt:boolean=false;
+  @State private certificatePromptDismiss:number=0;
   @State private promptDismiss:number=0;
   @State private renewal:boolean=false;
   @State private canRenew:boolean=false;
@@ -69,7 +72,7 @@ struct LocalInstall {
   onPageShow():void{this.pageActive=true;if(!this.disposed&&!this.returning)this.headerVisible=true;}
   onPageHide():void{this.pageActive=false;this.headerVisible=false;}
   aboutToDisappear():void{this.disposed=true;this.headerVisible=false;this.pageActive=false;clearTimeout(this.pickerTimer);clearTimeout(this.backTimer);InstallTaskState.unsubscribe(this.subscription);this.discard();this.pixels?.release();this.pixels=null;}
-  onBackPress():boolean{if(this.showReconnect){this.promptDismiss++;return true;}if(this.busy&&!this.storeRenewal){promptAction.showToast({message:'正在读取文件，请稍候'});return true;}this.back();return true;}
+  onBackPress():boolean{if(this.showCertificatePrompt){this.certificatePromptDismiss++;return true;}if(this.showReconnect){this.promptDismiss++;return true;}if(this.busy&&!this.storeRenewal){promptAction.showToast({message:'正在读取文件，请稍候'});return true;}this.back();return true;}
   private back():void{
     if(this.disposed||this.returning)return;
     this.returning=true;this.headerVisible=false;
@@ -153,7 +156,7 @@ struct LocalInstall {
   }
   @Builder private headerTools(){
     StoreImmersiveIconButton({symbol:$r('sys.symbol.plus'),label:'选择其他文件',
-      controlId:'local-install-add',loading:this.busy,visible:this.headerVisible&&!this.showReconnect,
+      controlId:'local-install-add',loading:this.busy,visible:this.headerVisible&&!this.showReconnect && !this.showCertificatePrompt,
       action:()=>this.pick(),backAction:()=>{this.onBackPress();}})
   }
   @Builder private timelineCard(){
@@ -185,10 +188,11 @@ struct LocalInstall {
           if(this.timeline.visible){this.timelineCard();}
         }.width('100%').constraintSize({maxWidth:StoreLayout.contentWidth}).padding({left:24,right:24,top:this.statusBarInset+78,bottom:36})}.width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Off)
       StorePageHeader({title:this.renewal?(this.storeRenewal?'商店续签':'手动续签'):'从本地签装',
-        statusInset:this.statusBarInset,visible:this.headerVisible&&!this.showReconnect,
+        statusInset:this.statusBarInset,visible:this.headerVisible&&!this.showReconnect && !this.showCertificatePrompt,
         active:!this.busy||this.storeRenewal,action:()=>{this.onBackPress();},
         backAction:()=>{this.onBackPress();},tools:()=>{this.headerTools();}}).position({x:0,y:0})
       InstallPrompts({active:this.pageActive,showing:this.showReconnect,dismissRequest:this.promptDismiss})
+      InstallCertificatePrompt({active:this.pageActive,showing:this.showCertificatePrompt,dismissRequest:this.certificatePromptDismiss})
     }.width('100%').height('100%').backgroundColor(this.colors().bg).expandSafeArea([SafeAreaType.SYSTEM],[SafeAreaEdge.TOP,SafeAreaEdge.BOTTOM])
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],[LayoutSafeAreaEdge.TOP,LayoutSafeAreaEdge.BOTTOM])
   }

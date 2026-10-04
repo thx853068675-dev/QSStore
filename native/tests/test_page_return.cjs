@@ -27,7 +27,7 @@ function fixture() {
     updateCatalog: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
     appIcons: [{ id: 1, rev: 'old', pixels: 'original pixels' }], catalogPage: 4,
     discoverShowTop: true, scrollOffset: 1234, activeQuery: 'saved search',
-    observeReconnect() {}, observeInstallTasks() {}, drainInstallQueue() {},
+    observeReconnect() {}, observeInstallTasks() {}, drainInstallQueue() {}, syncManagementRows() {},
     refreshCatalogInstallState() {}, reconcileInterruptedInstalls: async () => {}, reconcileStuckJobs() {},
     scanDeviceInstalled() { f.scans++; }, loadSigningExpiries() {},
     loadApps() { throw Error('return must not restart paginated network loading'); },

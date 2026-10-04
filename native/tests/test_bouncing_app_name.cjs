@@ -15,7 +15,7 @@ function fixture() {
   vm.runInNewContext(ts.transpileModule('class Page { ' + methods.join('\n') + ' };globalThis.Page=Page;', {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
-  const ui = new box.Page(); Object.assign(ui, { visible: true, disposed: false, epoch: 0, timer: -1,
+  const ui = new box.Page(); Object.assign(ui, { visible: true, active: true, disposed: false, epoch: 0, timer: -1,
     titleOffset: 0, textWidth: 260, viewportWidth: 200, getUIContext: () => ({ animateTo: (options, apply) => {
       apply(); if (options.duration > 0) animations.push(options);
     } }) });
@@ -45,4 +45,13 @@ test('leaving the viewport or disposing removes timers and cannot restart an old
   f.animations[0].onFinish(); assert.equal(f.timers.size, 0);
   f.ui.visible = true; f.ui.restart(); f.ui.disposed = true; f.ui.halt();
   assert.equal(f.timers.size, 0); f.ui.advance(f.ui.epoch, true); assert.equal(f.animations.length, 1);
+});
+
+test('a cached page or inactive tab stops long-title animation and resumes only when active', () => {
+  const f = fixture(); f.ui.restart(); f.tick(); const old = f.animations[0];
+  f.ui.active = false; f.ui.restart(); old.onFinish();
+  assert.equal(f.timers.size, 0); assert.equal(f.ui.titleOffset, 0);
+  f.ui.advance(f.ui.epoch, true); assert.equal(f.animations.length, 1);
+  f.ui.active = true; f.ui.restart(); f.tick();
+  assert.equal(f.ui.titleOffset, -60); assert.equal(f.animations.length, 2);
 });

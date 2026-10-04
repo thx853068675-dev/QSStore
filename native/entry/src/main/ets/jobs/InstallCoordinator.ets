@@ -1,6 +1,7 @@
 import { retryDelayMs } from './RecoveryPlanner';
 import { InstallReconnect } from './InstallReconnect';
 import { InstallConfirmation } from './InstallConfirmation';
+import { InstallCertificateSlots } from './InstallCertificateSlots';
 import { common } from '@kit.AbilityKit';
 import { LocalImport } from './LocalImport';
 import { AccountService } from '../data/AccountService';
@@ -60,6 +61,11 @@ export class InstallCoordinator {
     if (pending !== undefined) return pending;
     const task = InstallCoordinator.tail.then(async () => {
       const store = await JobStore.open(context);
+      const saved = await store.get(id);
+      if (saved?.stage === InstallStage.WAITING_CERTIFICATE) {
+        InstallCertificateSlots.request(id);
+        return saved;
+      }
       const account = await AccountService.current(context);
       const result = await new JobRunner(store, new NativeJobRuntime(context, store, account,
         new HdcDeviceBridge(context))).run(id);
@@ -74,6 +80,8 @@ export class InstallCoordinator {
       }
       if (result.stage === InstallStage.WAITING_DEVICE) InstallReconnect.request(id);
       if (result.stage === InstallStage.WAITING_CONFIRMATION) InstallConfirmation.request(id);
+      if (result.stage === InstallStage.WAITING_CERTIFICATE) InstallCertificateSlots.request(id,
+        account ? JSON.stringify([account.userId, account.teamId]) : '');
       return result;
     });
     InstallCoordinator.requests.set(id, task);

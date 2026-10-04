@@ -2855,6 +2855,53 @@ fn app_install_succeeded(status: u8, message: &str) -> bool {
         !text.contains("[fail]") && text.contains("install bundle successfully")
 }
 
+async fn wait_for_app_begin(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<TaskMessage>,
+    timeout: std::time::Duration,
+) -> io::Result<()> {
+    let mut detail = String::new();
+    tokio::time::timeout(timeout, async {
+        while let Some(task) = rx.recv().await {
+            match task.command {
+                HdcCommand::KernelWakeupSlavetask => {}
+                HdcCommand::AppBegin => return Ok(()),
+                HdcCommand::KernelEcho | HdcCommand::KernelEchoRaw => {
+                    // KernelEcho starts with a log-level byte. Preserve daemon
+                    // errors (e.g. CheckDir) instead of hiding them behind
+                    // "Expected AppBegin, got KernelEcho"; informational echoes
+                    // may legitimately arrive before the transfer begins.
+                    let bytes = if task.command == HdcCommand::KernelEcho {
+                        task.payload.get(1..).unwrap_or_default()
+                    } else { &task.payload };
+                    let text = String::from_utf8_lossy(bytes);
+                    if !text.trim().is_empty() {
+                        // Retain the latest diagnostic, bounded to 4 KiB. A
+                        // burst of information must not crowd out the error.
+                        detail = text.chars().take(1024).collect();
+                    }
+                    if task.command == HdcCommand::KernelEcho &&
+                        task.payload.first() == Some(&(MessageLevel::Fail as u8)) {
+                        return Err(Error::other(format!("App transfer preparation failed: {}", detail.trim())));
+                    }
+                }
+                HdcCommand::KernelChannelClose => {
+                    return Err(Error::other(if detail.trim().is_empty() {
+                        "Channel closed before app transfer".into()
+                    } else { format!("App transfer preparation failed: {}", detail.trim()) }));
+                }
+                other => return Err(Error::new(ErrorKind::InvalidData,
+                    format!("Expected AppBegin, got {other:?}"))),
+            }
+        }
+        Err(Error::new(ErrorKind::ConnectionAborted, if detail.trim().is_empty() {
+            "Response channel closed before app transfer".into()
+        } else { format!("App transfer preparation failed: {}", detail.trim()) }))
+    }).await.map_err(|_| Error::new(ErrorKind::TimedOut,
+        if detail.trim().is_empty() {
+            "设备未在 60 秒内开始安装（可能仍在替换正在运行的旧版本，可稍后重试）".into()
+        } else { format!("Timeout waiting for AppBegin: {}", detail.trim()) }))?
+}
+
 async fn handle_server_app_install(
     tcp_map: &TcpMap,
     usb_map: &UsbMap,
@@ -2986,7 +3033,10 @@ async fn install_single_hap(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("app.hap");
-    let remote_path = format!("/data/local/tmp/{}", file_name);
+    // Other sideload tools and interrupted tasks share /data/local/tmp. Never
+    // truncate their same-named file or reuse an old task's transfer target.
+    let remote_name = format!("qingqi-{session_id}-{channel_id}-{}.hap", rand::random::<u32>());
+    let remote_path = format!("/data/local/tmp/{remote_name}");
     info!("app install: local={app_path_str}, remote={remote_path}");
 
     let metadata = tokio::fs::metadata(app_path).await.map_err(|e| {
@@ -3016,7 +3066,7 @@ async fn install_single_hap(
                 mtime: 0,
                 options: options.to_string(),
                 path: remote_path.clone(),
-                optional_name: file_name.to_string(),
+                optional_name: remote_name,
                 update_if_new: false,
                 compress_type: 0,
                 hold_timestamp: false,
@@ -3037,26 +3087,7 @@ async fn install_single_hap(
     // AppBegin。**更新安装器自己**时尤其慢（被替换的正是发起安装的那个进程），
     // 原来的 15 秒会稳定超时，用户看到「等待 app 响应超时」而其实设备还在装。
     // 放到 60 秒；后面等安装结果本来就有 120 秒预算，放得下。
-    loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv()).await {
-            Ok(Some(task)) => match task.command {
-                HdcCommand::KernelWakeupSlavetask => {
-                    debug!("Received WakeupSlavetask from daemon, ignoring");
-                    continue;
-                }
-                HdcCommand::AppBegin => break,
-                other => return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Expected AppBegin, got {:?}", other)
-                )),
-            },
-            Ok(None) => return Err(Error::new(ErrorKind::ConnectionAborted, "Response channel closed")),
-            Err(_) => return Err(Error::new(
-                ErrorKind::TimedOut,
-                "设备未在 60 秒内开始安装（可能仍在替换正在运行的旧版本，可稍后重试）"
-            )),
-        }
-    }
+    wait_for_app_begin(rx, std::time::Duration::from_secs(60)).await?;
     info!("AppBegin received, daemon ready to receive data");
 
     crate::report_install_progress(progress_path, "transfer", base, total);
@@ -4790,6 +4821,62 @@ async fn start_usb_session(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn app_preparation_allows_information_before_begin() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for (command, payload) in [
+            (HdcCommand::KernelEcho, b"\x01Preparing transfer".to_vec()),
+            (HdcCommand::KernelWakeupSlavetask, vec![]),
+            (HdcCommand::AppBegin, vec![]),
+        ] {
+            tx.send(TaskMessage { channel_id: 1, command, payload }).unwrap();
+        }
+        super::wait_for_app_begin(&mut rx, std::time::Duration::from_millis(50)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn app_preparation_keeps_the_daemon_error_instead_of_a_protocol_label() {
+        for command in [HdcCommand::KernelEcho, HdcCommand::KernelEchoRaw] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut payload = if command == HdcCommand::KernelEcho { vec![0] } else { vec![] };
+            payload.extend_from_slice(b"CheckDir failed");
+            tx.send(TaskMessage { channel_id: 1, command, payload }).unwrap();
+            tx.send(TaskMessage { channel_id: 1, command: HdcCommand::KernelChannelClose, payload: vec![] }).unwrap();
+            let error = super::wait_for_app_begin(&mut rx, std::time::Duration::from_millis(50)).await.unwrap_err();
+            assert_eq!(error.to_string(), "App transfer preparation failed: CheckDir failed");
+        }
+    }
+
+    #[tokio::test]
+    async fn app_preparation_authorization_rejection_is_preserved() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(TaskMessage { channel_id: 1, command: HdcCommand::KernelEchoRaw,
+            payload: b"code:9568423 device is unauthorized".to_vec() }).unwrap();
+        drop(tx);
+        let error = super::wait_for_app_begin(&mut rx, std::time::Duration::from_millis(50)).await.unwrap_err();
+        assert!(error.to_string().contains("code:9568423 device is unauthorized"));
+    }
+
+    #[tokio::test]
+    async fn app_preparation_failure_cannot_be_hidden_by_a_later_begin() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(TaskMessage { channel_id: 1, command: HdcCommand::KernelEcho,
+            payload: b"\x00Permission denied".to_vec() }).unwrap();
+        tx.send(TaskMessage { channel_id: 1, command: HdcCommand::AppBegin, payload: vec![] }).unwrap();
+        let error = super::wait_for_app_begin(&mut rx, std::time::Duration::from_millis(50)).await.unwrap_err();
+        assert!(error.to_string().contains("Permission denied"));
+    }
+
+    #[tokio::test]
+    async fn app_preparation_information_cannot_extend_the_deadline() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(TaskMessage { channel_id: 1, command: HdcCommand::KernelEchoRaw,
+            payload: b"Still preparing".to_vec() }).unwrap();
+        let error = super::wait_for_app_begin(&mut rx, std::time::Duration::from_millis(5)).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("Still preparing"));
+    }
+
     #[tokio::test]
     async fn embedded_standard_client_receives_hello_without_ide_sniff_delay() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

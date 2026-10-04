@@ -13,7 +13,9 @@ function loadRuntime(mocks) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText;
   const exports = {};
-  vm.runInNewContext(code, { exports, require: name => mocks[name] || {} });
+  vm.runInNewContext(code, { exports, require: name => mocks[name] || {},
+    Date: class extends Date { static now() { return mocks.__now?.() ?? Date.now(); } },
+    setTimeout: callback => setImmediate(callback), console: { warn: () => {} } });
   return exports.NativeJobRuntime;
 }
 
@@ -22,8 +24,8 @@ function fixture(installedVersion = 0, selfUpdate = false,
   alternateCertificate = false, backupFails = false) {
   const calls = { hapHashes: 0, profileHashes: 0, nativeSigns: 0,
     nativeVerifies: 0, installedPath: '', uninstalls: 0, selfStaged: '',
-    selectedCertId: '', identityBackups: 0, identityPrepares: 0, order: [], stagedCleanup: 0,
-    profiles: [], renewals: [], previousJobs: [], saved: [] };
+    selectedCertId: '', identityBackups: 0, identityPrepares: 0, order: [], stagedCleanup: 0, installs: 0,
+    profiles: [], renewals: [], previousJobs: [], saved: [], now: Date.now() };
   let deviceVersion = installedVersion;
   const job = {
     sourceUrl: 'local', assetName: 'installer-signed.hap',
@@ -35,6 +37,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
   };
   const originalIdentity = { bundleName: job.bundleName, versionCode: job.versionCode };
   const mocks = {
+    __now: () => calls.now,
     './InstalledSigningExpiry': { InstalledSigningExpiry: {
       capture: async (value, installed) => {
         calls.capturedIdentity={...installed};value.authorizationExpiresAt=1900000000;
@@ -52,7 +55,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
       verifiedCache = false; validProfile = false; verifiedSignature = false;
       installedVersionCode = 0;
     } },
-    './LocalBundles': { LocalBundles: { liveInstalledVersion: () => installedVersion, installedVersionName: () => '',
+    './LocalBundles': { LocalBundles: { liveInstalledVersion: () => calls.liveVersion ?? installedVersion, installedVersionName: () => '',
       isKnown: version => version >= 0, isSelfBundle: () => selfUpdate, selfSigningFingerprint: () => 'A'.repeat(64),
       selfAppIdentifier: () => 'installed-app-id' } },
     './InstalledAppRegistry': { InstalledAppRegistry: { load: async () => {}, version: () => installedVersion,
@@ -135,12 +138,22 @@ function fixture(installedVersion = 0, selfUpdate = false,
     installedSigningIdentity: async () => {
       calls.signingQueries=(calls.signingQueries||0)+1;
       if (calls.queryError) throw Error('device offline');
-      return installedIdentity;
+      return installedIdentity && { ...installedIdentity };
     },
     installedVersion: async () => deviceVersion,
     uninstall: async () => { calls.uninstalls++; deviceVersion = 0; },
     install: async file => {
-      if (calls.installError) throw Error(calls.installError);
+      calls.installs++;
+      const failure = calls.installErrors?.shift() || calls.installError;
+      if (failure) {
+        calls.now += calls.failedInstallDuration || 0;
+        if (calls.applyBeforeInstallError) {
+          deviceVersion = job.versionCode; calls.liveVersion = job.versionCode;
+          if (installedIdentity) installedIdentity.updateTime++;
+        }
+        if (calls.cancelAfterInstallError) calls.cancelled = true;
+        throw Error(failure);
+      }
       calls.installedPath = file; deviceVersion = job.versionCode;
     },
     stageInstall: async file => {
@@ -615,4 +628,83 @@ test('an online queued package cannot downgrade after another source upgrades th
   await assert.rejects(() => runtime.install(job), /无法降级/);
   assert.equal(calls.uninstalls, 0); assert.equal(calls.installedPath, '');
   assert.equal(calls.selfStaged, '');
+});
+
+for (const reason of ['CheckDir failed', 'APP module transfer checksum differs',
+  'HDC command timed out', 'Expected AppBegin, got KernelEcho']) {
+  test('device submission recovers once without redownloading or resigning: ' + reason, async () => {
+    const { job, calls, runtime } = fixture();
+    calls.installErrors = [reason];
+    await runtime.install(job);
+    assert.equal(calls.installs, 2); assert.equal(calls.installedPath, job.signedPath);
+    assert.equal(calls.nativeSigns, 0); assert.equal(calls.hapHashes, 0);
+    assert.equal(calls.identityPrepares, 0); assert.equal(calls.profiles.length, 0);
+    assert.equal(calls.uninstalls, 0);
+  });
+}
+
+test('repeated temporary failure is bounded and preserves the last diagnostic', async () => {
+  const { job, calls, runtime } = fixture();
+  calls.installErrors = ['CheckDir failed', 'CheckDir failed: still busy'];
+  await assert.rejects(runtime.install(job), /still busy/);
+  assert.equal(calls.installs, 2);
+});
+
+for (const reason of ['check diff failed', 'CheckDir failed: Permission denied',
+  'CheckDir failed: EACCES', 'CheckDir failed: no space left on device',
+  'signature verification failed', 'profile is unauthorized',
+  'code:9568264 appId not same', 'code:9568423 device is unauthorized']) {
+  test('real or unknown rejection is not blindly retried: ' + reason, async () => {
+    const { job, calls, runtime } = fixture();
+    calls.installError = reason;
+    await assert.rejects(runtime.install(job));
+    assert.equal(calls.installs, 1); assert.equal(calls.uninstalls, 0);
+  });
+}
+
+test('lost receipt after a completed upgrade is reconciled instead of resubmitted', async () => {
+  const { job, calls, runtime } = fixture(1);
+  calls.installError = 'Response channel closed'; calls.applyBeforeInstallError = true;
+  await runtime.install(job);
+  assert.equal(calls.installs, 1);
+});
+
+for (const applied of [false, true]) {
+  test('same-version edit needs fresh matching signing evidence after a lost receipt: ' + applied, async () => {
+    const installed = { versionCode: 7, fingerprint: 'A'.repeat(64), updateTime: 1700000000000 };
+    const { job, calls, runtime } = fixture(7, false, true, false, installed);
+    job.reinstallRequired = true;
+    calls.installErrors = ['Response channel closed']; calls.applyBeforeInstallError = applied;
+    await runtime.install(job);
+    assert.equal(calls.installs, applied ? 1 : 2);
+  });
+}
+
+test('cancellation during recovery prevents automatic resubmission', async () => {
+  const { job, calls, runtime } = fixture();
+  calls.installError = 'CheckDir failed'; calls.cancelAfterInstallError = true;
+  await assert.rejects(runtime.install(job), /已取消/);
+  assert.equal(calls.installs, 1);
+});
+
+test('a disconnected device remains resumable instead of repeatedly submitting', async () => {
+  const { job, calls, runtime } = fixture();
+  calls.installError = 'Response channel closed'; runtime.device.connected = async () => false;
+  await assert.rejects(runtime.install(job), /无线调试已断开/);
+  assert.equal(calls.installs, 1);
+});
+
+test('a spent native timeout budget is reconciled without starting another five-minute install', async () => {
+  const { job, calls, runtime } = fixture();
+  calls.installError = 'HDC command timed out'; calls.failedInstallDuration = 300000;
+  await assert.rejects(runtime.install(job), /timed out/);
+  assert.equal(calls.installs, 1);
+});
+
+test('an unreadable installation result stops recovery instead of submitting blindly', async () => {
+  const { job, calls, runtime } = fixture();
+  calls.installError = 'Response channel closed';
+  runtime.installedVersion = async () => { throw new Error('status query unavailable'); };
+  await assert.rejects(runtime.install(job), /Response channel closed/);
+  assert.equal(calls.installs, 1);
 });

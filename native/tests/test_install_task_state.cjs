@@ -9,6 +9,7 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
 const root = path.resolve(__dirname, '../entry/src/main/ets');
 function fixture(kits = {}) {
   const modules = new Map();
+  const stats = { serializations: 0 };
   function load(name) {
     if (modules.has(name)) return modules.get(name);
     const exports = {};
@@ -17,6 +18,7 @@ function fixture(kits = {}) {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
     }).outputText;
     vm.runInNewContext(code, { exports, setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {},
+      JSON: { parse: JSON.parse, stringify: (...args) => { stats.serializations++; return JSON.stringify(...args); } },
       require: dep => dep.startsWith('.') ? load(path.posix.join(path.posix.dirname(name), dep)) : (kits[dep] || {}) });
     return exports;
   }
@@ -28,7 +30,7 @@ function fixture(kits = {}) {
   const store = new JobStore({ executeSql: async (...args) => writes.push(args) });
   const job = InstallJob.create('42:release:sha', 42, 'app.hap', 'https://example.org/a.hap', 'a'.repeat(64));
   job.bundleName = 'test.bundle'; job.versionCode = 2;
-  return { load, state, scheduler, store, job, InstallStage, writes };
+  return { load, state, scheduler, store, job, InstallStage, writes, stats };
 }
 function pageClass(name, methods, globals) {
   const source = fs.readFileSync(path.join(root, `pages/${name}.ets`), 'utf8');
@@ -640,4 +642,39 @@ test('a local task waiting in the FIFO is queued, not falsely paused or failed',
   assert.equal(ui.timeline.tone, 'normal');
   assert.equal(ui.timeline.running, false);
   f.state.unsubscribe(ui.subscription);
+});
+
+test('a burst of byte progress preserves published job identity and does not serialize or reorder metadata', async () => {
+  const f = fixture(), { index } = pages(f);
+  f.job.stage = f.InstallStage.DOWNLOADING;
+  f.state.publish(f.job); f.state.setRunning(f.job.id, true);
+  const before = f.state.snapshot()[0], pending = index.pendingJobs;
+  const revision = f.state.jobRevision(), serializations = f.stats.serializations;
+  // Simulate a runner mutation that has not been saved yet.
+  f.job.versionName = 'unsaved';
+  for (let bytes = 1; bytes <= 1000; bytes++) f.state.downloadProgress(f.job.id, bytes, 1000);
+  assert.equal(f.stats.serializations, serializations);
+  assert.equal(f.state.jobRevision(), revision);
+  assert.equal(index.pendingJobs, pending);
+  assert.equal(f.state.snapshot()[0].job, before.job);
+  assert.notEqual(f.state.snapshot()[0], before);
+  assert.equal(before.percent, 0); // historical progress is immutable
+  assert.equal(f.state.snapshot()[0].percent, 100);
+  assert.notEqual(f.state.snapshot()[0].job.versionName, 'unsaved');
+  f.state.publish(f.job);
+  assert.notEqual(f.state.jobRevision(), revision);
+  assert.notEqual(index.pendingJobs, pending);
+  assert.equal(index.pendingJobs[0].versionName, 'unsaved');
+});
+
+test('cached task ordering updates on durable saves, seeding and deletion; snapshot arrays remain independent', () => {
+  const f = fixture(), newer = { ...f.job, id: 'newer', updatedAt: f.job.updatedAt + 10 };
+  f.state.seed([f.job, newer]);
+  assert.equal(f.state.snapshot()[0].job.id, 'newer');
+  const rows = f.state.snapshot(); rows.reverse();
+  assert.equal(f.state.snapshot()[0].job.id, 'newer');
+  f.job.updatedAt = newer.updatedAt + 10; f.state.publish(f.job);
+  assert.equal(f.state.snapshot()[0].job.id, f.job.id);
+  f.state.remove(f.job.id);
+  assert.equal(f.state.snapshot()[0].job.id, 'newer');
 });

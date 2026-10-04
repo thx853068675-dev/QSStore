@@ -11,12 +11,14 @@ export struct CatalogAppTitle {
   @Prop color: string = '#17213A';
   @Prop versionColor: string = '#FFFFFF';
   @Prop versionBackground: string = '#17213A';
+  @Prop active: boolean = true;
   @State private badgeText: string = '';
   @State private badgeWidth: number = 0;
   @State private titleWidth: number = 0;
   @State private textWidth: number = 0;
   private rowWidth: number = 0;
-  private rowHeight: number = 0;
+  private measuredTitle: string = '';
+  private measuredTitleSize: number = -1;
 
   private updateBadge(): void {
     const context = this.getUIContext();
@@ -26,9 +28,13 @@ export struct CatalogAppTitle {
       })));
     this.badgeText = layout.text;
     this.badgeWidth = layout.width;
-    this.textWidth = context.px2vp(context.getMeasureUtils().measureText({
-      textContent: this.title, fontSize: this.titleSize, fontWeight: FontWeight.Bold
-    }));
+    if (this.measuredTitle !== this.title || this.measuredTitleSize !== this.titleSize) {
+      this.textWidth = context.px2vp(context.getMeasureUtils().measureText({
+        textContent: this.title, fontSize: this.titleSize, fontWeight: FontWeight.Bold
+      }));
+      this.measuredTitle = this.title;
+      this.measuredTitleSize = this.titleSize;
+    }
     this.titleWidth = Math.min(this.textWidth,
       Math.max(0, this.rowWidth - (this.badgeWidth > 0 ? this.badgeWidth + 5 : 0)));
   }
@@ -37,7 +43,7 @@ export struct CatalogAppTitle {
     Flex({ direction: FlexDirection.Row, alignItems: ItemAlign.Center }) {
       if (this.titleLines === 1) {
         BouncingAppName({ title: this.title, fontSize: this.titleSize, color: this.color,
-          viewportWidth: this.titleWidth, textWidth: this.textWidth }).flexShrink(1)
+          viewportWidth: this.titleWidth, textWidth: this.textWidth, active: this.active }).flexShrink(1)
       } else {
         Text(this.title).fontSize(this.titleSize).fontWeight(FontWeight.Bold).fontColor(this.color)
           .maxLines(this.titleLines).textOverflow({ overflow: TextOverflow.Ellipsis }).flexShrink(1)
@@ -55,11 +61,8 @@ export struct CatalogAppTitle {
       }
     }.width('100%').onSizeChange((_old: SizeOptions, size: SizeOptions) => {
       const width = Number(size.width);
-      const height = Number(size.height);
-      if (Number.isFinite(width) && width > 0 && (Math.abs(width - this.rowWidth) > 0.1 ||
-        Math.abs(height - this.rowHeight) > 0.1)) {
+      if (Number.isFinite(width) && width > 0 && Math.abs(width - this.rowWidth) > 0.1) {
         this.rowWidth = width;
-        this.rowHeight = height;
         this.updateBadge();
       }
     })

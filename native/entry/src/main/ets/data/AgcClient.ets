@@ -3,6 +3,7 @@ import { DeveloperAccount } from './DeveloperAccount';
 import { AccountService } from './AccountService';
 import { ServiceFailure, ClassifiedFailure } from './ServiceFailure';
 import { FailureKind } from '../jobs/InstallJob';
+import { certificateQuotaFailure } from './CertificateQuota';
 
 const AGC_API = 'https://connect-api.cloud.huawei.com/api';
 
@@ -141,7 +142,9 @@ export class AgcClient {
     body.csr = csrPem;
     body.certName = certName;
     body.certType = 1;
-    const data = await this.request('/cps/harmony-cert-manage/v1/cert/add', body);
+    let data: Record<string, Object>;
+    try { data = await this.request('/cps/harmony-cert-manage/v1/cert/add', body); }
+    catch (error) { throw certificateQuotaFailure(error as Error); }
     const created = data['harmonyCert'] as Record<string, Object> | undefined;
     if (!created || String(created['id'] ?? '').length === 0) {
       const ret = data['ret'] as Record<string, Object> | undefined;

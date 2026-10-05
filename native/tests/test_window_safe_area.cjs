@@ -50,7 +50,8 @@ function fixture() {
       BackgroundInstallTask: { configure: () => {}, onForeground: () => {} }
     } : name === '../jobs/WirelessDebugLifecycle' ? {
       WirelessDebugLifecycle: { configure() {}, onForeground() {}, onBackground() {} }
-    } : name === '../jobs/ForegroundIdle' ? { ForegroundIdle: { onForeground() {}, onBackground() {} } } : name === '../jobs/ExternalInstallOpen' ? { ExternalInstallOpen: { receive: () => false, openPending() {}, suspendRouting() {} } } : name === '@kit.AbilityKit' ? {
+    } : name === '../data/AppearancePreferences' ? { AppearancePreferences: { async load() {} } }
+      : name === '../jobs/ForegroundIdle' ? { ForegroundIdle: { onForeground() {}, onBackground() {} } } : name === '../jobs/ExternalInstallOpen' ? { ExternalInstallOpen: { receive: () => false, openPending() {}, suspendRouting() {} } } : name === '@kit.AbilityKit' ? {
       UIAbility: class {}, ConfigurationConstant: { ColorMode: { COLOR_MODE_DARK: 1 } }
     } : {
       window: { AvoidAreaType: { TYPE_SYSTEM: 0, TYPE_CUTOUT: 1 } },
@@ -69,6 +70,25 @@ function fixture() {
     } };
   return { ability, stage, state, storage, handlers };
 }
+
+test('saved appearance controls page colors and transparent system bars independently of the system theme', async () => {
+  const f = fixture();
+  f.ability.onWindowStageCreate(f.stage);
+  await new Promise(setImmediate);
+  f.storage.set('appearanceMode', 'dark');
+  f.ability.onForeground(); await new Promise(setImmediate);
+  assert.equal(f.storage.get('darkMode'), true);
+  assert.equal(f.state.bars.statusBarContentColor, '#EAF0F7');
+  f.ability.context.config.colorMode = 1;
+  f.storage.set('appearanceMode', 'light');
+  f.ability.onForeground(); await new Promise(setImmediate);
+  assert.equal(f.storage.get('darkMode'), false);
+  assert.equal(f.state.bars.statusBarContentColor, '#17213A');
+  f.storage.set('appearanceMode', 'system');
+  f.ability.onForeground(); await new Promise(setImmediate);
+  assert.equal(f.storage.get('darkMode'), true);
+  assert.equal(f.state.bars.navigationBarColor, '#00000000');
+});
 
 test('edge-to-edge startup reads real insets before UI content without obtaining UIContext', async () => {
   const f = fixture();

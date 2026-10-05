@@ -8,6 +8,7 @@ import { AgcProfile } from '../data/AgcProfile';
 import { LocalProfileStore } from '../data/LocalProfileStore';
 import { InstallJob, InstallStage } from './InstallJob';
 import { InstalledAppRegistry, InstalledSigningIdentity } from './InstalledAppRegistry';
+import { ForegroundIdle } from './ForegroundIdle';
 
 /** A retained Profile is a display estimate until tied to an installed build. */
 export class SigningExpiryMaterial {
@@ -143,18 +144,23 @@ export class InstalledSigningExpiry {
   }
 
   /** Read each retained file once per UI refresh, only decoding certificates for requested bundles. */
-  static async estimateMaterials(context: common.UIAbilityContext, bundleNames: string[]): Promise<SigningExpiryMaterial[]> {
+  static async estimateMaterials(context: common.UIAbilityContext, bundleNames: string[],
+    active: () => boolean = (): boolean => true): Promise<SigningExpiryMaterial[]> {
     const result: SigningExpiryMaterial[] = [];
     if (!bundleNames.length) return result;
     const wanted = new Set<string>(bundleNames);
     const fingerprints = new Set<string>();
     for (const name of bundleNames) {
+      // Display-only certificate probes must yield between synchronous system IPCs.
+      await ForegroundIdle.wait();
+      if (!active()) return [];
       const current = InstalledSigningExpiry.current(name) ?? InstalledAppRegistry.signingIdentity(name);
       if (current?.fingerprint) fingerprints.add(current.fingerprint);
     }
     let paths: string[] = [];
     try { paths = LocalProfileStore.retainedFiles(context); } catch (_) { return result; }
     for (let i = 0; i < paths.length; i++) {
+      if (!active()) return [];
       try {
         const path = paths[i];
         const digest = (await hash.hash(path, 'sha256')).toLowerCase();

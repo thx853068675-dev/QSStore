@@ -879,6 +879,6 @@ napi_module module = {
 
 }  // namespace
 
-extern "C" __attribute__((constructor)) void RegisterHapCore() {
+extern "C" __attribute__((constructor, visibility("default"))) void RegisterHapCore() {
   napi_module_register(&module);
 }

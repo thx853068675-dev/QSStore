@@ -18,7 +18,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# Flutter / Dart / HarmonyOS generated files
+# HarmonyOS / local tool generated files
 **/.dart_tool/
 **/build/
 native/rust_signer/target/
@@ -29,18 +29,33 @@ native/hdc_transport/**/target/
 **/oh_modules/
 **/.ohpm/
 **/node_modules/
-app/.flutter-plugins*
 **/local.properties
 **/.metadata
-app/ohos/har/
-app/ohos/entry/libs/arm64-v8a/libapp.so
-app/plugins/ohos_adapter/example/
+**/.cxx/
 
 # 构建产物：Rust 的 target/ 会到几百 MB，误提交一次就永久留在历史里
 **/target/
 
-# Keep only the final release artifact, added explicitly.
+# Release assets belong in Releases, not the source tree.
+*.hap
+*.app
+*.hsp
+*.har
+*.so
+*.a
 dist/
 
-# Technical documents stay in the private repository.
+# Local evidence, design experiments, administration client and operations.
+# Required runtime resources, source archives and licenses stay tracked.
 /docs/
+/design/
+/monitor/
+/.local/
+/tmpFile*
+/.idea/
+/.vscode/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3

@@ -143,7 +143,7 @@ function page(names, globals) {
     assert.notEqual(start, -1, name);
     return source.slice(start, source.indexOf('\n  }', start) + 4);
   });
-  const box = { ...globals };
+  const box = { StorePageMotion: { dismissFrame: async () => {} }, ...globals };
   vm.runInNewContext(ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);

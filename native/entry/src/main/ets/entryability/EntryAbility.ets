@@ -5,6 +5,7 @@ import { window, display } from '@kit.ArkUI';
 import { BackgroundInstallTask } from '../jobs/BackgroundInstallTask';
 import { ExternalInstallOpen } from '../jobs/ExternalInstallOpen';
 import { ForegroundIdle } from '../jobs/ForegroundIdle';
+import { AppearancePreferences } from '../data/AppearancePreferences';
 
 // 背景交给页面连续绘制，系统栏仅按主题切换文字颜色。
 const BARS_LIGHT: window.SystemBarProperties = {
@@ -24,6 +25,7 @@ export default class EntryAbility extends UIAbility {
   private mainWindow?: window.Window;
   private backgroundWindow?: window.Window;
   private contentReady: boolean = false;
+  private onAppearanceChanged = (): void => { this.applyAppearance(); };
   private onAvoidAreaChange = (options: window.AvoidAreaOptions): void => {
     if (options.type === window.AvoidAreaType.TYPE_SYSTEM ||
       options.type === window.AvoidAreaType.TYPE_CUTOUT) this.syncStatusBarInset();
@@ -48,7 +50,9 @@ export default class EntryAbility extends UIAbility {
   }
 
   private isDark(): boolean {
-    return this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+    const mode = AppStorage.get<string>('appearanceMode') ?? 'system';
+    return mode === 'dark' || (mode === 'system' &&
+      this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
   }
 
   private applyAppearance(): Promise<void> {
@@ -76,6 +80,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+    this.context.eventHub.on('appearance-changed', this.onAppearanceChanged);
     BackgroundInstallTask.configure(this.context);
     InstallCoordinator.configure(this.context);
     WirelessDebugLifecycle.configure(this.context);
@@ -94,7 +99,7 @@ export default class EntryAbility extends UIAbility {
     // 先完成全屏，再设置透明系统栏，避免全屏切换覆盖之前的颜色。
     mainWindow.setWindowLayoutFullScreen(true).catch((error: Error) => {
       console.warn('Unable to enable full-screen layout: ' + JSON.stringify(error));
-    }).then(() => this.applyAppearance()).then(() => {
+    }).then(() => AppearancePreferences.load(this.context)).then(() => this.applyAppearance()).then(() => {
       if (this.mainWindow !== mainWindow) return;
       this.syncStatusBarInset();
       windowStage.loadContent('pages/Index', (error) => {
@@ -138,4 +143,6 @@ export default class EntryAbility extends UIAbility {
     ForegroundIdle.onBackground();
     WirelessDebugLifecycle.onBackground();
   }
+
+  onDestroy(): void { this.context.eventHub.off('appearance-changed', this.onAppearanceChanged); }
 }

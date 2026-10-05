@@ -8,17 +8,21 @@ import { StoreLayout } from '../theme/StoreDesign';
 export class DiscoverMotion {
   @Track scrollOffset: number = 0;
   @Track pullOffset: number = 0;
+  @Track showTop: boolean = false;
   private startOffset: number = 0;
 
   reachStart(offset: number): void {
     if (Number.isFinite(offset)) this.startOffset = offset;
     this.scrollOffset = 0;
+    this.showTop = false;
   }
 
   scroll(offset: number, titleHeight: number): number {
     const distance = this.pullOffset > 0 ? 0 : Math.max(0, offset - this.startOffset);
     const next = Math.min(distance, Math.max(0, titleHeight));
     if (next !== this.scrollOffset) this.scrollOffset = next;
+    const showTop = distance > 240;
+    if (showTop !== this.showTop) this.showTop = showTop;
     return distance;
   }
 
@@ -31,6 +35,7 @@ export class DiscoverMotion {
 
 @Component
 export struct DiscoverHeader {
+  @StorageProp('routeTransitioning') private routeTransitioning:boolean=false;
   @ObjectLink motion: DiscoverMotion;
   @Prop darkMode: boolean = false;
   @Prop statusInset: number = 0;
@@ -73,7 +78,7 @@ export struct DiscoverHeader {
             .width('calc(100% - ' + (this.inset * 2) + 'vp)')
             .constraintSize({ maxWidth: StoreLayout.contentWidth }).height(46).margin({ top: 8 })
             .onSizeChange((_old: SizeOptions, size: SizeOptions) => { this.searchWidth = Number(size.width); })
-            .bindPopup(this.active && this.searchWidth > 0, {
+            .bindPopup(this.active && !this.routeTransitioning && this.searchWidth > 0, {
               builder: this.floatingSearch, width: this.searchWidth, radius: 23,
               placement: Placement.Bottom, targetSpace: 0, offset: { x: 0, y: -46 },
               enableArrow: false, autoCancel: false, focusable: false, mask: false,

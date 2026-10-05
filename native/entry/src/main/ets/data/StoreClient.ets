@@ -4,6 +4,7 @@ import { http } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { image } from '@kit.ImageKit';
 import { CatalogApp } from './CatalogApp';
+import { CatalogCache, CachedIcon } from './CatalogCache';
 import { ReleaseInfo } from './ReleaseInfo';
 import { DeveloperAccount } from './DeveloperAccount';
 import { AccountService } from './AccountService';
@@ -86,6 +87,7 @@ class PublicResponse {
   etag: string = '';
   data: Record<string, Object> = {};
   bytes: number = 0;
+  receivedAt: number = 0;
 }
 
 export interface RenewalCatalog {
@@ -103,10 +105,18 @@ export class StoreClient implements RenewalCatalog {
     return apps;
   }
   private static responses: Map<string, PublicResponse> = new Map();
+  private static publicReads: Map<string, Promise<Record<string, Object>>> = new Map();
+  private static iconReads: Map<string, Promise<ArrayBuffer | undefined>> = new Map();
+  private static responseEpoch: number = 0;
+  private static invalidatePublic(): void {
+    StoreClient.responseEpoch++;
+    StoreClient.responses.clear();
+    StoreClient.publicReads.clear();
+  }
   private static remember(path: string, etag: string, data: Record<string, Object>): void {
-    if (!etag) return;
     const row = new PublicResponse();
     row.etag = etag; row.data = data; row.bytes = JSON.stringify(data).length * 2;
+    row.receivedAt = Date.now();
     if (row.bytes > 2 * 1024 * 1024) return;
     StoreClient.responses.delete(path);
     StoreClient.responses.set(path, row);
@@ -133,10 +143,11 @@ export class StoreClient implements RenewalCatalog {
   private async requestData(path: string, method: http.RequestMethod,
     account?: DeveloperAccount, body?: Object, retried: boolean = false): Promise<Record<string, Object>> {
     const request = http.createHttp();
+    const epoch = StoreClient.responseEpoch;
     try {
       const headers: Record<string, string> = {};
       const cached = !account && method === http.RequestMethod.GET ? StoreClient.responses.get(path) : undefined;
-      if (cached) headers['If-None-Match'] = cached.etag;
+      if (cached?.etag) headers['If-None-Match'] = cached.etag;
       if (account) {
         if (account.jwtToken.length === 0 || account.accessToken.length === 0) {
           throw new ServiceFailure(FailureKind.ACCOUNT, '请先登录华为开发者账号', 401);
@@ -162,7 +173,10 @@ export class StoreClient implements RenewalCatalog {
       };
       if (body) options.extraData = JSON.stringify(body);
       const response = await request.request(StoreClient.BASE_URL + path, options);
-      if (response.responseCode === 304 && cached) return cached.data;
+      if (response.responseCode === 304 && cached) {
+        if (epoch === StoreClient.responseEpoch) cached.receivedAt = Date.now();
+        return cached.data;
+      }
       if (response.responseCode === 401 && account && !retried) {
         AccountService.configure(this.context);
         await AccountService.refresh(account, true);
@@ -183,10 +197,13 @@ export class StoreClient implements RenewalCatalog {
         throw new Error('商店服务返回 ' + response.responseCode);
       }
       const data = envelope['data'] as Record<string, Object>;
-      if (!account && method === http.RequestMethod.GET) {
+      if (!account && method === http.RequestMethod.GET && epoch === StoreClient.responseEpoch) {
         const responseHeaders = response.header as Record<string, Object>;
         const etag = String(responseHeaders?.['etag'] ?? responseHeaders?.['ETag'] ?? '');
         StoreClient.remember(path, etag, data);
+      }
+      if (method !== http.RequestMethod.GET && /^\/api\/v1\/(apps\/|me\/apps|submit\/confirm)/.test(path)) {
+        StoreClient.invalidatePublic();
       }
       return data;
     } finally {
@@ -194,8 +211,21 @@ export class StoreClient implements RenewalCatalog {
     }
   }
 
-  private getData(path: string, account?: DeveloperAccount): Promise<Record<string, Object>> {
-    return this.requestData(path, http.RequestMethod.GET, account);
+  private getData(path: string, account?: DeveloperAccount,
+    freshnessMs: number = 0): Promise<Record<string, Object>> {
+    // 私有数据不共享；公开读取按完整路径（含频道、分页）合并。
+    if (account) return this.requestData(path, http.RequestMethod.GET, account);
+    const cached = StoreClient.responses.get(path);
+    if (cached && freshnessMs > 0 && Date.now() - cached.receivedAt < freshnessMs) {
+      return Promise.resolve(cached.data);
+    }
+    const existing = StoreClient.publicReads.get(path);
+    if (existing) return existing;
+    const read = this.requestData(path, http.RequestMethod.GET).finally(() => {
+      if (StoreClient.publicReads.get(path) === read) StoreClient.publicReads.delete(path);
+    });
+    StoreClient.publicReads.set(path, read);
+    return read;
   }
 
   /// ``page`` is 1-based. ``discover`` ranks featured apps before pagination.
@@ -219,7 +249,7 @@ export class StoreClient implements RenewalCatalog {
   }
 
   async appDetail(id: number): Promise<CatalogApp> {
-    const app = CatalogApp.fromJson(await this.getData('/api/v1/apps/' + id));
+    const app = CatalogApp.fromJson(await this.getData('/api/v1/apps/' + id, undefined, 30000));
     StoreClient.viewedApps.set(id, CatalogApp.copy(app));
     if (StoreClient.viewedApps.size > 32) StoreClient.viewedApps.delete(Array.from(StoreClient.viewedApps.keys())[0]);
     return app;
@@ -231,10 +261,35 @@ export class StoreClient implements RenewalCatalog {
    * 单独抽出来是为了能缓存：PixelMap 不能序列化，但字节可以。冷启动时先用
    * 缓存的字节直接画出图标，再去后端刷新。
    */
-  async appIconBytes(app: CatalogApp): Promise<ArrayBuffer | undefined> {
+  private async cachedIconBytes(app: CatalogApp, useCache: boolean): Promise<ArrayBuffer | undefined> {
     if (app.id <= 0 || app.iconUrl !== '/api/v1/apps/' + app.id + '/icon') {
       return undefined;
     }
+    if (useCache) {
+      const cached = await CatalogCache.loadIcons(this.context, [app]);
+      const bytes = cached.get(app.id);
+      if (bytes !== undefined) return bytes;
+    }
+    const key = app.id + ':' + app.iconRev;
+    const existing = StoreClient.iconReads.get(key);
+    if (existing) return existing;
+    const read = this.appIconBytes(app).then(async (bytes: ArrayBuffer | undefined) => {
+      if (bytes !== undefined && app.iconRev && CatalogCache.iconWithinLimit(bytes)) {
+        const icon = new CachedIcon();
+        icon.id = String(app.id); icon.rev = app.iconRev;
+        icon.data = new util.Base64Helper().encodeToStringSync(new Uint8Array(bytes));
+        await CatalogCache.saveIcons(this.context, [icon]);
+      }
+      return bytes;
+    }).finally(() => {
+      if (StoreClient.iconReads.get(key) === read) StoreClient.iconReads.delete(key);
+    });
+    StoreClient.iconReads.set(key, read);
+    return read;
+  }
+
+  async appIconBytes(app: CatalogApp): Promise<ArrayBuffer | undefined> {
+    if (app.id <= 0 || app.iconUrl !== '/api/v1/apps/' + app.id + '/icon') return undefined;
     const request = http.createHttp();
     try {
       // The endpoint path stays stable when the server replaces an icon. Give
@@ -265,15 +320,18 @@ export class StoreClient implements RenewalCatalog {
   }
 
   async appIcon(app: CatalogApp): Promise<image.PixelMap | undefined> {
-    const bytes = await this.appIconBytes(app);
-    if (bytes === undefined) return undefined;
-    try {
-      const source = image.createImageSource(bytes);
-      try { return await source.createPixelMap(); }
-      finally { await source.release(); }
-    } catch (_) {
-      return undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const bytes = await this.cachedIconBytes(app, attempt === 0);
+      if (bytes === undefined) return undefined;
+      try {
+        const source = image.createImageSource(bytes);
+        try { return await source.createPixelMap({ desiredSize: { width: 256, height: 256 } }); }
+        finally { await source.release(); }
+      } catch (_) {
+        // 本地缓存损坏时只绕过一次缓存取新图，不能持续返回坏图。
+      }
     }
+    return undefined;
   }
 
   /** Enqueue a bounded server refresh; heavy collection runs in the worker. */
@@ -287,7 +345,7 @@ export class StoreClient implements RenewalCatalog {
   async refreshStatus(appId: number): Promise<string> {
     const data = await this.getData('/api/v1/apps/' + appId + '/refresh');
     const status = String(data['status'] ?? 'done');
-    if (status === 'done') StoreClient.responses.clear();
+    if (status === 'done') StoreClient.invalidatePublic();
     if (status === 'failed') throw new Error(String(data['last_error'] ?? '仓库检查失败'));
     return status;
   }
@@ -322,7 +380,7 @@ export class StoreClient implements RenewalCatalog {
     const data = await this.getData('/api/v1/apps/' + appId + '/releases?page=' +
       Math.max(1, Math.floor(page)) + '&page_size=' +
       Math.min(50, Math.max(1, Math.floor(pageSize))) +
-      '&prerelease=' + (includePrerelease ? '1' : '0'));
+      '&prerelease=' + (includePrerelease ? '1' : '0'), undefined, 30000);
     const result = new ListPage<ReleaseInfo>();
     const raw = data['items'] as Array<Record<string, Object>> | undefined;
     result.items = (raw ?? []).map((row: Record<string, Object>) => ReleaseInfo.fromJson(row));
@@ -401,7 +459,7 @@ export class StoreClient implements RenewalCatalog {
     pageSize: number = 20): Promise<ListPage<AppReview>> {
     const data = await this.getData('/api/v1/apps/' + appId + '/reviews?page=' +
       Math.max(1, Math.floor(page)) + '&page_size=' +
-      Math.min(50, Math.max(1, Math.floor(pageSize))));
+      Math.min(50, Math.max(1, Math.floor(pageSize))), undefined, 15000);
     const result = new ListPage<AppReview>();
     const rows = data['items'] as Array<Record<string, Object>> | undefined;
     result.items = (rows ?? []).map((row: Record<string, Object>) => AppReview.fromJson(row));

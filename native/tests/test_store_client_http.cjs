@@ -22,7 +22,7 @@ const source = fs.readFileSync(sourcePath, 'utf8');
 // requestData 是 private，但转译后就是普通方法；连同它依赖的 getData 一起取。
 function method(name) {
   // 方法可能是 private，也可能没有修饰符（public）
-  const start = source.search(new RegExp(`^  (?:private |public )?(?:async )?${name}\\(`, 'm'));
+  const start = source.search(new RegExp(`^  (?:private |public )?(?:static )?(?:async )?${name}\\(`, 'm'));
   assert.notEqual(start, -1, `production method ${name} exists`);
   const end = source.indexOf('\n  }', start);
   assert.notEqual(end, -1);
@@ -32,8 +32,10 @@ function method(name) {
 const code = ts.transpileModule(`class StoreClient {
   static BASE_URL = 'https://example.invalid';
   static PUBLIC_KEY_SHA256 = 'x';
+  static publicReads = new Map();
+  static responseEpoch = 0;
   caData = '';
-  ${['requestData', 'getData', 'removeMyApp'].map(method).join('\n')}
+  ${['requestData', 'getData', 'removeMyApp', 'invalidatePublic'].map(method).join('\n')}
 }; globalThis.StoreClient = StoreClient;`,
 { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
 

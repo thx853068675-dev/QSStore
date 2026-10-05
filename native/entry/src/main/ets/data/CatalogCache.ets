@@ -35,6 +35,27 @@ export class CatalogCache {
     return preferences.getPreferences(context, STORE_NAME);
   }
 
+  /** 图标和目录实际保存的缓存数据；不计入 Preferences 容器本身的固定开销。 */
+  static async size(context: common.UIAbilityContext): Promise<number> {
+    try {
+      const store = await CatalogCache.store(context);
+      const values = await store.getAll() as Record<string, Object>;
+      const encoder = new util.TextEncoder();
+      let bytes = 0;
+      for (const key of Object.keys(values)) {
+        if (key !== KEY_CATALOG && key !== KEY_ICONS && !/^icon-[1-9][0-9]*$/.test(key)) continue;
+        if (typeof values[key] === 'string') bytes += encoder.encodeInto(values[key] as string).byteLength;
+      }
+      return bytes;
+    } catch (_) { return 0; }
+  }
+
+  static async clear(context: common.UIAbilityContext): Promise<void> {
+    const store = await CatalogCache.store(context);
+    await store.clear();
+    await store.flush();
+  }
+
   static async load(context: common.UIAbilityContext): Promise<CatalogApp[]> {
     try {
       const store = await CatalogCache.store(context);

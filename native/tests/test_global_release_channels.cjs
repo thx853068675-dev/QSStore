@@ -143,15 +143,15 @@ test('returning to the list start reveals the title before refresh and the top a
   }).outputText, box);
   let offset = -50, jumped;
   const ui = new box.Page(); Object.assign(ui, { discoverMotion: new box.Motion(),
-    discoverTitleHeight: 88, discoverCanRefresh: true, discoverShowTop: false,
+    discoverTitleHeight: 88, discoverCanRefresh: true,
     discoverScroller: { currentOffset: () => ({ yOffset: offset }), scrollEdge(...args) { jumped = args; offset = -50; } } });
   ui.revealDiscoverTop(); offset = 1000; ui.syncDiscoverScroll();
-  assert.equal(ui.discoverCanRefresh, false); assert.equal(ui.discoverShowTop, true);
+  assert.equal(ui.discoverCanRefresh, false); assert.equal(ui.discoverMotion.showTop, true);
   offset = 0; ui.syncDiscoverScroll(); assert.equal(ui.discoverMotion.scrollOffset, 50);
   assert.equal(ui.discoverCanRefresh, false, 'partially collapsed title cannot start refreshing');
   offset = -50; ui.syncDiscoverScroll(); assert.equal(ui.discoverMotion.scrollOffset, 0);
-  assert.equal(ui.discoverCanRefresh, true); assert.equal(ui.discoverShowTop, false);
+  assert.equal(ui.discoverCanRefresh, true); assert.equal(ui.discoverMotion.showTop, false);
   offset = 1000; ui.syncDiscoverScroll(); ui.backToDiscoverTop();
   assert.deepEqual(jumped, ['top']); assert.equal(ui.discoverMotion.scrollOffset, 0);
-  assert.equal(ui.discoverCanRefresh, true); assert.equal(ui.discoverShowTop, false);
+  assert.equal(ui.discoverCanRefresh, true); assert.equal(ui.discoverMotion.showTop, false);
 });

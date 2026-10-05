@@ -4,6 +4,7 @@
     "pages/Detail",
     "pages/InstalledDetail",
     "pages/PackageTools",
-    "pages/LocalInstall"
+    "pages/LocalInstall",
+    "pages/Settings"
   ]
 }

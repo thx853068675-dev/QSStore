@@ -1,56 +1,31 @@
-"""Build and sign a same-bundle device candidate, restoring preview sources.
+"""Sign a device candidate through the same clean, unsigned release build path.
 
-The formal package is only suitable for the device named in its AGC debug
-profile. This script never requests a certificate or publishes the output.
+This never requests certificates or publishes the output.
 """
-
 import argparse
-import os
 from pathlib import Path
 import subprocess
 import sys
-
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / 'AppScope/app.json5'
-HVIGOR = Path('/Applications/DevEco-Studio.app/Contents/tools/hvigor/bin/hvigorw')
-PREVIEW_BUNDLE = 'com.tonghongxiang.hapstore.nativepreview'
 FORMAL_BUNDLE = 'com.tonghongxiang.hapstore'
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--profile', type=Path, required=True)
-    parser.add_argument('--cert', type=Path, required=True)
-    parser.add_argument('--key', type=Path, required=True)
-    parser.add_argument('--output', type=Path, required=True)
+    for name in ('profile', 'cert', 'key', 'output'):
+        parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--build-mode', choices=('release', 'debug'), default='release')
     args = parser.parse_args()
-    original = APP.read_text()
-    if original.count(PREVIEW_BUNDLE) != 1:
-        raise ValueError('Expected the checked-in preview app identity')
-    # 版本名不再带预览后缀，正式包与预览包的差别只剩包名
-    formal = original.replace(PREVIEW_BUNDLE, FORMAL_BUNDLE)
-    environment = dict(os.environ)
-    environment.setdefault('DEVECO_SDK_HOME', '/Applications/DevEco-Studio.app/Contents/sdk')
-    environment.setdefault('JAVA_HOME',
-                           '/Applications/DevEco-Studio.app/Contents/jbr/Contents/Home')
-    # hvigorw 需要 node。从 DevEco 的 tools 目录补进 PATH，否则在没配过环境的
-    # 终端里会以 "Command ... returned non-zero exit status 1" 失败，看不出原因。
-    deveco_node = '/Applications/DevEco-Studio.app/Contents/tools/node/bin'
-    if os.path.isdir(deveco_node):
-        environment['PATH'] = deveco_node + os.pathsep + environment.get('PATH', '')
-    try:
-        APP.write_text(formal)
-        subprocess.run([str(HVIGOR), 'assembleHap', '-p', 'product=default',
-                        '-p', 'buildMode=debug', '--no-daemon'], cwd=ROOT,
-                       env=environment, check=True)
+    with tempfile.TemporaryDirectory(prefix='qingqi-candidate-') as directory:
+        unsigned = Path(directory) / 'candidate-unsigned.hap'
+        subprocess.run([sys.executable, str(ROOT / 'tools/build_unsigned_formal.py'),
+                        '--output', str(unsigned), '--build-mode', args.build_mode], check=True)
         subprocess.run([sys.executable, str(ROOT / 'tools/sign_preview.py'),
-                        '--input', str(ROOT / 'entry/build/default/outputs/default/entry-default-unsigned.hap'),
-                        '--profile', str(args.profile), '--cert', str(args.cert),
-                        '--key', str(args.key), '--output', str(args.output),
-                        '--bundle', FORMAL_BUNDLE], cwd=ROOT, check=True)
-    finally:
-        APP.write_text(original)
+                        '--input', str(unsigned), '--profile', str(args.profile.resolve()),
+                        '--cert', str(args.cert.resolve()), '--key', str(args.key.resolve()),
+                        '--output', str(args.output.resolve()), '--bundle', FORMAL_BUNDLE], check=True)
 
 
 if __name__ == '__main__':

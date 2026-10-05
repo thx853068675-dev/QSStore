@@ -1,6 +1,7 @@
 import { Want } from '@kit.AbilityKit';
 import { router, promptAction } from '@kit.ArkUI';
 import { LocalImport } from './LocalImport';
+import { StorePageMotion } from '../theme/StorePageMotion';
 
 /** One pending user selection; receiving a file never creates or starts an install. */
 export class ExternalInstallOpen {
@@ -43,7 +44,7 @@ export class ExternalInstallOpen {
     if (current.path === 'pages/LocalInstall' || current.name === 'LocalInstall') return;
     ExternalInstallOpen.routing = true;
     const selection = ExternalInstallOpen.revision;
-    router.pushUrl({ url: 'pages/LocalInstall', params: { external: true } }, router.RouterMode.Single)
+    StorePageMotion.pushUrl({ url: 'pages/LocalInstall', params: { external: true } }, router.RouterMode.Single)
       .catch((error: Error) => {
         console.warn('FileOpen route failed: ' + String(error));
         promptAction.showToast({ message: '暂时无法打开签装预览，请重新打开文件' });

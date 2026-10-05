@@ -260,7 +260,7 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) throw new Error('应用包名无效');
     if (!await this.connected()) throw new Error('无线调试已断开');
     const output = await this.command(3, bundleName);
-    InstalledAppRegistry.parseVersion(output, bundleName);
+    InstalledAppRegistry.observe(output, bundleName);
     const start = output.indexOf('{'), end = output.lastIndexOf('}');
     const result = JSON.parse(output.substring(start, end + 1)) as Record<string, Object>;
     if (result['name'] !== bundleName) throw new Error('设备信息与应用身份不一致');
@@ -268,6 +268,7 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
       const label=(await this.command(14,bundleName)).trim();
       if(label.length>0 && label.length<=256 && !/[\r\n]|\[Fail\]|error:|^\$string:/i.test(label)) {result['displayName']=label;InstalledAppRegistry.rememberDisplayName(bundleName,label);}
     }catch(_){}
+    await InstalledAppRegistry.persist(this.context);
     return result;
   }
 
@@ -488,11 +489,13 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
       const all = InstalledAppRegistry.parseNames(await this.command(6));
       for (const name of names) {
         const previousVersion = InstalledAppRegistry.version(name);
+        const previousUpdateTime = InstalledAppRegistry.installationTime(name, previousVersion);
         try {
           const output = await this.command(3, name);
           if (output.includes('[Fail]')) throw new Error('读取应用信息失败');
           const version = InstalledAppRegistry.observe(output, name);
-          if (version !== previousVersion || InstalledAppRegistry.displayName(name).length === 0) {
+          if (version !== previousVersion || InstalledAppRegistry.displayName(name).length === 0 ||
+            InstalledAppRegistry.installationTime(name, version) !== previousUpdateTime) {
             try { InstalledAppRegistry.rememberDisplayName(name, await this.command(14, name)); } catch (_) {}
           }
         } catch (error) {

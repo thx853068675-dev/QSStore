@@ -12,6 +12,7 @@ import { JobStore } from '../jobs/JobStore';
 import { InstalledSigningExpiry } from '../jobs/InstalledSigningExpiry';
 import { Palette } from '../theme/Palette';
 import { StoreImmersiveIconButton,StoreLayout,StoreTopFade } from '../theme/StoreDesign';
+import { StorePageMotion } from '../theme/StorePageMotion';
 
 @Entry
 @Component
@@ -24,6 +25,7 @@ struct InstalledDetail {
   @State private searchText:string='';
   @State private query:string='';
   @State private informationRevision:number=0;
+  @StorageProp('routeTransitioning') private routeTransitioning:boolean=false;
   @State private headerVisible:boolean=false;
   @State private searchWidth:number=0;
   @State private pixels:image.PixelMap|null=null;
@@ -40,6 +42,12 @@ struct InstalledDetail {
   private ownedPixels?:image.PixelMap;
   private searchDebounce:InspectionSearch=new InspectionSearch((query:string)=>{this.query=query;this.applySearch();if(query)this.scroller.scrollTo({xOffset:0,yOffset:0});});
   private colors():Palette{return Palette.forMode(this.darkMode);}
+  pageTransition() {
+    PageTransitionEnter(StorePageMotion.options(RouteType.Push)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionEnter(StorePageMotion.stationary(RouteType.Pop)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionExit(StorePageMotion.stationary(RouteType.Push)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionExit(StorePageMotion.options(RouteType.Pop)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
+  }
   aboutToAppear():void {
     this.headerVisible=true;
     const params=router.getParams() as Record<string,Object>;
@@ -56,6 +64,7 @@ struct InstalledDetail {
     this.returning=true;
     // Material popups share the page's lifetime. Remove all overlays before routing back.
     this.headerVisible=false;
+    StorePageMotion.prepare();
     this.backTimer=setTimeout(()=>{if(!this.disposed)router.back({url:'pages/Index'});},32);
   }
   private applySearch():void{this.matches=InstalledInspection.filter(this.sections,this.query);this.informationRevision++;}
@@ -114,7 +123,7 @@ struct InstalledDetail {
         StoreImmersiveIconButton({symbol:$r('sys.symbol.chevron_left'),label:'返回',controlId:'installed-info-back',visible:this.headerVisible,action:()=>this.back(),backAction:()=>this.back()});
         if(deviceInfo.sdkApiVersion>=26&&uiMaterial.isImmersiveMaterialSupported()){
           Column(){}.height(44).layoutWeight(1).onSizeChange((_old:SizeOptions,size:SizeOptions)=>{const width=Number(size.width);if(Number.isFinite(width)&&width>0&&Math.abs(width-this.searchWidth)>0.5)this.searchWidth=width;})
-            .bindPopup(this.headerVisible&&this.searchWidth>0,{builder:this.searchInput,width:this.searchWidth,radius:22,
+            .bindPopup(this.headerVisible&&!this.routeTransitioning&&this.searchWidth>0,{builder:this.searchInput,width:this.searchWidth,radius:22,
               placement:Placement.Bottom,targetSpace:0,offset:{x:0,y:-44},enableArrow:false,autoCancel:false,focusable:true,mask:false,
               onWillDismiss:(action:DismissPopupAction)=>{if(action.reason===DismissReason.PRESS_BACK)this.back();},
               systemMaterial:new uiMaterial.ImmersiveMaterial({style:uiMaterial.ImmersiveStyle.THIN,colorInvert:true,applyShadow:true,interactive:true,lightEffect:{color:this.colors().surface}})})

@@ -27,6 +27,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--version-code', type=int)
     parser.add_argument('--version-name')
+    parser.add_argument('--build-mode', choices=('release', 'debug'), default='release',
+                        help='Release omits packaged source maps; debug is for local diagnosis')
     args = parser.parse_args()
     original = APP.read_text()
     document = json.loads(original)
@@ -55,7 +57,7 @@ def main():
         subprocess.run([str(HVIGOR), 'clean', '--no-daemon'], cwd=ROOT,
                        env=environment, check=True)
         subprocess.run([str(HVIGOR), 'assembleHap', '-p', 'product=default',
-                        '-p', 'buildMode=debug', '--no-daemon'], cwd=ROOT,
+                        '-p', 'buildMode=' + args.build_mode, '--no-daemon'], cwd=ROOT,
                        env=environment, check=True)
         if not OUTPUT.is_file():
             raise FileNotFoundError(OUTPUT)

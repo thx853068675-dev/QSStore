@@ -43,7 +43,7 @@ function fixture() {
       installedVersion: () => f.actual, liveInstalledVersion: () => f.actual,
       installedVersionName: () => f.versionName ?? '' },
     InstalledAppRegistry: { observedAt: () => 0, version: () => f.actual, versionName: () => f.observedName ?? '' },
-    router: { pushUrl: value => f.routes.push(value) }, getContext: () => ({}),
+    StorePageMotion: { pushUrl: value => f.routes.push(value) }, getContext: () => ({}),
     errorText: e => e.message, JobStore: { open: async () => store },
     JobScheduler: { runDownload: async (_, __, job) => f.downloads.push(job) }
   };
@@ -62,7 +62,7 @@ function fixture() {
     installedDisplay: { get: () => f.actual >= 0 ? { version: f.actual, versionName: f.versionName ?? f.observedName ?? '' } : undefined }, storeInstalled: [], installedVersions: new Map(), updates: [], activeJobId: '',
     refreshCatalogInstallState() { this.checkInstalledUpdates(); }, jobRunning: () => false,
     jobIcon:()=>undefined,jobTitle:()=> '同名应用',openInstalled(job) { f.opened = job; },
-    syncManagementIcons() {}, forgetInstalledVersions() {}, drainInstallQueue() { f.downloads.push(f.lastJob); f.continued = f.lastJob; } });
+    syncManagementIcons() {}, drainInstallQueue() { f.downloads.push(f.lastJob); f.continued = f.lastJob; } });
   return f;
 }
 test('a local install gains an update after publication, without rewriting provenance', async () => {

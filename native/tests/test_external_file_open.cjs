@@ -6,7 +6,7 @@ function fixture(){
  const storage=new Map(),routes=[],messages=[],timers=new Map();let timerId=0,state={path:'pages/Index',name:'Index'};
  const box={exports:{},setTimeout:fn=>{timers.set(++timerId,fn);return timerId;},clearTimeout:id=>timers.delete(id),AppStorage:{setOrCreate:(k,v)=>storage.set(k,v)},require:name=>name==='@kit.ArkUI'?{
    router:{getState:()=>state,RouterMode:{Single:1},pushUrl:async(options)=>routes.push(options)},promptAction:{showToast:message=>messages.push(message)}
- }:name==='./LocalImport'?{LocalImport:{supportsName:name=>/\.(hap|app|zip|7z|rar|tar|gz|tgz|bz2|tbz|tbz2|xz|txz|lzma)$/i.test(name)}}:{}};
+ }:name==='../theme/StorePageMotion'?{StorePageMotion:{pushUrl:async options=>routes.push(options)}}:name==='./LocalImport'?{LocalImport:{supportsName:name=>/\.(hap|app|zip|7z|rar|tar|gz|tgz|bz2|tbz|tbz2|xz|txz|lzma)$/i.test(name)}}:{}};
  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/jobs/ExternalInstallOpen.ets'),'utf8'),{
   compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,box);
  return {open:box.exports.ExternalInstallOpen,storage,routes,messages,timers,flush:()=>{for(const [id,fn] of [...timers]){timers.delete(id);fn();}},setState:value=>state=value};

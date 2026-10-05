@@ -147,7 +147,9 @@ test('IME search waits for committed Chinese, cancels earlier timers, and clears
 });
 
 test('installed selection uses the device name instead of a linked catalog title',()=>{
-  const data=load('data/InstalledInspection',{'../jobs/InstalledAppRegistry':{InstalledAppRegistry:{displayName:()=> '设备真实名称'}}});
+  const registry={'../jobs/InstalledAppRegistry':{InstalledAppRegistry:{displayName:()=> '设备真实名称'}}};
+  const names=load('data/AppDisplayName',registry);
+  const data=load('data/InstalledInspection',{...registry,'./AppDisplayName':names});
   const row=data.InstalledInspection.selection({bundleName:'com.example.app',sourceUrl:'local',versionName:'1.2',versionCode:12,id:'local',moduleName:'entry',mainAbility:'Main',updatedAt:2},'旧商店名称',3);
   assert.equal(row.title,'设备真实名称');assert.equal(row.bundleName,'com.example.app');assert.equal(row.appId,3);
 });

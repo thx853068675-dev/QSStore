@@ -63,8 +63,10 @@ test('checking updates prevents a conflicting release-channel request', async ()
   assert.equal(f.requests.length, 0); assert.equal(f.ui.showPreviewReleases, false);
 });
 test('restoring the app preference happens before the first release request', async () => {
-  const start = source.indexOf('  private async loadApp(');
-  const method = source.slice(start, source.indexOf('\n  }', start) + 4);
+  const methods = ['loadApp', 'loadDetailIcon', 'loadInitialReleases'].map(name => {
+    const at = source.indexOf('  private async ' + name + '(');
+    return source.slice(at, source.indexOf('\n  }', at) + 4);
+  }).join('\n');
   const calls = [], sandbox = { getContext: () => ({}), errorText: error => error.message,
     router: { getParams: () => ({ id: 42 }) },
     ReleaseChannelRegistry: { restore: async () => {}, preview: id => { calls.push(['load', id]); return true; }, select: async () => {} },
@@ -75,7 +77,7 @@ test('restoring the app preference happens before the first release request', as
         return { items: ['preview'], page: 1, total: 1 }; }
     } };
   vm.runInNewContext(ts.transpileModule(`class Detail { static RELEASES_PER_PAGE = 20;
-    ${method} }; globalThis.Page = Detail;`, { compilerOptions: {
+    ${methods} }; globalThis.Page = Detail;`, { compilerOptions: {
     target: ts.ScriptTarget.ES2020 } }).outputText, sandbox);
   const page = new sandbox.Page();
   Object.assign(page, { showPreviewReleases: false, refreshHeroColor() {}, async loadReviews() {},

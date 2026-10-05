@@ -42,7 +42,7 @@ export struct CatalogAppTitle {
 
   build() {
     Flex({ direction: FlexDirection.Row, alignItems: ItemAlign.Center }) {
-      if (this.titleLines === 1) {
+      if (this.titleLines === 1 && this.titleWidth > 0 && this.textWidth > 0) {
         BouncingAppName({ title: this.title, fontSize: this.titleSize, color: this.color,
           viewportWidth: this.titleWidth, textWidth: this.textWidth, active: this.active }).flexShrink(1)
       } else {

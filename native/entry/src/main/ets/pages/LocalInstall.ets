@@ -22,12 +22,19 @@ import { Palette } from '../theme/Palette';
 import { StoreImmersiveIconButton,StoreLayout,StorePageHeader } from '../theme/StoreDesign';
 import { errorText } from '../jobs/ErrorText';
 import { StoreRenewal, RenewalTarget } from '../jobs/StoreRenewal';
+import { StorePageMotion } from '../theme/StorePageMotion';
 
 interface LocalInstallParams { preview?:InstallJob; direct?:boolean; external?:boolean; renewal?:boolean; renewBundleName?:string; renewVersionCode?:number; renewAppId?:number; renewTitle?:string; }
 
 @Entry
 @Component
 struct LocalInstall {
+  pageTransition() {
+    PageTransitionEnter(StorePageMotion.options(RouteType.Push)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionEnter(StorePageMotion.stationary(RouteType.Pop)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionExit(StorePageMotion.stationary(RouteType.Push)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionExit(StorePageMotion.options(RouteType.Pop)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
+  }
   @StorageProp('darkMode') darkMode:boolean=false;
   @StorageProp('statusBarInset') statusBarInset:number=0;
   @StorageProp('externalFileOpenRevision') @Watch('onExternalFileOpen') externalRevision:number=0;
@@ -71,7 +78,7 @@ struct LocalInstall {
       else if(params?.preview){this.choose(params.preview);if(params.direct)this.install();}
       else if(params?.external)this.onExternalFileOpen();
       else this.pick();
-    },80);
+    },StorePageMotion.duration+32);
   }
   onPageShow():void{this.pageActive=true;if(!this.disposed&&!this.returning){this.headerVisible=true;if(this.pickerTimer===-1)this.onExternalFileOpen();}}
   onPageHide():void{this.pageActive=false;this.headerVisible=false;}
@@ -80,6 +87,7 @@ struct LocalInstall {
   private back():void{
     if(this.disposed||this.returning)return;
     this.returning=true;this.headerVisible=false;
+    StorePageMotion.prepare();
     this.backTimer=setTimeout(()=>{if(!this.disposed)router.back();},32);
   }
   private async renewFromStore(appId:number):Promise<void>{
@@ -108,9 +116,9 @@ struct LocalInstall {
   private async pick():Promise<void>{
     if(this.busy||this.disposed)return;
     if(this.renewal&&this.remoteJobId&&JobScheduler.isRunning(this.remoteJobId)){promptAction.showToast({message:'续签正在执行，请完成后再选包，或在管理中取消'});return;}
-    this.storeRenewal=false;this.busy=true;this.message='';
-    try{const choices=await LocalImport.pickPreviews(getContext(this) as common.UIAbilityContext);if(this.disposed){for(const job of choices)LocalImport.discardPreview(getContext(this) as common.UIAbilityContext,job);return;}this.discard();this.choices=choices;this.preview=true;this.timeline=new LocalTimelineView();await this.choose(choices[0]);}
-    catch(error){if(!String(error).includes('未选择安装文件'))this.message=errorText(error);}finally{this.busy=false;if(!this.disposed)this.onExternalFileOpen();}
+    this.storeRenewal=false;this.busy=true;this.message='';this.headerVisible=false;
+    try{await StorePageMotion.dismissFrame();const choices=await LocalImport.pickPreviews(getContext(this) as common.UIAbilityContext);if(this.disposed){for(const job of choices)LocalImport.discardPreview(getContext(this) as common.UIAbilityContext,job);return;}this.discard();this.choices=choices;this.preview=true;this.timeline=new LocalTimelineView();await this.choose(choices[0]);}
+    catch(error){if(!this.disposed&&!String(error).includes('未选择安装文件'))this.message=errorText(error);}finally{this.busy=false;if(!this.disposed&&!this.returning)this.headerVisible=true;if(!this.disposed)this.onExternalFileOpen();}
   }
   onExternalFileOpen():void{
     if(!this.pageActive||this.returning||this.busy||this.disposed)return;

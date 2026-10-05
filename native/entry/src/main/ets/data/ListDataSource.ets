@@ -45,10 +45,19 @@ export class ListDataSource<T> implements IDataSource {
       next.push(entry); index.set(id, entry);
     }
     const count = this.entries.length;
+    const sameOrder = next.length === count && this.entries.every(
+      (entry: ListEntry<T>, i: number) => entry.identity === next[i].identity);
     const prefixUnchanged = next.length >= count &&
       this.entries.every((entry: ListEntry<T>, i: number) => entry === next[i]);
     this.byIdentity = index;
-    if (prefixUnchanged) {
+    if (sameOrder) {
+      const changed: number[] = [];
+      this.entries.forEach((entry: ListEntry<T>, i: number) => { if (entry !== next[i]) changed.push(i); });
+      this.entries = next;
+      // Returning from Detail may add rating/channel data to a single app.
+      // Only invalidate that row; a global reload also restarts unrelated canvases and titles.
+      changed.forEach((i: number) => this.listeners.forEach((listener: DataChangeListener) => listener.onDataChange(i)));
+    } else if (prefixUnchanged) {
       for (let i = count; i < next.length; i++) {
         this.entries.push(next[i]);
         this.listeners.forEach((listener: DataChangeListener) => listener.onDataAdd(i));

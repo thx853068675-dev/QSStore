@@ -2,7 +2,7 @@ import { InstalledInspection } from '../data/InstalledInspection';
 import { repositoryUrl } from '../data/RepositoryAddress';
 import { InstalledSigningExpiry } from '../jobs/InstalledSigningExpiry';
 import { DiscoverHeader, DiscoverMotion, DiscoverRefreshIndicator } from '../components/DiscoverHeader';
-import { DiscoverTopAction } from '../components/DiscoverTopAction';
+import { DiscoverTopOverlay } from '../components/DiscoverTopAction';
 import { RepositoryStats } from '../components/RepositoryStats';
 import { CatalogAppTitle } from '../components/CatalogAppTitle';
 import { ListDataSource } from '../data/ListDataSource';
@@ -18,7 +18,7 @@ import { AccountService } from '../data/AccountService';
 import { InstallCoordinator } from '../jobs/InstallCoordinator';
 import { InstallReconnect } from '../jobs/InstallReconnect';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
-import { router, promptAction, SymbolGlyphModifier, LengthMetrics } from '@kit.ArkUI';
+import { promptAction, SymbolGlyphModifier, LengthMetrics } from '@kit.ArkUI';
 import { HdsTabs, hdsMaterial, HdsNavigation, HdsNavigationTitleMode,
   TitleBarStyleOptions, DividerShowType } from '@kit.UIDesignKit';
 import { common } from '@kit.AbilityKit';
@@ -51,8 +51,10 @@ import { AgcClient } from '../data/AgcClient';
 import { SubmitDraft, SubmitChoice } from '../data/StoreActions';
 import { errorText } from '../jobs/ErrorText';
 import { Palette } from '../theme/Palette';
-import { StoreIconButton, StoreLayout, StoreTopStyle, StoreTabBarBackdrop } from '../theme/StoreDesign';
+import { StoreIconButton, StoreImmersiveIconButton, StoreLayout, StoreTopStyle, StoreTabBarBackdrop } from '../theme/StoreDesign';
 import { StoreSelect } from '../theme/StoreSelect';
+import { StorePageMotion } from '../theme/StorePageMotion';
+import { AppDisplayName } from '../data/AppDisplayName';
 
 
 class AppIcon {
@@ -166,7 +168,6 @@ struct Index {
   @State private discoverTitleHeight: number = 88;
   @State private discoverMotion: DiscoverMotion = new DiscoverMotion();
   @State private discoverCanRefresh: boolean = true;
-  @State private discoverShowTop: boolean = false;
   @State private topActionEpoch: number = 0;
   private discoverScroller: Scroller = new Scroller();
   private managementScroller: Scroller = new Scroller();
@@ -181,20 +182,16 @@ struct Index {
   @State @Watch('syncManagementRows') private storeInstalled: InstallJob[] = [];
   @State @Watch('syncManagementRows') private deviceInstalled: InstallJob[] = [];
   @State private installedLocalOnly: boolean = false;
+  @State private publishedCollapsed: boolean = false;
+  @State private installedCollapsed: boolean = false;
   @State @Watch('syncManagementRows') private signingExpiries: Map<string, number> = new Map();
   @State @Watch('syncManagementRows') private signingExpiryEstimates: Map<string, number> = new Map();
   @State private bulkUpdating: boolean = false;
   private expiryReadToken: number = 0;
   private deviceInventoryFlight: Promise<void> | undefined = undefined;
   private deviceInventoryAt: number = 0;
-  // 探测已装版本的缓存与并发控制。installedVersion 每次都要起 hdc 进程，
-  // 串行遍历目录在大目录下会非常慢，所以这里做 TTL 缓存 + 有界并发。
+  /** 已安装应用状态的自动探测间隔；手动刷新可以跳过缓存。 */
   private static readonly VERSION_TTL_MS: number = 60000;
-  private static readonly SCAN_CONCURRENCY: number = 3;
-  private versionCache: Map<string, VersionCacheEntry> = new Map();
-  /** 每次扫描自增；回写前比对，丢弃被更新扫描取代的旧结果。 */
-  private scanToken: number = 0;
-  @State private expandedInstallBundles: string[] = [];
   @State private jobsError: string = '';
   @State private activeJobId: string = '';
   /** 发现页搜索：输入框内容与当前生效的关键词（输入即搜，带防抖）。 */
@@ -248,13 +245,15 @@ struct Index {
   /** 自动刷新只持有请求锁，不改变管理列表布局。 */
   private myAppsBusy: boolean = false;
   @State private myAppsRefreshing: boolean = false;
+  @State private managementRefreshing: boolean = false;
   @State private myAppsLoaded: boolean = false;
   /** 「设备连接」卡片里的一次性提示（如「已释放调试链路」）。 */
   @State private deviceMessage: string = '';
   @State private cancellingJobs: string[] = [];
   @State @Watch('syncDiscoverRows') private apps: CatalogApp[] = [];
   private discoverRows: ListDataSource<CatalogApp> = new ListDataSource<CatalogApp>(
-    (app: CatalogApp): string => String(app.id), (app: CatalogApp): string => JSON.stringify(app));
+    (app: CatalogApp): string => String(app.id),
+    (app: CatalogApp): string => JSON.stringify(app) + ':' + AppDisplayName.forCatalog(app));
   @State private appIcons: AppIcon[] = [];
   /** 管理页按需保留图标，不随发现页搜索或首屏刷新清空。 */
   @State private managementIcons: AppIcon[] = [];
@@ -344,16 +343,18 @@ struct Index {
   private queueRows: ListDataSource<InstallJob> = new ListDataSource<InstallJob>(
     (job: InstallJob): string => job.id, (job: InstallJob): string => JSON.stringify(job));
   private onlineInstalledRows: ListDataSource<InstallJob> = new ListDataSource<InstallJob>(
-    (job: InstallJob): string => job.id, (job: InstallJob): string => JSON.stringify(job));
+    (job: InstallJob): string => job.id,
+    (job: InstallJob): string => JSON.stringify(job) + ':' + AppDisplayName.forBundle(job.bundleName, ''));
   private offlineInstalledRows: ListDataSource<InstallJob> = new ListDataSource<InstallJob>(
-    (job: InstallJob): string => job.id, (job: InstallJob): string => JSON.stringify(job));
+    (job: InstallJob): string => job.id,
+    (job: InstallJob): string => JSON.stringify(job) + ':' + AppDisplayName.forBundle(job.bundleName, ''));
   private publishedRows: ListDataSource<CatalogApp> = new ListDataSource<CatalogApp>(
     (app: CatalogApp): string => String(app.id), (app: CatalogApp): string => JSON.stringify(app));
   @State private queueRowCount: number = 0;
   @State private onlineInstalledCount: number = 0;
   @State private offlineInstalledCount: number = 0;
   private managementRowsTimer: number = -1;
-  private updateCatalogBusy: boolean = false;
+  @State private updateCatalogBusy: boolean = false;
   @State private updateCatalogError: string = '';
   @State private deviceConnected: boolean = false;
   @State private deviceBusy: boolean = false;
@@ -403,16 +404,13 @@ struct Index {
     const distance = this.discoverMotion.scroll(this.discoverScroller.currentOffset().yOffset,
       this.discoverTitleHeight);
     const refresh = distance <= 0.5;
-    const showTop = distance > 240;
     if (refresh !== this.discoverCanRefresh) this.discoverCanRefresh = refresh;
-    if (showTop !== this.discoverShowTop) this.discoverShowTop = showTop;
   }
 
   private revealDiscoverTop(): void {
     // 使用列表真实起点，HdsNavigation 与安全区会改变 offset 基准。
     this.discoverMotion.reachStart(this.discoverScroller.currentOffset().yOffset);
     if (!this.discoverCanRefresh) this.discoverCanRefresh = true;
-    if (this.discoverShowTop) this.discoverShowTop = false;
   }
 
   private backToDiscoverTop(): void {
@@ -430,6 +428,13 @@ struct Index {
 
   private animateOverlay(change: () => void): void {
     this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, change);
+  }
+
+  pageTransition() {
+    PageTransitionEnter(StorePageMotion.options(RouteType.Push)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionEnter(StorePageMotion.stationary(RouteType.Pop)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionExit(StorePageMotion.stationary(RouteType.Push)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionExit(StorePageMotion.options(RouteType.Pop)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
   }
 
   aboutToAppear(): void {
@@ -473,6 +478,7 @@ struct Index {
       this.observeInstallTasks();
       this.drainInstallQueue();
       this.syncViewedCatalog();
+      this.syncDiscoverRows();
       this.syncManagementRows();
       this.refreshCatalogInstallState();
       if (this.currentTab === Index.TAB_MANAGE) {
@@ -484,8 +490,26 @@ struct Index {
 
   private cancelResumeMaintenance(): void {
     ForegroundIdle.cancel('index-resume');
+    ForegroundIdle.cancel('index-tab');
     ForegroundIdle.cancel('catalog-wireless');
     this.resumeMaintenancePending = false;
+  }
+
+  private onTabChanged(index: number): void {
+    if (index === this.currentTab) return;
+    this.currentTab = index;
+    ForegroundIdle.interaction();
+    // Paint the selected tab first. Rapid tab changes retain only the final automatic check.
+    ForegroundIdle.defer('index-tab', () => {
+      if (!this.pageVisible || this.currentTab !== index) return;
+      if (index === Index.TAB_MANAGE) {
+        this.loadJobs(); this.loadMyApps(); this.loadUpdateCatalog(); this.scanDeviceInstalled();
+        // loadJobs already refreshes signing expiries; avoid a competing second scan.
+      } else if (index === Index.TAB_MINE) {
+        this.recoverSigningIdentity();
+        this.checkDevice().then(() => this.refreshCatalogInstallState());
+      }
+    });
   }
 
   private syncViewedCatalog(): void {
@@ -1048,21 +1072,6 @@ struct Index {
       .transition(TransitionEffect.translate({ y: 16 }))
   }
 
-  /** 在浏览器里打开 AppGallery Connect 的证书管理页（备用入口）。 */
-  private async openAgcConsole(): Promise<void> {
-    this.certMessage = '';
-    try {
-      await (getContext(this) as common.UIAbilityContext).startAbility({
-        action: 'ohos.want.action.viewData',
-        entities: ['entity.system.browsable'],
-        uri: 'https://developer.huawei.com/consumer/cn/service/josp/agc/index.html' +
-          '#/myProject/certManage'
-      });
-    } catch (error) {
-      this.certMessage = '无法打开浏览器：' + errorText(error);
-    }
-  }
-
   /** 目录每页条数；服务端 /apps 的 page_size 上限为 100。 */
   private static readonly CATALOG_PAGE_SIZE: number = 30;
 
@@ -1198,7 +1207,7 @@ struct Index {
     }
     this.commitCatalogVersions(display, next);
     if (dropped.length > 0) {
-      this.forgetInstalledVersions();
+
       try {
         const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
         for (const job of dropped) await store.forget(job.id);
@@ -1219,19 +1228,6 @@ struct Index {
       this.catalogMoreError.length > 0)) this.loadMoreApps();
   }
 
-  /** 单次请求最多 100 个版本；更新检查需要看到全部版本，否则会漏掉真正的最新版。 */
-  private static readonly RELEASE_PAGE_SIZE: number = 50;
-  private static readonly RELEASE_MAX_PAGES: number = 4;
-
-  private async allReleases(client: StoreClient, appId: number): Promise<ReleaseInfo[]> {
-    const collected: ReleaseInfo[] = [];
-    for (let page = 1; page <= Index.RELEASE_MAX_PAGES; page++) {
-      const result = await client.listReleases(appId, page, Index.RELEASE_PAGE_SIZE);
-      collected.push(...result.items);
-      if (!result.hasMore || result.items.length === 0) break;
-    }
-    return collected;
-  }
 
   /** 同查询、同图标修订只下载一次；翻页和重复刷新共用尚未完成的请求。 */
   private async loadCatalogIcons(client: StoreClient, apps: CatalogApp[], query: string,
@@ -1568,26 +1564,9 @@ struct Index {
     return match !== null && match.length > 1 ? match[1] : '';
   }
 
-  private jobStatusLine(job: InstallJob): string {
-    if (this.activeJobId === job.id) return this.stageLabel(job.stage);
-    if (job.stage !== InstallStage.INSTALLED) {
-      return job.lastError.length > 0 ? job.lastError : this.stageLabel(job.stage);
-    }
-    const update = this.updateFor(job.bundleName);
-    if (update === undefined) {
-      const ambiguous = job.appId === 0 && job.bundleName.length > 0 &&
-        this.updateApps().filter((app: CatalogApp) =>
-          this.installedAssets(app).some((asset: HapAsset) => asset.bundleName === job.bundleName)).length > 1;
-      return '版本 ' + this.versionLabel(job) +
-        (ambiguous ? ' · 存在多个同包名来源，请从发现页选择' : '');
-    }
-    const target = update.versionName.length > 0 ? update.versionName :
-      String(update.versionCode);
-    if (target === this.versionLabel(job)) return '版本 ' + target + ' · 有修订更新';
-    return '版本 ' + this.versionLabel(job) + ' → ' + target;
-  }
-
   private jobTitle(job: InstallJob): string {
+    const label = AppDisplayName.forBundle(job.bundleName, '');
+    if (label.length > 0) return label;
     const app = this.catalogForJob(job);
     if (app && app.displayName.length > 0) {
       const asset = this.installedAssets(app).find((item: HapAsset) => item.bundleName === job.bundleName);
@@ -1595,8 +1574,6 @@ struct Index {
     }
     if (job.bundleName === 'com.tonghongxiang.hapstore.nativepreview' ||
       job.bundleName === 'com.tonghongxiang.hapstore') return '轻启·安装器';
-    const label = InstalledAppRegistry.displayName(job.bundleName);
-    if (label.length > 0) return label;
     if (job.sourceUrl === 'device') return job.assetName || job.bundleName;
     if (job.sourceUrl === 'local' && this.localAppNames?.get(job.id)) return this.localAppNames.get(job.id) ?? '';
     if (job.sourceUrl === 'local' && job.bundleName.length > 0) {
@@ -1613,7 +1590,7 @@ struct Index {
     const app = this.apps.concat(this.myApps, this.updateCatalog).find((item: CatalogApp) =>
       item.latestAsset?.bundleName === bundleName ||
       item.latestAssets.some((asset: HapAsset) => asset.bundleName === bundleName));
-    return app?.displayName || InstalledAppRegistry.displayName(bundleName) || bundleName;
+    return AppDisplayName.forBundle(bundleName, app?.displayName || bundleName);
   }
 
   private async loadMyApps(showProgress: boolean = false): Promise<void> {
@@ -1756,7 +1733,7 @@ struct Index {
       await this.loadApps();
       await this.loadMyApps();
       this.jobsError = wasUpdate ? '' : '';
-      router.pushUrl({ url: 'pages/Detail', params: { id: app.id } });
+      StorePageMotion.pushUrl({ url: 'pages/Detail', params: { id: app.id } });
     } catch (error) {
       this.submitMessage = errorText(error);
     } finally {
@@ -2053,7 +2030,7 @@ struct Index {
       if (previous !== current) {
         this.installedJobs = installed;
         this.loadSigningExpiries();
-        this.forgetInstalledVersions();
+
         this.refreshCatalogInstallState();
         this.checkInstalledUpdates();
       }
@@ -2087,15 +2064,6 @@ struct Index {
     return row !== undefined && (row.running || isPending(row.job.stage));
   }
 
-  private taskRunning(appId: number, bundleName: string = ''): boolean {
-    return this.taskForApp(appId, bundleName)?.running ?? false;
-  }
-
-  private taskLabel(appId: number, bundleName: string = ''): string {
-    const row = this.taskForApp(appId, bundleName);
-    return row === undefined ? '准备中' : InstallTaskState.label(row);
-  }
-
   private indicatorTask(appId: number, bundleName: string, jobId: string): InstallTaskSnapshot | undefined {
     return jobId.length > 0 ? this.installTasks.find((row: InstallTaskSnapshot) => row.job.id === jobId) :
       this.taskForApp(appId, bundleName);
@@ -2120,12 +2088,12 @@ struct Index {
   }
 
   private taskJobLabel(job: InstallJob): string {
-    if (job.stage === InstallStage.QUEUED) {
+    const row = this.installTasks.find((item: InstallTaskSnapshot) => item.job.id === job.id);
+    if (job.stage === InstallStage.QUEUED && !row?.running) {
       const ahead = this.pendingJobs.filter((item: InstallJob) =>
         item.stage === InstallStage.QUEUED && this.queueTime(item) < this.queueTime(job)).length;
       return '排队中 · 第 ' + (ahead + 1) + ' 个';
     }
-    const row = this.installTasks.find((item: InstallTaskSnapshot) => item.job.id === job.id);
     return row === undefined ? this.stageLabel(job.stage) : InstallTaskState.label(row);
   }
 
@@ -2239,101 +2207,6 @@ struct Index {
     return view;
   }
 
-  /** 带 TTL 缓存的已装版本查询。 */
-  private async cachedInstalledVersion(bridge: HdcDeviceBridge,
-    bundleName: string): Promise<number> {
-    const now = Date.now();
-    const hit = this.versionCache.get(bundleName);
-    if (hit !== undefined && now - hit.at < Index.VERSION_TTL_MS) return hit.version;
-    const version = await bridge.installedVersion(bundleName);
-    const entry = new VersionCacheEntry();
-    entry.version = version;
-    entry.at = Date.now();
-    this.versionCache.set(bundleName, entry);
-    return version;
-  }
-
-  /** 安装/更新完成后让缓存失效，否则会拿着旧版本号判断「无更新」。 */
-  private forgetInstalledVersions(): void {
-    this.versionCache.clear();
-  }
-
-  /**
-   * 扫描商店目录里本机已安装的应用。
-   *
-   * 原生桥没有「列出全部已装应用」的能力（只支持 operation 0-4），所以只能
-   * 反向探测：取版本资源拿到 bundleName，再查本机已装版本。侧载进来但不在
-   * 本店目录的应用仍然看不到。
-   *
-   * 性能上做了两件事：
-   *   1. installedVersion 结果按 bundleName 缓存 60 秒，切页不再重复起 hdc；
-   *   2. 最多 3 个应用并行探测，避免串行等待（同时限制并发，防止 hdc 进程爆炸）。
-   */
-  private async scanStoreInstalled(): Promise<void> {
-    if (!this.deviceConnected || this.apps.length === 0) {
-      this.storeInstalled = [];
-      return;
-    }
-    const token = ++this.scanToken;
-    const context = getContext(this) as common.UIAbilityContext;
-    const bridge = new HdcDeviceBridge(context);
-    const targets: CatalogApp[] = this.apps.slice();
-    const found: InstallJob[] = [];
-    let cursor = 0;
-
-    // 目录列表已经带上了每个应用最新版本的 bundleName 与 versionCode，
-    // 所以这里只需要问设备「装没装 / 装的哪个版本」，不必再逐个请求 releases。
-    const worker = async (): Promise<void> => {
-      while (true) {
-        const index = cursor;
-        cursor += 1;
-        if (index >= targets.length) return;
-        const app = targets[index];
-        const asset = app.latestAsset;
-        if (asset === undefined || asset.bundleName.length === 0) continue;
-        // 轻启自己装过的已经在 installedJobs 里，不重复列
-        if (this.installedJobs.some((item: InstallJob) =>
-          item.bundleName === asset.bundleName)) continue;
-        try {
-          const installed = await this.cachedInstalledVersion(bridge, asset.bundleName);
-          if (installed <= 0) continue;
-          const job = new InstallJob();
-          job.id = 'store-' + app.id + '-' + asset.bundleName;
-          job.appId = app.id;
-          job.bundleName = asset.bundleName;
-          job.versionCode = installed;
-          job.assetName = asset.name;
-          job.sourceUrl = asset.url;
-          job.expectedSha256 = asset.sha256;
-          job.mirrorUrls = asset.mirrorUrls;
-          job.stage = InstallStage.INSTALLED;
-          job.updatedAt = Date.now();
-          found.push(job);
-        } catch (_) {
-          // 单个应用探测失败不影响其余
-        }
-      }
-    };
-
-    const workers: Promise<void>[] = [];
-    const lanes = Math.min(Index.SCAN_CONCURRENCY, targets.length);
-    for (let lane = 0; lane < lanes; lane++) workers.push(worker());
-    await Promise.all(workers);
-
-    // 期间又触发过扫描：本次结果已过期，直接丢弃
-    if (token !== this.scanToken) return;
-    found.sort((left: InstallJob, right: InstallJob) => left.appId - right.appId);
-    this.storeInstalled = found;
-    // Reactivity only fires on a new array; the installed map rebuilds off it.
-    this.refreshCatalogInstallState();
-  }
-
-  /**
-   * 目录里每个应用在本机的安装状态。
-   *
-   * 只依赖两处已经在内存里的数据：轻启自己装过的记录，以及扫描到的商店应用。
-   * 因此卡片上的「安装 / 打开」按钮能立刻画出来，不用等任何网络或设备查询。
-   */
   /**
    * 发现和管理共用细圆环；无法精确计量的阶段使用活动指示。
    */
@@ -2472,14 +2345,14 @@ struct Index {
   }
 
   private openDetail(appId: number): void {
-    router.pushUrl({ url: 'pages/Detail', params: { id: appId } });
+    StorePageMotion.pushUrl({ url: 'pages/Detail', params: { id: appId } });
   }
 
   /** 已装应用的入口 ability 只有安装记录里才有，探测到的不一定知道。 */
   private openCatalogApp(app: CatalogApp): void {
     const job = this.installedJobFor(app.id);
     if (job === undefined) {
-      router.pushUrl({ url: 'pages/Detail', params: { id: app.id } });
+      StorePageMotion.pushUrl({ url: 'pages/Detail', params: { id: app.id } });
       return;
     }
     this.openInstalled(job);
@@ -2931,8 +2804,8 @@ struct Index {
     if (job.stage === InstallStage.INSTALLED) {
       InstalledInspection.selectedIcon = this.jobIcon(job);
       const selection = InstalledInspection.selection(this.currentInstalledView(job), this.jobTitle(job), this.renewalAppId(job));
-      router.pushUrl({ url: 'pages/InstalledDetail', params: { selection: JSON.stringify(selection) } });
-    } else if (app !== undefined) router.pushUrl({ url: 'pages/Detail', params: { id: app.id } });
+      StorePageMotion.pushUrl({ url: 'pages/InstalledDetail', params: { selection: JSON.stringify(selection) } });
+    } else if (app !== undefined) StorePageMotion.pushUrl({ url: 'pages/Detail', params: { id: app.id } });
   }
 
   private async loadUpdateCatalog(): Promise<void> {
@@ -3082,21 +2955,28 @@ struct Index {
 
   private async loadSigningExpiries(): Promise<void> {
     const token = ++this.expiryReadToken;
+    if (!this.pageVisible || this.currentTab !== Index.TAB_MANAGE) return;
     const next = new Map<string, number>();
     const installed = this.allInstalledJobs();
     for (const job of installed) {
+      await ForegroundIdle.wait();
+      if (token !== this.expiryReadToken || !this.pageVisible || this.currentTab !== Index.TAB_MANAGE) return;
       const expiry = await InstalledSigningExpiry.read(job.bundleName, job.versionCode, this.installedJobs);
       if (token !== this.expiryReadToken) return;
       next.set(job.bundleName, expiry);
     }
     const unresolved = installed.filter((job: InstallJob) => !(next.get(job.bundleName) ?? 0));
     const materials = await InstalledSigningExpiry.estimateMaterials(getContext(this) as common.UIAbilityContext,
-      unresolved.map((job: InstallJob) => job.bundleName));
+      unresolved.map((job: InstallJob) => job.bundleName),
+      (): boolean => token === this.expiryReadToken && this.pageVisible && this.currentTab === Index.TAB_MANAGE);
     if (token !== this.expiryReadToken) return;
     const estimates = new Map<string, number>();
-    for (const job of unresolved) estimates.set(job.bundleName,
-      InstalledSigningExpiry.estimate(job.bundleName, job.versionCode, materials,
+    for (const job of unresolved) {
+      await ForegroundIdle.wait();
+      if (token !== this.expiryReadToken || !this.pageVisible || this.currentTab !== Index.TAB_MANAGE) return;
+      estimates.set(job.bundleName, InstalledSigningExpiry.estimate(job.bundleName, job.versionCode, materials,
         job.installedUpdateTime || job.stageHistory.find((mark) => mark.stage === InstallStage.INSTALLED)?.at || job.updatedAt));
+    }
     if (JSON.stringify(Array.from(next.entries())) !== JSON.stringify(Array.from(this.signingExpiries.entries()))) {
       this.signingExpiries = next;
     }
@@ -3469,35 +3349,6 @@ struct Index {
     }, 0);
   }
 
-  private olderInstalledJobs(bundleName: string, newestId: string): InstallJob[] {
-    return this.installedJobs.filter((job: InstallJob) =>
-      job.bundleName === bundleName && job.id !== newestId);
-  }
-
-  private toggleInstallHistory(bundleName: string): void {
-    this.expandedInstallBundles = this.expandedInstallBundles.includes(bundleName) ?
-      this.expandedInstallBundles.filter((name: string) => name !== bundleName) :
-      this.expandedInstallBundles.concat([bundleName]);
-  }
-
-  private forgetJob(job: InstallJob): void {
-    AlertDialog.show({
-      title: '移除记录',
-      message: '只移除「' + this.jobTitle(job) + ' · 版本 ' + this.versionLabel(job) +
-        '」这一条记录，不会卸载应用。',
-      primaryButton: { value: '取消', action: () => {} },
-      secondaryButton: { value: '移除', action: async () => {
-        try {
-          const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
-          await store.forget(job.id);
-          await this.loadJobs();
-        } catch (error) {
-          this.jobsError = errorText(error);
-        }
-      } }
-    });
-  }
-
   /** 核对完整侧载清单；不把展示条目写成伪安装历史，离线保留上次观察。 */
   private async refreshInstalled(): Promise<void> {
     if (this.syncBusy) return;
@@ -3607,7 +3458,7 @@ struct Index {
       this.animateOverlay(() => { this.showReconnect = false; });
       this.reconnectMessage = '';
       this.deviceConnected = true;
-      this.forgetInstalledVersions();
+
       this.completeRefreshConnection(true);
       // 先读取完整目录对应的实际安装状态，再判断是否还要继续先前的安装。
       if (this.catalogRefreshBusy && this.catalogStateFlight !== undefined) {
@@ -3710,14 +3561,9 @@ struct Index {
             this.discoverTitleHeight = height;
           }
         }, searchContent: (): void => this.discoverSearchInput() })
-      if (this.discoverShowTop && this.pageVisible && this.currentTab === Index.TAB_DISCOVER) {
-        ForEach([this.topActionEpoch], (_epoch: number) => {
-          DiscoverTopAction({ darkMode: this.darkMode, inset: this.pageInset(),
-            action: () => this.backToDiscoverTop() })
-            .position({ left: 0, bottom: 116 })
-            .hitTestBehavior(HitTestMode.None)
-        }, (epoch: number) => String(epoch))
-      }
+      DiscoverTopOverlay({ motion: this.discoverMotion, darkMode: this.darkMode, inset: this.pageInset(),
+        active: this.pageVisible && this.currentTab === Index.TAB_DISCOVER, epoch: this.topActionEpoch,
+        action: () => this.backToDiscoverTop() })
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
 
@@ -3781,14 +3627,14 @@ struct Index {
                         Image(this.iconFor(app.id)).width(62).height(62).borderRadius(17)
                           .onClick(() => this.openDetail(app.id))
                       } else {
-                        Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : '应')
+                        Text(AppDisplayName.forCatalog(app).length > 0 ? AppDisplayName.forCatalog(app).substring(0, 1) : '应')
                           .fontSize(23).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                           .width(62).height(62).textAlign(TextAlign.Center)
                           .backgroundColor(this.colors().surface).borderRadius(17)
                           .onClick(() => this.openDetail(app.id))
                       }
                       Column({ space: 5 }) {
-                        CatalogAppTitle({ title: app.displayName, version: this.latestVersionTag(app),
+                        CatalogAppTitle({ title: AppDisplayName.forCatalog(app), version: this.latestVersionTag(app),
                           color: '#FFFFFF', versionColor: this.featuredColors(app.stars)[0][0],
                           versionBackground: '#FFFFFF', active: this.pageVisible && this.currentTab === 0 })
                         Text(app.summary).fontSize(12)
@@ -3822,14 +3668,14 @@ struct Index {
                           Image(this.iconFor(app.id)).width(62).height(62).borderRadius(17)
                             .onClick(() => this.openDetail(app.id))
                         } else {
-                          Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : '应')
+                          Text(AppDisplayName.forCatalog(app).length > 0 ? AppDisplayName.forCatalog(app).substring(0, 1) : '应')
                             .fontSize(23).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                             .width(62).height(62).textAlign(TextAlign.Center)
                             .backgroundColor(this.colors().accentSoft).borderRadius(17)
                             .onClick(() => this.openDetail(app.id))
                         }
                         Column({ space: 5 }) {
-                          CatalogAppTitle({ title: app.displayName, version: this.latestVersionTag(app),
+                          CatalogAppTitle({ title: AppDisplayName.forCatalog(app), version: this.latestVersionTag(app),
                             color: this.colors().text, versionColor: this.colors().surface,
                             versionBackground: this.colors().text, active: this.pageVisible && this.currentTab === 0 })
                           Text(app.summary).fontSize(12).fontColor(this.colors().textSecondary).maxLines(1)
@@ -3865,6 +3711,12 @@ struct Index {
                   }
                 }.width('100%').height(48).justifyContent(FlexAlign.Center)
               }
+            } else if (this.catalogPage > 0 && this.apps.length > 0 && !this.catalogLoading &&
+              !this.catalogMoreBusy && this.catalogError.length === 0 && this.catalogMoreError.length === 0) {
+              ListItem() {
+                Text('已经到底了').fontSize(12).fontColor(this.colors().textTertiary)
+                  .width('100%').height(48).textAlign(TextAlign.Center).id('discover-list-end')
+              }
             }
             // 底部留白给悬浮的导航条让位。用列表项而不是列表内边距：内边距会挤在
             // 滚动区里、内容不满一屏时看着像一块空白，列表项则跟着内容走。
@@ -3898,7 +3750,7 @@ struct Index {
       Text(tool.formats).fontSize(10).fontColor(this.colors().textTertiary)
     }.width('100%').height(160).padding(18).alignItems(HorizontalAlign.Center).justifyContent(FlexAlign.Center)
       .backgroundColor(this.colors().surface).borderRadius(20).id(tool.id)
-      .onClick(()=>router.pushUrl({url:tool.page}))
+      .onClick(()=>StorePageMotion.pushUrl({url:tool.page}))
   }
 
   @Builder
@@ -3937,7 +3789,36 @@ struct Index {
 
   @Builder
   private managementTitleBar() {
-    this.simpleTitleBar('管理')
+    Row() {
+      Text('管理').fontSize(30).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+      Blank().layoutWeight(1)
+      StoreImmersiveIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '刷新管理列表',
+        controlId: 'management-refresh', visible: this.rootHeaderVisible(Index.TAB_MANAGE),
+        loading: this.managementRefreshing || this.syncBusy || this.myAppsRefreshing || this.updateCatalogBusy,
+        action: () => this.refreshManagement(), backAction: () => { this.onBackPress(); } })
+    }.width('100%').height('100%').padding({ left: this.pageInset(), right: this.pageInset() })
+  }
+
+  private rootHeaderVisible(tab: number): boolean {
+    return this.pageVisible && this.currentTab === tab && !this.showSubmit && !this.showAppConfig &&
+      !this.showRenewal && !this.showReconnect && !this.showCertSheet && !this.showLocalProfiles &&
+      !this.showCertificatePrompt && !this.showCardActions;
+  }
+
+  private async refreshManagement(): Promise<void> {
+    if (this.managementRefreshing) return;
+    this.managementRefreshing = true;
+    try {
+      await Promise.allSettled([this.loadMyApps(true), this.refreshInstalled(), this.loadUpdateCatalog()]);
+    } finally { this.managementRefreshing = false; }
+  }
+
+  private toggleManagementSection(published: boolean): void {
+    ForegroundIdle.interaction();
+    this.getUIContext().animateTo({ duration: 280, curve: Curve.EaseInOut }, () => {
+      if (published) this.publishedCollapsed = !this.publishedCollapsed;
+      else this.installedCollapsed = !this.installedCollapsed;
+    });
   }
 
   @Builder
@@ -3952,9 +3833,8 @@ struct Index {
   private installedSourceOption(label: string, localOnly: boolean) {
     Button({ type: ButtonType.Capsule }) {
       Row({ space: 4 }) {
-        if (this.installedLocalOnly === localOnly) {
-          SymbolGlyph($r('sys.symbol.checkmark')).fontSize(10).fontColor([this.colors().accent])
-        }
+        SymbolGlyph(localOnly ? $r('sys.symbol.folder') : $r('sys.symbol.bag')).fontSize(12)
+          .fontColor([this.installedLocalOnly === localOnly ? this.colors().accent : this.colors().textSecondary])
         Text(label + ' ' + (localOnly ? this.offlineInstalledCount : this.onlineInstalledCount)).fontSize(12)
           .fontWeight(this.installedLocalOnly === localOnly ? FontWeight.Bold : FontWeight.Medium)
           .fontColor(this.installedLocalOnly === localOnly ? this.colors().accent : this.colors().textSecondary)
@@ -3966,6 +3846,7 @@ struct Index {
       .border({ width: this.installedLocalOnly === localOnly ? 1 : 0, color: this.colors().borderStrong, radius: 14 })
       .responseRegion({ x: 0, y: -8, width: '100%', height: 44 })
       .accessibilityText(label + (this.installedLocalOnly === localOnly ? '，已选中' : '，点击切换'))
+      .id(localOnly ? 'installed-source-local' : 'installed-source-store')
       .onClick(() => { this.installedLocalOnly = localOnly; this.scanDeviceInstalled(); })
   }
 
@@ -3974,7 +3855,8 @@ struct Index {
     Row({ space: 2 }) {
       this.installedSourceOption('商店应用', false)
       this.installedSourceOption('本地侧载', true)
-    }.width(238).height(36).padding(4).backgroundColor(this.colors().fill).borderRadius(18).clip(true)
+    }.layoutWeight(1).constraintSize({ maxWidth: 238 }).height(36).padding(4)
+      .backgroundColor(this.colors().fill).borderRadius(18).clip(true)
       .border({ width: 1, color: this.colors().border, radius: 18 })
   }
 
@@ -4048,13 +3930,29 @@ struct Index {
             this.colors().surface).borderRadius(17)
           .id('installed-card-' + job.bundleName)
           .onClick(() => this.openJobDetails(job))
-          .gesture(LongPressGesture({ duration: 500, repeat: false }).onAction(() => {
-            this.showInstalledActions(job);
-          }))
       }.swipeAction({ end: { builder: () => {
         this.cardSwipeActions(this.installedActions(job), job.bundleName, (key: string): void => { this.showInstalledActions(job, key); });
       }, actionAreaDistance: this.installedActions(job).length * 72 }, edgeEffect: SwipeEdgeEffect.Spring })
     }, (job: InstallJob) => rows.key(job))
+  }
+
+  @Builder
+  private managementSectionToggle(title: string, count: () => number, collapsed: () => boolean,
+    controlId: string, action: () => void) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 7 }) {
+        Text(title).fontSize(19).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+        Text(String(count())).fontSize(11).fontWeight(FontWeight.Medium)
+          .fontColor(this.colors().textSecondary).backgroundColor(this.colors().fill)
+          .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(6)
+        SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(12).fontColor([this.colors().textTertiary])
+          .rotate({ angle: collapsed() ? -90 : 0 })
+        Blank().layoutWeight(1)
+      }.width('100%')
+    }.layoutWeight(1).height(44).padding({ left: 0, right: 10 })
+      .backgroundColor(Color.Transparent).borderRadius(12).id(controlId)
+      .accessibilityText(title + '，' + count() + '个，' + (collapsed() ? '已折叠，点击展开' : '已展开，点击折叠'))
+      .onClick(action)
   }
 
   @Builder
@@ -4111,9 +4009,6 @@ struct Index {
                 }.width('100%')
               }.width('100%').padding(15).backgroundColor(this.colors().surface).borderRadius(16)
                 .id('queue-card-' + job.id).accessibilityDescription('左滑查看任务操作')
-                .gesture(LongPressGesture({ duration: 500, repeat: false }).onAction(() => {
-                  if (!this.cancellingJobs.includes(job.id)) this.showQueueActions(job);
-                }))
             }.swipeAction({ end: { builder: () => {
               this.cardSwipeActions(this.queueActions(job), job.id, (key: string): void => { this.showQueueActions(job, key); });
             }, actionAreaDistance: this.queueActions(job).length * 72 }, edgeEffect: SwipeEdgeEffect.Spring })
@@ -4122,72 +4017,68 @@ struct Index {
         if (this.signedIn) {
           ListItem() {
             Row() {
-              Text('我上架的应用').fontSize(19).fontWeight(FontWeight.Bold)
-                .fontColor(this.colors().text).layoutWeight(1)
-              // 与「已安装」那里同一个刷新图标：转圈时不给再点
-              if (this.myAppsRefreshing) {
-                Row() { LoadingProgress().width(20).height(20) }
-                  .width(44).height(44).justifyContent(FlexAlign.Center)
-              } else {
-                StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '刷新上架应用',
-                  action: () => this.loadMyApps(true) })
-              }
+              this.managementSectionToggle('我上架的应用', () => this.myApps.length, () => this.publishedCollapsed,
+                'published-section-toggle', () => this.toggleManagementSection(true))
             }.width('100%').padding({ top: 3, bottom: 6 })
           }
-          // 上架入口：从发现页搬到这里，与「我上架的应用」同处一块
-          ListItem() {
-            Row({ space: 12 }) {
-              Text('＋').fontSize(22).fontColor(this.colors().accent)
-                .width(42).height(42).textAlign(TextAlign.Center)
-                .backgroundColor(this.colors().accentSoft).borderRadius(13)
-              Column({ space: 3 }) {
-                Text('上架新应用').fontSize(15).fontWeight(FontWeight.Medium)
-                  .fontColor(this.colors().text).maxLines(1)
-                Text('从 GitHub / Gitee 发行版添加安装包')
-                  .fontSize(11).fontColor(this.colors().textTertiary).maxLines(1)
-              }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-              Text('›').fontSize(20).fontColor(this.colors().textTertiary)
-            }.width('100%').padding({ left: 12, right: 12, top: 11, bottom: 11 })
-              .backgroundColor(this.colors().surface).borderRadius(15)
-              .onClick(() => this.openSubmitSheet())
-          }
-          if (this.myAppsMessage.length > 0) {
-            ListItem() {
-              Text(this.myAppsMessage).fontSize(12).fontColor(this.colors().danger)
-            }
-          }
-          if (this.myAppsLoaded && this.myApps.length === 0 && this.myAppsMessage.length === 0) {
-            ListItem() {
-              Text('还没有上架应用 · 点上面的「上架新应用」添加')
-                .fontSize(12).fontColor(this.colors().textTertiary)
-                .width('100%').padding({ top: 6, bottom: 8 })
-            }
-          }
-          LazyForEach(this.publishedRows, (app: CatalogApp) => {
+          if (!this.publishedCollapsed) {
+            ListItemGroup({ space: 11 }) {
+            // 上架入口：从发现页搬到这里，与「我上架的应用」同处一块
             ListItem() {
               Row({ space: 12 }) {
-                if (this.managedIconFor(app)) {
-                  Image(this.managedIconFor(app)).width(42).height(42).borderRadius(11)
-                } else {
-                  Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : '应')
-                    .fontSize(18).fontColor(this.colors().accent).textAlign(TextAlign.Center)
-                    .width(42).height(42).backgroundColor(this.colors().accentSoft).borderRadius(11)
-                }
-                Column({ space: 4 }) {
-                  Text(app.displayName).fontSize(14).fontWeight(FontWeight.Medium)
+                Text('＋').fontSize(22).fontColor(this.colors().accent)
+                  .width(42).height(42).textAlign(TextAlign.Center)
+                  .backgroundColor(this.colors().accentSoft).borderRadius(13)
+                Column({ space: 3 }) {
+                  Text('上架新应用').fontSize(15).fontWeight(FontWeight.Medium)
                     .fontColor(this.colors().text).maxLines(1)
-                  Text(app.category + ' · ' + app.publisherName).fontSize(11)
-                    .fontColor(this.colors().textTertiary).maxLines(1)
+                  Text('从 GitHub / Gitee 发行版添加安装包')
+                    .fontSize(11).fontColor(this.colors().textTertiary).maxLines(1)
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-                  .onClick(() => router.pushUrl({ url: 'pages/Detail', params: { id: app.id } }))
-                Button('配置')
-                  .height(44).fontSize(12).fontColor(this.colors().accent)
-                  .backgroundColor(this.colors().accentSoft).borderRadius(10)
-                  .enabled(this.removingId === 0 && !this.configBusy)
-                  .onClick(() => this.openAppConfig(app))
-              }.width('100%').padding(15).backgroundColor(this.colors().surface).borderRadius(16)
+                Text('›').fontSize(20).fontColor(this.colors().textTertiary)
+              }.width('100%').padding({ left: 12, right: 12, top: 11, bottom: 11 })
+                .backgroundColor(this.colors().surface).borderRadius(15)
+                .onClick(() => this.openSubmitSheet())
             }
-          }, (app: CatalogApp) => this.publishedRows.key(app))
+            if (this.myAppsMessage.length > 0) {
+              ListItem() {
+                Text(this.myAppsMessage).fontSize(12).fontColor(this.colors().danger)
+              }
+            }
+            if (this.myAppsLoaded && this.myApps.length === 0 && this.myAppsMessage.length === 0) {
+              ListItem() {
+                Text('还没有上架应用 · 点上面的「上架新应用」添加')
+                  .fontSize(12).fontColor(this.colors().textTertiary)
+                  .width('100%').padding({ top: 6, bottom: 8 })
+              }
+            }
+            LazyForEach(this.publishedRows, (app: CatalogApp) => {
+              ListItem() {
+                Row({ space: 12 }) {
+                  if (this.managedIconFor(app)) {
+                    Image(this.managedIconFor(app)).width(42).height(42).borderRadius(11)
+                  } else {
+                    Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : '应')
+                      .fontSize(18).fontColor(this.colors().accent).textAlign(TextAlign.Center)
+                      .width(42).height(42).backgroundColor(this.colors().accentSoft).borderRadius(11)
+                  }
+                  Column({ space: 4 }) {
+                    Text(app.displayName).fontSize(14).fontWeight(FontWeight.Medium)
+                      .fontColor(this.colors().text).maxLines(1)
+                    Text(app.category + ' · ' + app.publisherName).fontSize(11)
+                      .fontColor(this.colors().textTertiary).maxLines(1)
+                  }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+                    .onClick(() => StorePageMotion.pushUrl({ url: 'pages/Detail', params: { id: app.id } }))
+                  Button('配置')
+                    .height(44).fontSize(12).fontColor(this.colors().accent)
+                    .backgroundColor(this.colors().accentSoft).borderRadius(10)
+                    .enabled(this.removingId === 0 && !this.configBusy)
+                    .onClick(() => this.openAppConfig(app))
+                }.width('100%').padding(15).backgroundColor(this.colors().surface).borderRadius(16)
+              }
+            }, (app: CatalogApp) => this.publishedRows.key(app))
+            }.transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -10 })))
+          }
         }
         // 中断任务恢复入口：只在确实有未完成任务时出现，无任务不占版面。
         if (this.jobsError.length > 0) {
@@ -4199,43 +4090,42 @@ struct Index {
         }
         ListItem() {
           Row() {
-            Text('已安装 · ' + (this.onlineInstalledCount + this.offlineInstalledCount)).fontSize(19).fontWeight(FontWeight.Bold)
-              .fontColor(this.colors().text).layoutWeight(1)
-            Button(this.bulkUpdating ? '正在加入…' : '一键更新', { type: ButtonType.Normal })
-              .height(32).fontSize(12).padding({ left: 10, right: 10 })
-              .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
-              .borderRadius(StoreLayout.cardActionRadius).margin({ right: 6 })
-              .responseRegion({ x: 0, y: -6, width: '100%', height: 44 })
-              .enabled(!this.bulkUpdating && this.updatableInstalledJobs().length > 0)
-              .id('installed-update-all').onClick(() => this.updateAllInstalled())
-            // 刷新完整设备清单，隐藏明确已卸载的应用，保留安装历史。
-            // 按钮本身就是状态——转圈时不给再点。
-            if (this.syncBusy) {
-              Row() { LoadingProgress().width(20).height(20) }
-                .width(44).height(44).justifyContent(FlexAlign.Center)
-            } else {
-              StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '核对已安装应用',
-                action: () => this.refreshInstalled() })
-            }
+            this.managementSectionToggle('已安装', () => this.onlineInstalledCount + this.offlineInstalledCount,
+              () => this.installedCollapsed, 'installed-section-toggle', () => this.toggleManagementSection(false))
           }.width('100%').padding({ top: 18, bottom: 4 })
         }
-        ListItem() { this.installedSourceSelector() }
-        if ((this.installedLocalOnly ? this.offlineInstalledCount : this.onlineInstalledCount) === 0) {
+        if (!this.installedCollapsed) {
+          ListItemGroup({ space: 11 }) {
           ListItem() {
-            Text(this.installedLocalOnly ? '暂无本地侧载应用' : '暂无已安装的商店应用')
-              .fontSize(12).fontColor(this.colors().textTertiary).padding({ top: 12, bottom: 12 })
+            Row({ space: 8 }) {
+              this.installedSourceSelector()
+              Button(this.bulkUpdating ? '正在加入…' : '一键更新', { type: ButtonType.Normal })
+                .height(32).fontSize(12).padding({ left: 10, right: 10 })
+                .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
+                .borderRadius(StoreLayout.cardActionRadius)
+                .responseRegion({ x: 0, y: -6, width: '100%', height: 44 })
+                .enabled(!this.bulkUpdating && this.updatableInstalledJobs().length > 0)
+                .id('installed-update-all').onClick(() => this.updateAllInstalled())
+            }.width('100%').justifyContent(FlexAlign.SpaceBetween).alignItems(VerticalAlign.Center)
           }
-        }
-        if (this.syncMessage.length > 0) {
-          ListItem() {
-            Text(this.syncMessage).fontSize(11).fontColor(this.colors().textTertiary)
-              .width('100%').maxLines(3).padding({ bottom: 4 })
+          if ((this.installedLocalOnly ? this.offlineInstalledCount : this.onlineInstalledCount) === 0) {
+            ListItem() {
+              Text(this.installedLocalOnly ? '暂无本地侧载应用' : '暂无已安装的商店应用')
+                .fontSize(12).fontColor(this.colors().textTertiary).padding({ top: 12, bottom: 12 })
+            }
           }
-        }
-        if (this.installedLocalOnly) {
-          this.managementInstalledCards(this.offlineInstalledRows)
-        } else {
-          this.managementInstalledCards(this.onlineInstalledRows)
+          if (this.syncMessage.length > 0) {
+            ListItem() {
+              Text(this.syncMessage).fontSize(11).fontColor(this.colors().textTertiary)
+                .width('100%').maxLines(3).padding({ bottom: 4 })
+            }
+          }
+          if (this.installedLocalOnly) {
+            this.managementInstalledCards(this.offlineInstalledRows)
+          } else {
+            this.managementInstalledCards(this.onlineInstalledRows)
+          }
+          }.transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -10 })))
         }
         // 为悬浮导航留出可滚走的尾部空间，不缩小列表的触摸/显示区域。
         ListItem() { Row().height(110).width('100%') }
@@ -4460,184 +4350,256 @@ struct Index {
   }
 
   @Builder
+  private mineSectionHeading(symbol: Resource, title: string) {
+    Row({ space: 10 }) {
+      Stack({ alignContent: Alignment.Center }) {
+        SymbolGlyph(symbol).fontSize(18).fontColor([this.colors().onAccent])
+      }.width(26).height(26).borderRadius(8)
+        .backgroundColor(this.colors().accent)
+      Text(title).fontSize(18).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+    }.width('100%').padding({ left: 4, right: 4 })
+  }
+
+  @Builder
+  private mineAccountCard() {
+    Column({ space: 14 }) {
+      Row({ space: 14 }) {
+        Stack({ alignContent: Alignment.Center }) {
+          if (this.signedIn && this.account.avatarUrl.length > 0) {
+            Image(this.account.avatarUrl).width(64).height(64).borderRadius(32)
+          } else {
+            Text(this.signedIn ? this.account.label.substring(0, 1) : '华')
+              .fontSize(28).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
+          }
+        }.width(64).height(64).borderRadius(32)
+          .backgroundColor('#B3' + this.colors().surface.substring(1))
+          .border({ width: 1, color: '#99' + this.colors().surface.substring(1) })
+        Column({ space: 7 }) {
+          Text(this.signedIn ? this.account.label : '华为开发者账号')
+            .fontSize(18).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+            .maxLines(2).wordBreak(WordBreak.BREAK_ALL).width('100%')
+          Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+            Text(this.sessionNotice.length > 0 ? this.sessionNotice :
+              (this.signedIn ? '开发者身份已连接' : '登录后即可上架和评价'))
+              .fontSize(12).fontColor(this.colors().textSecondary).margin({ right: 6 })
+            if (this.signedIn && this.account.realNameVerified !== undefined) {
+              Text(this.account.realNameVerified ? '已实名' : '未实名')
+                .fontSize(10).fontWeight(FontWeight.Medium).maxLines(1)
+                .fontColor(this.account.realNameVerified ? this.colors().success : this.colors().textSecondary)
+                .backgroundColor(this.account.realNameVerified ? this.colors().successSoft : this.colors().surface)
+                .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(5)
+            }
+          }.width('100%')
+        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+        if (this.signedIn) {
+          Button({ type: ButtonType.Capsule }) {
+            Row({ space: 5 }) {
+              SymbolGlyph($r('sys.symbol.arrow_right')).fontSize(14).fontColor([this.colors().textSecondary])
+              Text('退出').fontSize(12).fontWeight(FontWeight.Medium).fontColor(this.colors().textSecondary)
+            }.justifyContent(FlexAlign.Center)
+          }.height(40).padding({ left: 12, right: 12 })
+            .backgroundColor('#D9' + this.colors().surface.substring(1))
+            .border({ width: 0.5, color: '#99' + this.colors().surface.substring(1), radius: 20 })
+            .responseRegion({ x: 0, y: -2, width: '100%', height: 44 })
+            .accessibilityText('退出华为开发者账号').onClick(() => this.confirmSignOut())
+        }
+      }.width('100%')
+      if (this.loginMessage.length > 0) {
+        Text(this.loginMessage).fontSize(12).fontColor(this.colors().textSecondary)
+          .maxLines(3).width('100%')
+      }
+      if (!this.signedIn) {
+        Button(this.loginBusy ? '等待浏览器授权…' : '登录华为开发者账号')
+          .height(44).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
+          .borderRadius(14).enabled(!this.loginBusy).width('100%').onClick(() => this.login())
+      }
+    }.alignItems(HorizontalAlign.Start).padding({ left: 18, right: 18, top: 20, bottom: 20 })
+      .width('100%').borderRadius(24)
+      .linearGradient({ angle: 125, colors: [[this.colors().accentSoft, 0],
+        [this.colors().hero, 0.5], [this.colors().surface, 1]] })
+      .border({ width: 1, color: '#99' + this.colors().surface.substring(1), radius: 24 })
+  }
+
+  @Builder
+  private mineCertificateCard() {
+    Column({ space: 12 }) {
+      Column({ space: 10 }) {
+        Row({ space: 12 }) {
+          Stack({ alignContent: Alignment.Center }) {
+            SymbolGlyph($r('sys.symbol.checkmark_shield')).fontSize(24).fontColor([this.colors().accent])
+          }.width(46).height(46).backgroundColor(this.colors().accentSoft).borderRadius(14)
+          Column({ space: 5 }) {
+            Text('本机签名证书').fontSize(15).fontWeight(FontWeight.Medium)
+              .fontColor(this.colors().text).maxLines(1)
+            Text(this.certLabel.length > 0 ? this.certLabel : '尚未获取证书')
+              .fontSize(11).fontColor(this.colors().textSecondary).maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            if (this.certExpiry.length > 0) {
+              Text('有效期至 ' + this.certExpiry + (this.certExpired ? ' · 已到期' : ''))
+                .fontSize(11).fontColor(this.certExpired ? this.colors().danger : this.colors().textSecondary)
+                .maxLines(2)
+            }
+          }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+          Row({ space: 4 }) {
+            if (this.certReady) {
+              SymbolGlyph($r('sys.symbol.checkmark_circle_fill')).fontSize(13)
+                .fontColor([this.colors().success])
+            }
+            Text(this.certReady ? '已配对' : (this.certExpired ? '待重建' : '待申请'))
+              .fontSize(11).fontWeight(FontWeight.Medium).maxLines(1)
+              .fontColor(this.certReady ? this.colors().success :
+                (this.certExpired ? this.colors().danger : this.colors().textSecondary))
+          }.padding({ left: 8, right: 8, top: 6, bottom: 6 }).borderRadius(8)
+            .backgroundColor(this.certReady ? this.colors().successSoft :
+              (this.certExpired ? this.colors().dangerSoft : this.colors().surface))
+        }.width('100%')
+        if ((!this.certReady && !this.certExpired) || this.identityMessage.length > 0) {
+          Text(this.identityMessage.length > 0 ? this.identityMessage :
+            (this.identityBusy ? '正在核对账号现有调试证书…' : '安装时自动复用或申请本机签名证书'))
+            .fontSize(11).fontColor(this.colors().textTertiary).maxLines(3).width('100%')
+        }
+        if (this.backupWarning.length > 0) {
+          Text(this.backupWarning).fontSize(11).fontColor(this.colors().danger).maxLines(4).width('100%')
+        }
+        if (this.signedIn && !this.certReady && !this.certExpired) {
+          Button(this.identityBusy ? '正在准备…' : '获取调试证书')
+            .height(44).width('100%').fontSize(13).backgroundColor(this.colors().accent)
+            .fontColor(this.colors().onAccent).borderRadius(12).enabled(!this.identityBusy)
+            .onClick(() => this.prepareSigningIdentity())
+        }
+        if (this.signedIn && this.certExpired) {
+          Button(this.identityBusy ? '正在重建…' : '重建签名身份')
+            .height(44).width('100%').fontSize(13).backgroundColor(this.colors().accent)
+            .fontColor(this.colors().onAccent).borderRadius(12).enabled(!this.identityBusy)
+            .onClick(() => this.prepareSigningIdentity())
+        }
+      }.alignItems(HorizontalAlign.Start).width('100%').padding(12)
+        .backgroundColor(this.colors().fill).borderRadius(18)
+      Row({ space: 10 }) {
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 7 }) {
+            if (this.identityBusy) {
+              LoadingProgress().width(17).height(17).color(this.colors().onAccent)
+            } else {
+              SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(17).fontColor([this.colors().onAccent])
+            }
+            Text(this.identityBusy ? '重置中…' : '证书重置').fontSize(12)
+              .fontWeight(FontWeight.Medium).fontColor(this.colors().onAccent).maxLines(1)
+          }.justifyContent(FlexAlign.Center)
+        }.height(44).layoutWeight(1).padding({ left: 8, right: 8 })
+          .backgroundColor(this.colors().accent).borderRadius(14)
+          .enabled(!this.identityBusy && this.signedIn).onClick(() => this.resetCertificate())
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 7 }) {
+            SymbolGlyph($r('sys.symbol.gearshape')).fontSize(17).fontColor([this.colors().text])
+            Text('管理 AGC 证书').fontSize(12).fontWeight(FontWeight.Medium)
+              .fontColor(this.colors().text).maxLines(1)
+          }.justifyContent(FlexAlign.Center)
+        }.height(44).layoutWeight(1).padding({ left: 8, right: 8 })
+          .backgroundColor(this.colors().accentSoft).borderRadius(14)
+          .onClick(() => {
+            this.animateOverlay(() => { this.showCertSheet = true; });
+            this.loadCertRows();
+          })
+      }.width('100%')
+      if (this.certMessage.length > 0) {
+        Text(this.certMessage).fontSize(11).fontColor(this.colors().danger).maxLines(2).width('100%')
+      }
+    }.alignItems(HorizontalAlign.Start).padding(16).width('100%')
+      .backgroundColor(this.colors().surface).borderRadius(24)
+  }
+
+  @Builder
+  private mineProfileCard() {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 14 }) {
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.doc_text')).fontSize(24).fontColor([this.colors().accent])
+        }.width(44).height(44).backgroundColor(this.colors().accentSoft).borderRadius(14)
+        Column({ space: 6 }) {
+          Text('本地 Profile').fontSize(16).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
+          Text('查看与管理保存的签名授权').fontSize(12).fontColor(this.colors().textSecondary)
+        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([this.colors().textTertiary])
+      }.width('100%')
+    }.padding(16).width('100%').backgroundColor(this.colors().surface).borderRadius(24)
+      .accessibilityText('本地 Profile，查看与管理保存的签名授权')
+      .onClick(() => this.animateOverlay(() => { this.showLocalProfiles = true; }))
+  }
+
+  @Builder
+  private mineDeviceCard() {
+    Column({ space: 12 }) {
+        Row({ space: 14 }) {
+          Stack({ alignContent: Alignment.Center }) {
+          if (this.deviceBusy) {
+            LoadingProgress().width(24).height(24).color(this.colors().accent)
+          } else {
+            SymbolGlyph(this.deviceConnected ? $r('sys.symbol.wifi') : $r('sys.symbol.wifi_slash'))
+              .fontSize(24).fontColor([this.colors().accent])
+          }
+          }.width(44).height(44).backgroundColor(this.colors().accentSoft).borderRadius(14)
+          Column({ space: 6 }) {
+            Text('无线调试').fontSize(16).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
+            Text(this.deviceBusy ? '正在检测…' : (this.deviceConnected ? '已连接' : '未连接'))
+              .fontSize(12).fontColor(this.deviceConnected ? this.colors().success : this.colors().textSecondary)
+          }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+          if (this.deviceConnected) {
+            Button({ type: ButtonType.Capsule }) {
+              Row({ space: 6 }) {
+                SymbolGlyph($r('sys.symbol.xmark')).fontSize(14).fontColor([this.colors().textSecondary])
+                Text('释放').fontSize(12).fontColor(this.colors().textSecondary)
+              }
+            }.height(38).backgroundColor(this.colors().fill)
+              .padding({ left: 14, right: 14 })
+              .responseRegion({ x: 0, y: -3, width: '100%', height: 44 })
+              .id('mine-device-release')
+              .onClick(() => this.releaseDeviceLink())
+          } else if (!this.deviceBusy) {
+            Button({ type: ButtonType.Capsule }) {
+              Row({ space: 6 }) {
+                SymbolGlyph($r('sys.symbol.link')).fontSize(14).fontColor([this.colors().onAccent])
+                Text('连接').fontSize(12).fontColor(this.colors().onAccent)
+              }
+            }.height(38).backgroundColor(this.colors().accent)
+              .padding({ left: 14, right: 14 }).responseRegion({ x: 0, y: -3, width: '100%', height: 44 })
+              .id('mine-device-connect')
+              .onClick(() => this.animateOverlay(() => { this.showReconnect = true; }))
+          }
+        }.width('100%')
+        if (this.deviceMessage.length > 0) {
+          Text(this.deviceMessage).fontSize(11).fontColor(this.colors().accent).width('100%')
+        }
+    }.alignItems(HorizontalAlign.Start).padding(16).width('100%')
+      .backgroundColor(this.colors().surface).borderRadius(24)
+  }
+
+  @Builder
+  private mineTitleBar() {
+    Row() {
+      Text('我的').fontSize(30).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+      Blank().layoutWeight(1)
+      StoreImmersiveIconButton({ symbol: $r('sys.symbol.gearshape'), label: '设置', controlId: 'mine-settings',
+        visible: this.rootHeaderVisible(Index.TAB_MINE),
+        action: () => StorePageMotion.pushUrl({ url: 'pages/Settings' }), backAction: () => { this.onBackPress(); } })
+    }.width('100%').height('100%').padding({ left: this.pageInset(), right: this.pageInset() })
+  }
+
+  @Builder
   private minePage() {
     HdsNavigation() {
       Scroll(this.mineScroller) {
-        Column({ space: 16 }) {
-          // ── 华为开发者身份 ──
-          Column({ space: 15 }) {
-            Row({ space: 14 }) {
-              if (this.signedIn && this.account.avatarUrl.length > 0) {
-                Image(this.account.avatarUrl).width(58).height(58).borderRadius(29)
-              } else {
-                Text(this.signedIn ? this.account.label.substring(0, 1) : '华')
-                  .fontSize(22).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
-                  .width(58).height(58).textAlign(TextAlign.Center)
-                  .backgroundColor(this.colors().accentSoft).borderRadius(29)
-              }
-              Column({ space: 5 }) {
-                Text(this.signedIn ? this.account.label : '华为开发者账号')
-                  .fontSize(18).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
-                Row({ space: 6 }) {
-                  Text(this.sessionNotice.length > 0 ? this.sessionNotice :
-                  (this.signedIn ? '开发者身份已连接' : '登录后即可上架和评价'))
-                    .fontSize(12).fontColor(this.colors().textSecondary).flexShrink(1)
-                  if (this.signedIn && this.account.realNameVerified !== undefined) {
-                    Text(this.account.realNameVerified ? '已实名' : '未实名')
-                      .fontSize(10).fontWeight(FontWeight.Medium).maxLines(1).flexShrink(0)
-                      .fontColor(this.account.realNameVerified ? this.colors().success : this.colors().textSecondary)
-                      .backgroundColor(this.account.realNameVerified ? this.colors().successSoft : this.colors().fill)
-                      .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(5)
-                  }
-                }.alignItems(VerticalAlign.Center).width('100%')
-              }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-              // 已登录时退出收成一个图标，比一整条按钮简洁；点一下仍会二次确认
-              if (this.signedIn) {
-                Button('退出').height(44).fontSize(12)
-                  .fontColor(this.colors().textSecondary).backgroundColor(this.colors().fill)
-                  .borderRadius(22).accessibilityText('退出华为开发者账号')
-                  .onClick(() => this.confirmSignOut())
-              }
-            }.width('100%')
-            if (this.loginMessage.length > 0) {
-              Text(this.loginMessage).fontSize(12).fontColor(this.colors().textSecondary)
-                .maxLines(3).width('100%')
-            }
-            if (!this.signedIn) {
-              Button(this.loginBusy ? '等待浏览器授权…' : '登录华为开发者账号')
-                .height(44).backgroundColor(this.colors().accent)
-                .fontColor(this.colors().onAccent)
-                .borderRadius(14).enabled(!this.loginBusy).width('100%')
-                .onClick(() => this.login())
-            }
-          }.alignItems(HorizontalAlign.Start).padding(20)
-            .width('100%').backgroundColor(this.colors().surface).borderRadius(22)
-
-          // ── 证书管理：展示当前证书本体 + 操作 ──
-          Text('证书管理').fontSize(17).fontWeight(FontWeight.Bold)
-            .fontColor(this.colors().text).width('100%').padding({ left: 4 })
-          Column({ space: 14 }) {
-            Row({ space: 12 }) {
-              Text('证')
-                .fontSize(18).fontColor(this.colors().accent).textAlign(TextAlign.Center)
-                .width(44).height(44).backgroundColor(this.colors().accentSoft).borderRadius(12)
-              Column({ space: 4 }) {
-                Text('本机签名证书')
-                  .fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.colors().text).maxLines(1)
-                Text(this.certLabel.length > 0 ? this.certLabel : '尚未获取证书')
-                  .fontSize(11).fontColor(this.colors().textSecondary).maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                if (this.certExpiry.length > 0) {
-                  Text('到期 ' + this.certExpiry + (this.certExpired ? ' · 已到期' : ''))
-                    .fontSize(11).fontColor(this.certExpired ? this.colors().danger : this.colors().textSecondary).maxLines(1)
-                }
-              }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-              Text(this.certReady ? '已配对' : (this.certExpired ? '待重建' : '待申请'))
-                .fontSize(11)
-                .fontColor(this.certReady ? this.colors().success : this.colors().textSecondary)
-                .padding({ left: 8, right: 8, top: 5, bottom: 5 })
-                .backgroundColor(this.certReady ? this.colors().successSoft : this.colors().fill)
-                .borderRadius(8)
-            }.width('100%')
-            if ((!this.certReady && !this.certExpired) || this.identityMessage.length > 0) {
-              Text(this.identityMessage.length > 0 ? this.identityMessage :
-                (this.identityBusy ? '正在核对账号现有调试证书…' :
-                  '安装时自动复用或申请本机签名证书'))
-                .fontSize(11).fontColor(this.colors().textTertiary).maxLines(3).width('100%')
-            }
-            // 备份没成功就说出来：本机私钥只有这一份，用户有权在重置前知道它没有副本。
-            if (this.backupWarning.length > 0) {
-              Text(this.backupWarning)
-                .fontSize(11).fontColor(this.colors().danger).maxLines(4).width('100%')
-            }
-            // 还没有可用证书时给出唯一的申请入口：复用优先，确无可用证书才占槽位。
-            if (this.signedIn && !this.certReady && !this.certExpired) {
-              Button(this.identityBusy ? '正在准备…' :
-                '获取调试证书')
-                .height(44).width('100%').fontSize(13)
-                .backgroundColor(this.colors().accent)
-                .fontColor(this.colors().onAccent).borderRadius(12)
-                .enabled(!this.identityBusy)
-                .onClick(() => this.prepareSigningIdentity())
-            }
-            if (this.signedIn && this.certExpired) {
-              Button(this.identityBusy ? '正在重建…' :
-                '重建签名身份')
-                .height(44).width('100%').fontSize(12)
-                .backgroundColor(this.colors().accentSoft)
-                .fontColor(this.colors().accent)
-                .borderRadius(12).enabled(!this.identityBusy)
-                .onClick(() => this.prepareSigningIdentity())
-            }
-            Row({ space: 10 }) {
-              Button(this.identityBusy ? '重置中…' : '证书重置')
-                .height(44).fontSize(12).layoutWeight(1)
-                .backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
-                .borderRadius(12).enabled(!this.identityBusy && this.signedIn)
-                .onClick(() => this.resetCertificate())
-              Button('管理 AGC 证书')
-                .height(44).fontSize(12).layoutWeight(1)
-                .backgroundColor(this.colors().fill).fontColor(this.colors().textSecondary)
-                .borderRadius(12)
-                .onClick(() => {
-                  this.animateOverlay(() => { this.showCertSheet = true; });
-                  this.loadCertRows();
-                })
-            }.width('100%')
-            if (this.certMessage.length > 0) {
-              Text(this.certMessage).fontSize(11).fontColor(this.colors().danger)
-                .maxLines(2).width('100%')
-            }
-          }.alignItems(HorizontalAlign.Start).padding(20)
-            .width('100%').backgroundColor(this.colors().surface).borderRadius(22)
-
-          Row({ space: 12 }) {
-            Stack({ alignContent: Alignment.Center }) {
-              SymbolGlyph($r('sys.symbol.doc_text')).fontSize(22).fontColor([this.colors().accent])
-                .width(22).height(22)
-            }.width(44).height(44).backgroundColor(this.colors().accentSoft).borderRadius(12)
-            Column({ space: 4 }) {
-              Text('本地 Profile').fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
-              Text('查看与管理保存的签名授权').fontSize(11).fontColor(this.colors().textSecondary)
-            }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-            SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([this.colors().textTertiary])
-          }.padding(20).width('100%').backgroundColor(this.colors().surface).borderRadius(22)
-            .accessibilityText('本地 Profile，查看与管理保存的签名授权')
-            .onClick(() => this.animateOverlay(() => { this.showLocalProfiles = true; }))
-
-          // ── 设备连接：已连接只占一行；断线时才给连接按钮 ──
-          Text('设备连接').fontSize(17).fontWeight(FontWeight.Bold)
-            .fontColor(this.colors().text).width('100%').padding({ left: 4 })
-          Column({ space: 13 }) {
-            Row({ space: 10 }) {
-              Text(this.deviceBusy ? '◌' : (this.deviceConnected ? '✓' : '!'))
-                .fontSize(16).fontWeight(FontWeight.Bold)
-                .fontColor(this.deviceConnected ? this.colors().success :
-                  (this.deviceBusy ? this.colors().textTertiary : this.colors().danger))
-              Text(this.deviceBusy ? '正在检测…' :
-                (this.deviceConnected ? '无线调试已连接' : '无线调试未连接'))
-                .fontSize(14).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
-                .layoutWeight(1)
-              if (this.deviceConnected) {
-                // 已连接就一行，不再显示 UDID；旁边给一个主动释放的出口
-                Button('释放')
-                  .height(44).fontSize(12).fontColor(this.colors().textSecondary)
-                  .backgroundColor(this.colors().fill).borderRadius(11)
-                  .onClick(() => this.releaseDeviceLink())
-              } else if (!this.deviceBusy) {
-                Button('连接')
-                  .height(44).fontSize(12).fontColor(this.colors().onAccent)
-                  .backgroundColor(this.colors().accent).borderRadius(11)
-                  .onClick(() => { this.animateOverlay(() => { this.showReconnect = true; }); })
-              }
-            }.width('100%')
-            if (this.deviceMessage.length > 0) {
-              Text(this.deviceMessage).fontSize(11).fontColor(this.colors().accent)
-                .width('100%')
-            }
-          }.alignItems(HorizontalAlign.Start).padding(18)
-            .width('100%').backgroundColor(this.colors().surface).borderRadius(22)
-
+        Column({ space: 14 }) {
+          this.mineAccountCard()
+          Column({ space: 10 }) {
+            this.mineSectionHeading($r('sys.symbol.key'), '签名材料')
+            this.mineCertificateCard()
+            this.mineProfileCard()
+          }.width('100%').alignItems(HorizontalAlign.Start)
+          Column({ space: 10 }) {
+            this.mineSectionHeading($r('sys.symbol.link'), '设备连接')
+            this.mineDeviceCard()
+          }.width('100%').alignItems(HorizontalAlign.Start)
           Row({ space: 6 }) {
             Text('轻启·安装器').fontSize(14).lineHeight(20).height(20).fontColor(this.colors().textTertiary)
             if (this.installerVersionName.length > 0) {
@@ -4647,11 +4609,13 @@ struct Index {
                 .maxLines(1).textAlign(TextAlign.Center)
                 .accessibilityText('当前安装器版本 ' + this.installerVersionName)
             }
-          }.alignItems(VerticalAlign.Center).justifyContent(FlexAlign.Center).margin({ top: 14, bottom: 8 })
-        }.width('calc(100% - ' + (this.pageInset() * 2) + 'vp)').constraintSize({ maxWidth: StoreLayout.contentWidth }).padding({ top: this.statusBarInset + 72, bottom: 110 })
+          }.alignItems(VerticalAlign.Center).justifyContent(FlexAlign.Center).margin({ top: 44, bottom: 8 })
+        }.width('calc(100% - ' + (this.pageInset() * 2) + 'vp)').constraintSize({ maxWidth: StoreLayout.contentWidth })
+          .padding({ top: this.statusBarInset + 58, bottom: 110 })
       }.width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Off)
+        .onDidScroll(() => ForegroundIdle.interaction())
     }.titleBar({style:this.scrollTitleBarStyle(56),avoidLayoutSafeArea:true,
-      content:{stackBuilder:()=>this.simpleTitleBar('我的'),divider:{showType:DividerShowType.OFF}}
+      content:{stackBuilder:()=>this.mineTitleBar(),divider:{showType:DividerShowType.OFF}}
     }).titleMode(HdsNavigationTitleMode.MINI).mode(NavigationMode.Stack).hideBackButton(true)
       .systemBarStyle({statusBarContentColor:this.colors().text},{statusBarContentColor:this.colors().text})
       .bindToScrollable([this.mineScroller])
@@ -4787,6 +4751,7 @@ struct Index {
     .barMode(BarMode.Fixed)
     .vertical(false)
     .scrollable(false)
+    .animationDuration(0)
     .barOverlap(true)
     // lightColor 原本是饱和蓝，被 IMMERSIVE 材质压成一坨暗色 —— 底部那块
     // "暗区"。改成随主题的卡片色，材质才是正常的玻璃感。
@@ -4803,16 +4768,7 @@ struct Index {
         materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
       }
     })
-    .onChange((index: number) => {
-      this.currentTab = index;
-      if (index === 2) { this.loadJobs(); this.loadMyApps(); this.loadUpdateCatalog(); this.scanDeviceInstalled(); this.loadSigningExpiries(); }
-      if (index === 3) {
-        // 安装流程可能刚自动准备了证书，进入「我的」后同步显示并备份。
-        this.recoverSigningIdentity();
-        // 设备状态探完再扫「商店已安装」——扫描依赖 connected 与 installedVersion
-        this.checkDevice().then(() => this.refreshCatalogInstallState());
-      }
-    })
+    .onChange((index: number) => this.onTabChanged(index))
     .width('100%').height('100%')
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])

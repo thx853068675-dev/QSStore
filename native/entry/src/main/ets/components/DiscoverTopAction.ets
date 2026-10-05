@@ -2,6 +2,29 @@ import { uiMaterial } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { motion } from '@kit.MultimodalAwarenessKit';
 import { Palette } from '../theme/Palette';
+import { DiscoverMotion } from './DiscoverHeader';
+
+/** Scroll thresholds update only this overlay, not the catalog's card tree. */
+@Component
+export struct DiscoverTopOverlay {
+  @ObjectLink motion: DiscoverMotion;
+  @Prop darkMode: boolean = false;
+  @Prop inset: number = 24;
+  @Prop active: boolean = true;
+  @Prop epoch: number = 0;
+  action: () => void = () => {};
+
+  build() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      if (this.motion.showTop && this.active) {
+        ForEach([this.epoch], (_epoch: number) => {
+          DiscoverTopAction({ darkMode: this.darkMode, inset: this.inset, action: this.action })
+            .position({ left: 0, bottom: 116 }).hitTestBehavior(HitTestMode.None)
+        }, (epoch: number) => String(epoch))
+      }
+    }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
+  }
+}
 
 /** 系统握持事件驱动布局；放桌上或双手握持时保留位置，避免按钮来回跳动。 */
 export class HoldingSide {
@@ -47,6 +70,7 @@ export class HoldingSide {
 
 @Component
 export struct DiscoverTopAction {
+  @StorageProp('routeTransitioning') private routeTransitioning:boolean=false;
   @Prop darkMode: boolean = false;
   @Prop inset: number = 24;
   @Prop @Watch('onActiveChanged') active: boolean = true;
@@ -82,7 +106,7 @@ export struct DiscoverTopAction {
         // Popup supports system material throughout the page. A nonmodal,
         // arrowless circular popup supplies the native floating backplate.
         Column() {}.width(48).height(48)
-          .bindPopup(this.active, { builder: this.immersiveAction, width: 48, radius: 24,
+          .bindPopup(this.active&&!this.routeTransitioning, { builder: this.immersiveAction, width: 48, radius: 24,
             placement: Placement.Top, targetSpace: 0, offset: { x: 0, y: 48 },
             enableArrow: false, autoCancel: false, focusable: false, mask: false,
             systemMaterial: new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THIN,

@@ -114,6 +114,7 @@ export struct StoreIconButton {
 /** Same native floating material as DiscoverTopAction, with an older-system glass fallback. */
 @Component
 export struct StoreImmersiveIconButton {
+  @StorageProp('routeTransitioning') private routeTransitioning:boolean=false;
   symbol:Resource=$r('sys.symbol.chevron_left');
   label:string='返回';
   title:string='';
@@ -141,7 +142,7 @@ export struct StoreImmersiveIconButton {
   }
   build(){
     if(deviceInfo.sdkApiVersion>=26&&uiMaterial.isImmersiveMaterialSupported()){
-      Column(){}.width(this.controlWidth()).height(44).bindPopup(this.showing&&this.visible,{builder:this.content,width:this.controlWidth(),radius:22,
+      Column(){}.width(this.controlWidth()).height(44).bindPopup(this.showing&&this.visible&&!this.routeTransitioning,{builder:this.content,width:this.controlWidth(),radius:22,
         placement:Placement.Bottom,targetSpace:0,offset:{x:0,y:-44},enableArrow:false,autoCancel:false,
         onWillDismiss:(action:DismissPopupAction)=>{if(action.reason===DismissReason.PRESS_BACK)this.backAction();},
         focusable:false,mask:false,systemMaterial:new uiMaterial.ImmersiveMaterial({
@@ -184,6 +185,7 @@ export struct StorePageHeader {
 /** 浮动主操作使用系统材质；低版本继续使用原有实色按钮。 */
 @Component
 export struct StoreImmersiveAction {
+  @StorageProp('routeTransitioning') private routeTransitioning:boolean=false;
   @Prop visible:boolean=true;
   @Prop tint:string='#1F5DEF';
   backAction:()=>void=()=>{};
@@ -194,7 +196,7 @@ export struct StoreImmersiveAction {
     if(deviceInfo.sdkApiVersion>=26&&uiMaterial.isImmersiveMaterialSupported()){
       Column(){}.width('100%').height(52)
         .onSizeChange((_old:SizeOptions,size:SizeOptions)=>{this.measuredWidth=Number(size.width);})
-        .bindPopup(this.visible&&this.measuredWidth>0,{builder:this.immersiveContent,width:this.measuredWidth,radius:18,
+        .bindPopup(this.visible&&!this.routeTransitioning&&this.measuredWidth>0,{builder:this.immersiveContent,width:this.measuredWidth,radius:18,
           // 底部浮层向上布局后回到锚点；向下布局会触发系统避让，再被负偏移推高。
           placement:Placement.Top,targetSpace:0,offset:{x:0,y:52},enableArrow:false,autoCancel:false,
           focusable:false,mask:false,

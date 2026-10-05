@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.18)
 project(qingqi_hap_core LANGUAGES C CXX)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/archive" "${CMAKE_CURRENT_BINARY_DIR}/archive-codecs")
 
@@ -29,5 +29,11 @@ add_library(hap_core SHARED
   hap_core/napi_bridge.cpp)
 add_dependencies(hap_core qingqi_rust_signer)
 target_compile_features(hap_core PRIVATE cxx_std_17)
-target_compile_options(hap_core PRIVATE -Wall -Wextra)
+target_compile_options(hap_core PRIVATE -Wall -Wextra -ffunction-sections -fdata-sections)
+set_target_properties(hap_core PROPERTIES
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON)
+# NAPI registers through its constructor. Static Rust/archive symbols are
+# implementation details, so they must not keep unused dependency code alive.
+target_link_options(hap_core PRIVATE -Wl,--gc-sections -Wl,--exclude-libs,ALL)
 target_link_libraries(hap_core PRIVATE "${QINGQI_RUST_LIB}" libace_napi.z.so z archive_static)

@@ -20,6 +20,7 @@ const GRANTABLE_ACLS: string[] = [
   'ohos.permission.WRITE_AUDIO', 'ohos.permission.READ_IMAGEVIDEO',
   'ohos.permission.WRITE_IMAGEVIDEO', 'ohos.permission.READ_WRITE_DESKTOP_DIRECTORY',
   'ohos.permission.ACCESS_DDK_USB', 'ohos.permission.ACCESS_DDK_HID',
+  'ohos.permission.ACCESS_DDK_USB_SERIAL',
   'ohos.permission.READ_PASTEBOARD', 'ohos.permission.FILE_ACCESS_PERSIST',
   'ohos.permission.INTERCEPT_INPUT_EVENT', 'ohos.permission.INPUT_MONITORING',
   'ohos.permission.SHORT_TERM_WRITE_IMAGEVIDEO', 'ohos.permission.READ_WRITE_USER_FILE',

@@ -4,6 +4,7 @@ import { image } from '@kit.ImageKit';
 import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
 import { InstallJob } from '../jobs/InstallJob';
 import { InstalledAppRegistry } from '../jobs/InstalledAppRegistry';
+import { AppDisplayName } from './AppDisplayName';
 
 export class InspectionField { key:string=''; label:string=''; value:string=''; }
 export class InspectionSection { name:string=''; fields:InspectionField[]=[]; }
@@ -14,7 +15,7 @@ export class InstalledSelection {
 export class InstalledInspection {
   static selectedIcon?:image.PixelMap;
   static selection(job:InstallJob,title:string,appId:number):InstalledSelection {
-    const row=new InstalledSelection();row.bundleName=job.bundleName;row.title=InstalledAppRegistry.displayName(job.bundleName)||title;
+    const row=new InstalledSelection();row.bundleName=job.bundleName;row.title=AppDisplayName.forBundle(job.bundleName,title);
     row.versionName=job.versionName;row.versionCode=job.versionCode;row.appId=appId;
     row.source=job.sourceUrl==='device'?'设备识别':job.sourceUrl==='local'?'本地文件':'在线商店';
     row.moduleName=job.moduleName;row.mainAbility=job.mainAbility;row.jobId=job.id;row.updatedAt=job.updatedAt;return row;

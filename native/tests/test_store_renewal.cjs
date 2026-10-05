@@ -109,7 +109,7 @@ test('Management and application information retain a confirmed online renewal s
   });
   let dialog;
   const routes=[],box={AlertDialog:{show:options=>dialog=options},InstallStage:jobs.InstallStage,InstalledInspection:{selection:(job,title,appId)=>({bundleName:job.bundleName,title,appId})},
-    router:{pushUrl:args=>routes.push(args)}};
+    StorePageMotion:{pushUrl:args=>routes.push(args)}};
   vm.runInNewContext(ts.transpileModule('class Page { '+methods.join('\n')+' };globalThis.Page=Page;',{
     compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
   const ui=new box.Page();Object.assign(ui,{catalogForJob:()=>undefined,currentInstalledView:job=>job,jobTitle:()=> 'title',jobIcon:()=>undefined,pendingJobs:[],renewalPreparing:[]});

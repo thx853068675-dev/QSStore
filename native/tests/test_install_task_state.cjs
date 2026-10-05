@@ -50,11 +50,10 @@ function pages(f) {
     LocalInstallTimeline: f.load('jobs/LocalInstallTimeline').LocalInstallTimeline,
     setInterval: () => 1, clearInterval: () => {},
     isPending: f.load('jobs/RecoveryPlanner').isPending };
-  const index = pageClass('Index', ['latestAssets', 'assetForBundle', 'observeInstallTasks', 'taskForApp', 'taskPending', 'taskRunning',
-    'taskLabel', 'jobRunning', 'taskJobLabel'], globals);
+  const index = pageClass('Index', ['latestAssets', 'assetForBundle', 'observeInstallTasks', 'taskForApp', 'taskPending', 'jobRunning', 'queueTime', 'taskJobLabel'], globals);
   Object.assign(index, { installSubscription: -1, installTasks: [], pendingJobs: [], installedJobs: [],
     catalogApp: () => undefined, updateFor: () => undefined,
-    forgetInstalledVersions() {}, refreshCatalogInstallState() {}, checkInstalledUpdates() {} });
+    refreshCatalogInstallState() {}, checkInstalledUpdates() {} });
   index.observeInstallTasks();
   function detail() {
     const ui = pageClass('Detail', ['observeInstallTasks', 'currentInstallTask', 'syncInstallTask',
@@ -98,15 +97,15 @@ test('Discover, a newly opened Detail, and Management consume the same running t
   const work = f.scheduler.runExclusive(f.job.id, () => gate);
   f.state.downloadProgress(f.job.id, 50, 100);
   const d = detail();
-  assert.equal(index.taskLabel(42), '下载中 50%');
-  assert.equal(d.installButtonLabel(), index.taskLabel(42));
+  assert.equal(index.taskJobLabel(f.job), '下载中 50%');
+  assert.equal(d.installButtonLabel(), index.taskJobLabel(f.job));
   assert.equal(d.downloadPercent, 50); assert.equal(d.downloadBusy, true);
   assert.equal(index.pendingJobs.length, 1);
   assert.equal(index.taskJobLabel(index.pendingJobs[0]), d.installButtonLabel());
   await assert.rejects(f.scheduler.runExclusive(f.job.id, async () => {}), /正在执行/);
   f.job.stage = f.InstallStage.PROFILE_READY; await f.store.save(f.job);
   assert.equal(d.installButtonLabel(), '签名中');
-  assert.equal(index.taskLabel(42), d.installButtonLabel());
+  assert.equal(index.taskJobLabel(f.job), d.installButtonLabel());
   f.job.stage = f.InstallStage.INSTALLED; await f.store.save(f.job); release(); await work;
   assert.equal(d.downloadBusy, false); assert.equal(d.installButtonLabel(), '打开应用');
   assert.equal(index.taskPending(42), false); assert.equal(index.pendingJobs.length, 0);
@@ -120,7 +119,7 @@ test('paused device/account/network states stay consistent and release running U
       f.job.stage = f.InstallStage[stage]; await f.store.save(f.job);
     });
     assert.equal(index.jobRunning(f.job.id), false); assert.equal(d.downloadBusy, false);
-    assert.equal(d.installButtonLabel(), index.taskLabel(42) + ' · 继续');
+    assert.equal(d.installButtonLabel(), index.taskJobLabel(f.job) + ' · 继续');
   }
 });
 test('unknown device state leaves installation available and offers recorded updates', () => {
@@ -188,7 +187,7 @@ test('timeout keeps every page busy until actual work finishes', async () => {
   let release; const gate = new Promise(r => release = r);
   await assert.rejects(f.scheduler.runExclusive(f.job.id, () => gate, 5), /超时/);
   assert.equal(d.downloadBusy, true); assert.equal(d.installButtonLabel(), '正在收尾');
-  assert.equal(index.taskLabel(42), '正在收尾'); release(); await new Promise(setImmediate);
+  assert.equal(index.taskJobLabel(f.job), '正在收尾'); release(); await new Promise(setImmediate);
   assert.equal(d.downloadBusy, false); assert.equal(index.jobRunning(f.job.id), false);
 });
 
@@ -535,8 +534,8 @@ test('device transfer has real byte percentages; system install never pretends t
   f.job.stage = f.InstallStage.INSTALLING; await f.store.save(f.job);
   f.state.setRunning(f.job.id, true);
   f.state.installProgress(f.job.id, 'transfer', 25, 100);
-  assert.equal(index.taskLabel(42), '传送中 25%');
-  assert.equal(d.installButtonLabel(), index.taskLabel(42));
+  assert.equal(index.taskJobLabel(f.job), '传送中 25%');
+  assert.equal(d.installButtonLabel(), index.taskJobLabel(f.job));
   assert.equal(f.state.determinate(f.state.snapshot()[0]), true);
   // Updating another job field must not erase the live transfer observation.
   await f.store.save(f.job); assert.equal(d.downloadPercent, 25);
@@ -545,7 +544,7 @@ test('device transfer has real byte percentages; system install never pretends t
   assert.equal(f.state.determinate(f.state.snapshot()[0]), false);
   assert.doesNotMatch(d.installButtonLabel(), /95|100%/);
   f.state.installProgress(f.job.id, 'verifying', 0, 0);
-  assert.match(index.taskLabel(42), /^确认安装结果/);
+  assert.match(index.taskJobLabel(f.job), /^确认安装结果/);
   f.job.stage = f.InstallStage.INSTALLED; await f.store.save(f.job);
   f.state.setRunning(f.job.id, false);
   assert.equal(f.state.snapshot()[0].percent, 100);

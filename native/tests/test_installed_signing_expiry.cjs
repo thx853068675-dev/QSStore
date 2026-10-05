@@ -15,6 +15,7 @@ function fixture() {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText, identity);
   const mocks = {
+    './ForegroundIdle': { ForegroundIdle: { wait: async () => {} } },
     '@kit.AbilityKit': { bundleManager: { BundleFlag: { GET_BUNDLE_INFO_WITH_SIGNATURE_INFO: 1 },
       getBundleInfoForSelfSync: () => ({ name: 'self' }), getBundleInfoSync: () => { if (f.unavailable) throw Object.assign(Error('query denied'), { code: f.errorCode || 201 }); return f.live; } } },
     '@kit.ArkTS': { util: { Base64Helper: class { decodeSync(text) { return new Uint8Array(Buffer.from(text, 'base64')); } } } },
@@ -168,12 +169,12 @@ function managementFixture() {
     estimateMaterials: async (_context, bundles) => { f.batches.push(Array.from(bundles)); if (f.wait) await f.wait; return []; },
     estimate: () => f.estimate, label: (exact, estimate) => exact ? '到期' : estimate ? '预计到期' : '待确认',
     dueSoon: value => value > 0 };
-  const box = { InstalledSigningExpiry: expiry, getContext: () => ({}),
+  const box = { Index: { TAB_MANAGE: 2 }, ForegroundIdle: { wait: async () => {} }, InstalledSigningExpiry: expiry, getContext: () => ({}),
     InstalledAppRegistry: { installationTime: () => 1800000000000 }, InstallStage: { INSTALLED: 'installed' } };
   vm.runInNewContext(ts.transpileModule('class Page {' + methods + '}; globalThis.Page = Page;', {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
-  f.ui = new box.Page(); Object.assign(f.ui, { expiryReadToken: 0, installedJobs: [],
+  f.ui = new box.Page(); Object.assign(f.ui, { expiryReadToken: 0, pageVisible: true, currentTab: 2, installedJobs: [],
     signingExpiries: new Map(), signingExpiryEstimates: new Map(),
     allInstalledJobs: () => [{ bundleName: 'com.exact.app', versionCode: 7, stageHistory:[], updatedAt:1800000000000 },
       { bundleName: 'com.estimated.app', versionCode: 8, stageHistory:[], updatedAt:1800000000000 }] });

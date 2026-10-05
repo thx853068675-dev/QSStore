@@ -9,6 +9,7 @@ import { PackageEditor,EditablePackage } from '../jobs/PackageEditor';
 import { InstalledInspection,InspectionSection,InspectionField } from '../data/InstalledInspection';
 import { Palette } from '../theme/Palette';
 import { StoreIconButton,StoreImmersiveIconButton,StoreLayout,StorePageHeader } from '../theme/StoreDesign';
+import { StorePageMotion } from '../theme/StorePageMotion';
 
 @Observed
 class PackageEditDraft {
@@ -80,6 +81,12 @@ struct PackageInformationDialog {
 @Entry
 @Component
 struct PackageTools {
+  pageTransition() {
+    PageTransitionEnter(StorePageMotion.options(RouteType.Push)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionEnter(StorePageMotion.stationary(RouteType.Pop)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionExit(StorePageMotion.stationary(RouteType.Push)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })
+    PageTransitionExit(StorePageMotion.options(RouteType.Pop)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
+  }
   @StorageProp('darkMode') darkMode:boolean=false;
   @StorageProp('statusBarInset') statusBarInset:number=0;
   @State private drafts:PackageEditDraft[]=[];
@@ -91,7 +98,7 @@ struct PackageTools {
   private informationDialog?:CustomDialogController;
   private scroller:Scroller=new Scroller();
   private colors():Palette{return Palette.forMode(this.darkMode);}
-  aboutToAppear():void{PackageEditor.cleanup(getContext(this) as common.UIAbilityContext);this.pickerTimer=setTimeout(()=>{if(!this.disposed)this.pick();},80);}
+  aboutToAppear():void{PackageEditor.cleanup(getContext(this) as common.UIAbilityContext);this.pickerTimer=setTimeout(()=>{if(!this.disposed)this.pick();},StorePageMotion.duration+32);}
   onPageShow():void{if(!this.disposed&&!this.returning)this.headerVisible=true;}
   onPageHide():void{this.headerVisible=false;}
   aboutToDisappear():void{this.disposed=true;this.headerVisible=false;clearTimeout(this.pickerTimer);clearTimeout(this.backTimer);this.informationDialog?.close();if(!this.busy)this.dispose();}
@@ -99,6 +106,7 @@ struct PackageTools {
   private back():void{
     if(this.disposed||this.returning)return;
     this.returning=true;this.headerVisible=false;
+    StorePageMotion.prepare();
     this.backTimer=setTimeout(()=>{if(!this.disposed)router.back();},32);
   }
   private dispose():void{PackageEditor.dispose(this.drafts.map((draft:PackageEditDraft)=>draft.row));for(const draft of this.drafts){draft.pixels?.release();draft.pixels=null;if(draft.iconPath)try{fileIo.unlinkSync(draft.iconPath);}catch(_){}}this.drafts=[];}
@@ -117,28 +125,28 @@ struct PackageTools {
       .enabled(!this.busy).accessibilityText('删除导入的安装包').id('editor-delete-'+draft.row.path).onClick(()=>this.remove(draft))
   }
   private async pick():Promise<void>{
-    if(this.busy||this.disposed)return;this.busy=true;this.message='';
+    if(this.busy||this.disposed)return;this.busy=true;this.message='';this.headerVisible=false;
     try{
-      const rows=await PackageEditor.select(getContext(this) as common.UIAbilityContext);if(!rows.length)return;
+      await StorePageMotion.dismissFrame();const rows=await PackageEditor.select(getContext(this) as common.UIAbilityContext);if(!rows.length)return;
       if(this.disposed){PackageEditor.dispose(rows);return;}
       this.dispose();const drafts:PackageEditDraft[]=[];
       for(const row of rows){const draft=new PackageEditDraft(row);drafts.push(draft);if(row.icon){try{const source=image.createImageSource(row.icon);try{draft.pixels=await source.createPixelMap({desiredSize:{width:96,height:96}});}finally{source.release();}}catch(_){}}}
       this.drafts=drafts;this.scroller.scrollTo({xOffset:0,yOffset:0});
-    }catch(error){this.message=String(error);}finally{this.finish();}
+    }catch(error){this.message=String(error);}finally{if(!this.disposed&&!this.returning)this.headerVisible=true;this.finish();}
   }
   private async pickIcon(draft:PackageEditDraft):Promise<void>{
-    if(this.busy)return;this.busy=true;this.message='';
+    if(this.busy)return;this.busy=true;this.message='';this.headerVisible=false;
     try{
-      const context=getContext(this) as common.UIAbilityContext;
+      await StorePageMotion.dismissFrame();const context=getContext(this) as common.UIAbilityContext;
       const selected=await new picker.DocumentViewPicker(context).select({fileSuffixFilters:['图片|.png,.jpg,.jpeg,.webp'],maxSelectNumber:1});if(!selected.length)return;
       const path=await PackageEditor.normalizeIcon(selected[0],context),source=image.createImageSource(path);
       try{const pixels=await source.createPixelMap({desiredSize:{width:96,height:96}});draft.pixels?.release();if(draft.iconPath)try{fileIo.unlinkSync(draft.iconPath);}catch(_){}draft.pixels=pixels;draft.iconPath=path;draft.status='待生成';}finally{source.release();}
-    }catch(error){draft.status='图标读取失败：'+String(error);}finally{this.finish();}
+    }catch(error){draft.status='图标读取失败：'+String(error);}finally{if(!this.disposed&&!this.returning)this.headerVisible=true;this.finish();}
   }
   private async generate(draft:PackageEditDraft):Promise<void>{
     if(this.busy)return;this.busy=true;this.message='';draft.status='正在生成…';
-    try{await PackageEditor.edit(draft.row,draft.name,draft.iconPath,draft.bundle);draft.status='已生成，等待导出';if(this.disposed)return;const saved=await PackageEditor.saveMany(getContext(this) as common.UIAbilityContext,[draft.row]);draft.status=saved?'已导出':(draft.row.status.startsWith('导出失败')?draft.row.status:'已生成，已取消导出');}
-    catch(error){draft.status='处理失败：'+String(error);}finally{this.finish();}
+    try{await PackageEditor.edit(draft.row,draft.name,draft.iconPath,draft.bundle);draft.status='已生成，等待导出';if(this.disposed)return;this.headerVisible=false;await StorePageMotion.dismissFrame();const saved=await PackageEditor.saveMany(getContext(this) as common.UIAbilityContext,[draft.row]);draft.status=saved?'已导出':(draft.row.status.startsWith('导出失败')?draft.row.status:'已生成，已取消导出');}
+    catch(error){draft.status='处理失败：'+String(error);}finally{if(!this.disposed&&!this.returning)this.headerVisible=true;this.finish();}
   }
   private async signInstall(draft:PackageEditDraft):Promise<void>{
     if(this.busy)return;this.busy=true;this.message='';draft.status='正在生成…';
@@ -148,7 +156,7 @@ struct PackageTools {
       if(this.disposed)return;
       const preview=await LocalImport.editedPreview(context,path,draft.row.filename);
       if(this.disposed){LocalImport.discardPreview(context,preview);return;}
-      try{await router.pushUrl({url:'pages/LocalInstall',params:{preview:preview,direct:true}});draft.status='已提交签装';}
+      try{await StorePageMotion.pushUrl({url:'pages/LocalInstall',params:{preview:preview,direct:true}});draft.status='已提交签装';}
       catch(error){LocalImport.discardPreview(context,preview);throw error as Error;}
     }catch(error){draft.status='处理失败：'+String(error);}finally{this.finish();}
   }

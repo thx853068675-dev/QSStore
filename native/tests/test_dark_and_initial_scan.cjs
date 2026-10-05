@@ -51,7 +51,7 @@ function fixture() {
   });
   Object.assign(ui, { apps: [{ id: 1, latestAsset: { bundleName: 'com.example.one' } }],
     getUIContext: () => ({ animateTo: (_options, change) => change() }),
-    installedAssets(app) { return app.knownAssets?.length ? app.knownAssets : (app.latestAssets?.length ? app.latestAssets : (app.latestAsset ? [app.latestAsset] : [])); }, installedDisplay: new Map(), installedJobs: [], forgetInstalledVersions() {}, installedVersions: new Map(), catalogProbeNames: [], catalogProbeBusy: false, catalogProbePending: [],
+    installedAssets(app) { return app.knownAssets?.length ? app.knownAssets : (app.latestAssets?.length ? app.latestAssets : (app.latestAsset ? [app.latestAsset] : [])); }, installedDisplay: new Map(), installedJobs: [], installedVersions: new Map(), catalogProbeNames: [], catalogProbeBusy: false, catalogProbePending: [],
     updateCatalogReady: true, accountChecked: true, signedIn: true,
     initialScanDismissed: false, showReconnect: false, showSubmit: false, showAppConfig: false,
     activeJobId: '', pendingJobs: [], reconnectBusy: false,

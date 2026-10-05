@@ -18,8 +18,8 @@ export class ForegroundIdle {
     ForegroundIdle.timer = -1;
   }
 
-  static interaction(): void {
-    ForegroundIdle.quietUntil = Math.max(ForegroundIdle.quietUntil, Date.now() + 180);
+  static interaction(quietMs: number = 180): void {
+    ForegroundIdle.quietUntil = Math.max(ForegroundIdle.quietUntil, Date.now() + quietMs);
     ForegroundIdle.arm();
   }
 

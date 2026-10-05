@@ -11,6 +11,7 @@ function fixture() {
   const data = new exports.ListDataSource(row => String(row.id), row => JSON.stringify(row));
   const events = [];
   const listener = { onDataAdd: index => events.push(['add', index, data.totalCount()]),
+    onDataChange: index => events.push(['change', index]),
     onDataReloaded: () => events.push(['reload']) };
   data.registerDataChangeListener(listener); data.registerDataChangeListener(listener);
   return { data, events, listener };
@@ -33,7 +34,7 @@ test('channel, icon and package changes invalidate only changed rows and retain 
   const changed = { ...a, previewChannel: true, iconRev: '2', latestAsset: { versionCode: 1, url: 'new' } };
   f.data.update([changed, { ...b }]);
   assert.notEqual(f.data.key(changed), oldKey); assert.equal(f.data.key(b), otherKey);
-  assert.equal(f.data.getData(0).latestAsset.url, 'new'); assert.deepEqual(f.events, [['reload']]);
+  assert.equal(f.data.getData(0).latestAsset.url, 'new'); assert.deepEqual(f.events, [['change', 0]]);
   // Empty preview must not retain the old install target.
   f.data.update([{ id: 1, previewChannel: true, channelUnavailable: true }, b]);
   assert.equal(f.data.getData(0).latestAsset, undefined);

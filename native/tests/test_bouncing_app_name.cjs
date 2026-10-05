@@ -5,12 +5,13 @@ const ts = require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/components/BouncingAppName.ets'), 'utf8');
 function fixture() {
   const timers = new Map(), animations = []; let next = 0;
-  const names = ['halt', 'restart', 'advance'];
+  const names = ['halt', 'restart', 'updateActivity', 'advance'];
   const methods = names.map(name => {
     const start = source.search(new RegExp('^  private ' + name + '\\(', 'm'));
     assert.ok(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
   });
-  const box = { Curve: { Linear: 'linear' }, clearTimeout: id => timers.delete(id),
+  let time = 1000;
+  const box = { Date: { now: () => time }, Curve: { Linear: 'linear' }, clearTimeout: id => timers.delete(id),
     setTimeout: callback => { timers.set(++next, callback); return next; } };
   vm.runInNewContext(ts.transpileModule('class Page { ' + methods.join('\n') + ' };globalThis.Page=Page;', {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
@@ -19,7 +20,7 @@ function fixture() {
     titleOffset: 0, textWidth: 260, viewportWidth: 200, getUIContext: () => ({ animateTo: (options, apply) => {
       apply(); if (options.duration > 0) animations.push(options);
     } }) });
-  return { ui, animations, timers, tick: () => {
+  return { ui, animations, timers, elapse: ms => { time += ms; }, tick: () => {
     assert.equal(timers.size, 1); const [id, callback] = timers.entries().next().value;
     timers.delete(id); callback();
   } };
@@ -29,6 +30,15 @@ test('long titles move exactly the overflow distance and reverse after reaching 
   assert.equal(f.ui.titleOffset, -60); assert.equal(f.animations[0].duration, 1875);
   f.animations[0].onFinish(); f.tick(); assert.equal(f.ui.titleOffset, 0);
   f.animations[1].onFinish(); f.tick(); assert.equal(f.ui.titleOffset, -60);
+});
+
+test('route/tab hide freezes the visible title position and resumes the same direction without jumping to the start', () => {
+  const f = fixture(); f.ui.restart(); f.tick(); const old = f.animations[0];
+  f.elapse(625); f.ui.active = false; f.ui.updateActivity();
+  assert.equal(f.ui.titleOffset, -20); assert.equal(f.timers.size, 0);
+  old.onFinish(); assert.equal(f.timers.size, 0);
+  f.ui.active = true; f.ui.updateActivity(); assert.equal(f.ui.titleOffset, -20);
+  f.tick(); assert.equal(f.ui.titleOffset, -60); assert.equal(f.animations[1].duration, 1250);
 });
 test('fitting titles and offscreen titles schedule no animation', () => {
   const f = fixture(); f.ui.textWidth = 190; f.ui.restart(); assert.equal(f.timers.size, 0);
@@ -54,4 +64,13 @@ test('a cached page or inactive tab stops long-title animation and resumes only 
   f.ui.advance(f.ui.epoch, true); assert.equal(f.animations.length, 1);
   f.ui.active = true; f.ui.restart(); f.tick();
   assert.equal(f.ui.titleOffset, -60); assert.equal(f.animations.length, 2);
+});
+
+test('the page cover pauses title motion before navigation, then resumes the frozen offset', () => {
+  const f = fixture(); f.ui.restart(); f.tick(); const old = f.animations[0];
+  f.elapse(625); f.ui.routeTransitioning = true; f.ui.updateActivity();
+  assert.equal(f.ui.titleOffset, -20); assert.equal(f.timers.size, 0);
+  old.onFinish(); assert.equal(f.timers.size, 0);
+  f.ui.routeTransitioning = false; f.ui.updateActivity(); f.tick();
+  assert.equal(f.animations[1].duration, 1250);
 });

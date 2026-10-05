@@ -15,9 +15,11 @@ const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
 function fixture() {
   const values = new Map();
   const prefs = {
+    async getAll() { return Object.fromEntries(values); },
     async get(key, fallback) { return values.get(key) ?? fallback; },
     async put(key, value) { values.set(key, value); },
-    async flush() {}
+    async flush() {},
+    async clear() { values.clear(); }
   };
   const exports = {};
   vm.runInNewContext(code, {
@@ -25,12 +27,22 @@ function fixture() {
     require: name => name === '@kit.ArkData' ?
       { preferences: { getPreferences: async () => prefs } } :
       name === '@kit.ArkTS' ?
-        { util: { Base64Helper: class {
+        { util: { TextEncoder: class { encodeInto(input) { return Buffer.from(input); } }, Base64Helper: class {
           decodeSync(input) { return Uint8Array.from(Buffer.from(input, 'base64')); }
         } } } : {}
   });
   return { values, cache: exports.CatalogCache, CachedIcon: exports.CachedIcon };
 }
+
+test('cache size includes icon bytes and Chinese catalog text; clearing leaves no cached payload', async () => {
+  const f = fixture();
+  const icon = JSON.stringify({ id: '1', rev: 'v1', data: Buffer.from('image').toString('base64') });
+  const catalog = JSON.stringify([{ id: 1, display_name: '轻启' }]);
+  f.values.set('icon-1', icon); f.values.set('catalog', catalog); f.values.set('other', 'ignored');
+  assert.equal(await f.cache.size({}), Buffer.byteLength(icon) + Buffer.byteLength(catalog));
+  await f.cache.clear({}); assert.equal(await f.cache.size({}), 0);
+  assert.equal((await f.cache.loadIcons({}, [{ id: 1, iconRev: 'v1' }])).size, 0);
+});
 
 test('all catalog icons survive restart and a new revision replaces only its own icon', async () => {
   const f = fixture();

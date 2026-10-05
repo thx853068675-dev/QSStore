@@ -14,14 +14,14 @@ function fixture() {
   const timers = new Map(); let nextTimer = 0;
   f.flushResume = () => { for (const [id, fn] of timers) { timers.delete(id); fn(); } };
   f.timers = timers;
-  const box = { ForegroundIdle: { onForeground() {},
+  const box = { ForegroundIdle: { onForeground() {}, interaction() {},
     defer: (key, fn) => timers.set(key, fn), cancel: key => timers.delete(key) }, setTimeout: fn => { timers.set(++nextTimer, fn); return nextTimer; },
     clearTimeout: id => timers.delete(id), StoreClient: class {
     static consumeViewedApps() { const rows = f.viewed; f.viewed = []; return rows; }
     myApps() { f.myAppsCalls++; return f.myAppsFetch(); }
   }, getContext: () => ({}), errorText: error => error.message };
-  vm.runInNewContext(ts.transpileModule(`class Index { static TAB_MANAGE = 2;
-    ${['onPageShow', 'onPageHide', 'cancelResumeMaintenance', 'syncViewedCatalog', 'loadMyApps'].map(method).join('\n')} }; globalThis.Page = Index;`, {
+  vm.runInNewContext(ts.transpileModule(`class Index { static TAB_MANAGE = 2; static TAB_MINE = 3;
+    ${['onPageShow', 'onPageHide', 'cancelResumeMaintenance', 'syncViewedCatalog', 'loadMyApps', 'onTabChanged'].map(method).join('\n')} }; globalThis.Page = Index;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
   box.InstallConfirmation = { deactivate() {} }; box.InstallReconnect = { deactivate() {} };
@@ -32,8 +32,8 @@ function fixture() {
     apps: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
     updateCatalog: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
     appIcons: [{ id: 1, rev: 'old', pixels: 'original pixels' }], catalogPage: 4,
-    discoverShowTop: true, scrollOffset: 1234, activeQuery: 'saved search',
-    observeReconnect() {}, observeInstallTasks() {}, drainInstallQueue() {}, syncManagementRows() {},
+    discoverMotion: { showTop: true }, scrollOffset: 1234, activeQuery: 'saved search',
+    observeReconnect() {}, observeInstallTasks() {}, drainInstallQueue() {}, syncManagementRows() {}, syncDiscoverRows() {},
     refreshCatalogInstallState() {}, reconcileInterruptedInstalls: async () => {}, reconcileStuckJobs() {},
     scanDeviceInstalled() { f.scans++; }, loadSigningExpiries() {},
     loadApps() { throw Error('return must not restart paginated network loading'); },
@@ -44,9 +44,9 @@ test('return from detail preserves discovery pagination, scroll and icons, and r
   const { ui } = fixture(); const apps = ui.apps, icons = ui.appIcons;
   ui.onPageShow(); assert.equal(ui.pageVisible, true); assert.equal(ui.topActionEpoch, 4);
   assert.equal(ui.apps, apps); assert.equal(ui.appIcons, icons); assert.equal(ui.catalogPage, 4);
-  assert.equal(ui.scrollOffset, 1234); assert.equal(ui.discoverShowTop, true);
+  assert.equal(ui.scrollOffset, 1234); assert.equal(ui.discoverMotion.showTop, true);
   ui.onPageHide(); assert.equal(ui.pageVisible, false);
-  ui.onPageShow(); assert.equal(ui.topActionEpoch, 5); assert.equal(ui.discoverShowTop, true);
+  ui.onPageShow(); assert.equal(ui.topActionEpoch, 5); assert.equal(ui.discoverMotion.showTop, true);
 });
 test('return to Management merges only viewed changes, leaving other rows and old icon pixels until replacement', () => {
   const f = fixture(), ui = f.ui; ui.currentTab = 2;
@@ -65,6 +65,17 @@ test('rapid background transitions cancel stale resume maintenance and preserve 
   assert.equal(f.scans, 0); assert.equal(ui.apps, apps);
   ui.onPageShow(); ui.onPageShow(); assert.equal(f.timers.size, 1);
   f.flushResume(); assert.equal(f.scans, 1);
+});
+
+test('rapid tab changes paint immediately but only the last visible tab runs automatic maintenance', () => {
+  const f = fixture(), ui = f.ui, seen = []; ui.pageVisible = true;
+  ui.loadJobs = () => seen.push('jobs'); ui.loadMyApps = () => seen.push('published');
+  ui.loadUpdateCatalog = () => seen.push('catalog'); ui.recoverSigningIdentity = () => seen.push('identity');
+  ui.checkDevice = async () => seen.push('device');
+  ui.onTabChanged(2); assert.equal(ui.currentTab, 2); assert.deepEqual(seen, []);
+  ui.onTabChanged(3); ui.onTabChanged(2); assert.equal(f.timers.size, 1);
+  f.flushResume(); assert.deepEqual(seen, ['jobs', 'published', 'catalog']); assert.equal(f.scans, 1);
+  ui.onTabChanged(3); ui.onPageHide(); f.flushResume(); assert(!seen.includes('identity'));
 });
 test('automatic refresh retains published rows throughout a delayed request and does not replace identical data', async () => {
   const f = fixture(), ui = f.ui, before = ui.myApps;
@@ -98,7 +109,7 @@ test('installed information closes material popups before returning to Managemen
   const start = detail.indexOf('  private back():void{');
   const back = detail.slice(start, detail.indexOf('\n  }', start) + 4);
   let timer, routed;
-  const box = { setTimeout: fn => { timer = fn; return 1; }, router: { back: args => {
+  const box = { StorePageMotion: { prepare() {} }, setTimeout: fn => { timer = fn; return 1; }, router: { back: args => {
     assert.equal(ui.headerVisible, false); routed = args;
   } } };
   vm.runInNewContext(ts.transpileModule(`class Page { ${back} }; globalThis.Page = Page;`, {
@@ -115,7 +126,7 @@ for (const file of ['Detail', 'LocalInstall', 'PackageTools']) {
     assert.ok(start >= 0);
     const back = detail.slice(start, detail.indexOf('\n  }', start) + 4);
     const timers = []; let routed = 0;
-    const box = { setTimeout: fn => { timers.push(fn); return timers.length; }, router: { back: () => {
+    const box = { StorePageMotion: { prepare() {} }, setTimeout: fn => { timers.push(fn); return timers.length; }, router: { back: () => {
       assert.equal(ui.headerVisible, false); routed++;
     } } };
     vm.runInNewContext(ts.transpileModule('class Page { ' + back + ' };globalThis.Page=Page;', {

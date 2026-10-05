@@ -33,7 +33,7 @@ function fixture() {
     if (op === 6) return f.partialAll ?? 'ID: 100:\n' + f.all.join('\n') + '\n' + end;
     if (op === 14) return name === external ? '离线阅读器' : '轻启·安装器';
     if (f.bad.has(name)) return 'malformed bundle details';
-    return JSON.stringify({ name, versionCode: f.version ?? 42, versionName: '1.2.3', entryModuleName: 'entry',
+    return JSON.stringify({ name, updateTime: f.updateTime ?? 0, versionCode: f.version ?? 42, versionName: '1.2.3', entryModuleName: 'entry',
       hapModuleInfos: [{ moduleName: 'entry', mainAbility: 'MainAbility' }],
       applicationInfo: { debug: false, appProvisionType: 'debug', iconResource: { id: 16777222, moduleName: 'entry' } } });
   };
@@ -94,6 +94,9 @@ function pageFixture(registry) {
   const box = { InstallStage: { INSTALLED: 'installed' }, ReleaseChannelRegistry: { apply: app => app },
     InstalledSigningExpiry: load('jobs/InstalledSigningExpiry', {}).InstalledSigningExpiry,
     InstalledAppRegistry: registry ?? { version: () => -1, observedAt: () => 0, versionName: () => '', displayName: () => '', installationTime: () => 0 } };
+  box.AppDisplayName = load('data/AppDisplayName', {
+    '../jobs/InstalledAppRegistry': { InstalledAppRegistry: box.InstalledAppRegistry }
+  }).AppDisplayName;
   const members = ['allInstalledJobs', 'recentInstalledJobs', 'currentInstalledView', 'displayInstalledVersion',
     'managementInstalledJobs', 'renewalDeadline', 'updateApps', 'installedAssets', 'latestAssets', 'catalogForJob', 'jobTitle'];
   vm.runInNewContext(ts.transpileModule(`class Page { ${members.map(method).join('\n')} }; globalThis.Page = Page;`, {
@@ -212,4 +215,20 @@ test('Melotopia ordinary and HiCar are distinct bundles, but uninstalled old var
   ui.installedDisplay.set(car, { version: 1000101539, versionName: '1.15.3' });
   assert.deepEqual(Array.from(ui.managementInstalledJobs(false), row => ui.jobTitle(row)), ['Melotopia', 'Melotopia · HiCar']);
   assert.equal(ui.installedJobs.length, 3, 'display merging must not rewrite history');
+});
+
+test('same-version reinstall refreshes the real edited label when the system update time changes', async () => {
+  const f = fixture(); f.updateTime = Date.now() - 30000; await f.bridge.sideloadedApps();
+  const labelReads = f.calls.filter(([op]) => op === 14).length;
+  f.updateTime += 1000; await f.bridge.sideloadedApps();
+  assert.equal(f.calls.filter(([op]) => op === 14).length, labelReads + 2);
+  await f.bridge.sideloadedApps();
+  assert.equal(f.calls.filter(([op]) => op === 14).length, labelReads + 2, 'unchanged metadata keeps its cached labels');
+});
+
+test('an information-page read saves the device label even before the full inventory has run', async () => {
+  const f = fixture(); const result = await f.bridge.installedDetails(external);
+  assert.equal(result.displayName, '离线阅读器');
+  const restarted = load('jobs/InstalledAppRegistry', f.mocks).InstalledAppRegistry; await restarted.load({});
+  assert.equal(restarted.displayName(external), '离线阅读器');
 });

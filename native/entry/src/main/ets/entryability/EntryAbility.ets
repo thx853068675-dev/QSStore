@@ -6,6 +6,7 @@ import { BackgroundInstallTask } from '../jobs/BackgroundInstallTask';
 import { ExternalInstallOpen } from '../jobs/ExternalInstallOpen';
 import { ForegroundIdle } from '../jobs/ForegroundIdle';
 import { AppearancePreferences } from '../data/AppearancePreferences';
+import { ManagementPreferences } from '../data/ManagementPreferences';
 
 // 背景交给页面连续绘制，系统栏仅按主题切换文字颜色。
 const BARS_LIGHT: window.SystemBarProperties = {
@@ -99,7 +100,9 @@ export default class EntryAbility extends UIAbility {
     // 先完成全屏，再设置透明系统栏，避免全屏切换覆盖之前的颜色。
     mainWindow.setWindowLayoutFullScreen(true).catch((error: Error) => {
       console.warn('Unable to enable full-screen layout: ' + JSON.stringify(error));
-    }).then(() => AppearancePreferences.load(this.context)).then(() => this.applyAppearance()).then(() => {
+    }).then(() => Promise.all([
+      AppearancePreferences.load(this.context), ManagementPreferences.load(this.context)
+    ])).then(() => this.applyAppearance()).then(() => {
       if (this.mainWindow !== mainWindow) return;
       this.syncStatusBarInset();
       windowStage.loadContent('pages/Index', (error) => {
@@ -111,6 +114,7 @@ export default class EntryAbility extends UIAbility {
         this.applyAppearance();
         this.syncStatusBarInset();
         this.contentReady = true;
+        ExternalInstallOpen.configure(mainWindow.getUIContext());
         ExternalInstallOpen.openPending();
       });
     });

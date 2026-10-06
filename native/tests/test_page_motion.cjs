@@ -64,3 +64,13 @@ test('a slow native router remains locked after the nominal animation deadline',
   release(); await first;
   assert.equal(f.history.at(-1)[1], false);
 });
+
+test('an external file push retains its explicit UI router after the asynchronous frame delay', async () => {
+ const f=fixture(),scoped=[];
+ const ui={getRouter:()=>({pushUrl:async(options,mode)=>scoped.push({options,mode})})};
+ const options={url:'pages/LocalInstall',params:{external:true}};
+ const pushed=f.motion.pushUrl(options,1,ui);
+ f.flush(32);await pushed;
+ assert.equal(f.routes.length,0);assert.equal(scoped.length,1);
+ assert.equal(scoped[0].options,options);assert.equal(scoped[0].mode,1);
+});

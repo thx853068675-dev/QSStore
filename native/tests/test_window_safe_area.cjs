@@ -9,7 +9,8 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
 function fixture() {
   const storage = new Map(), handlers = new Map(), state = {
     top: 144, cutout: 100, density: 3, unavailable: false, loaded: false, uiReads: 0,
-    events: [], backgroundWrites: 0, storageWrites: 0, failFullscreen: false, enabledBars: {}
+    events: [], backgroundWrites: 0, storageWrites: 0, failFullscreen: false, enabledBars: {},
+    managementLoad: async () => {}
   };
   const win = {
     on: (name, callback) => handlers.set(name, callback),
@@ -19,7 +20,7 @@ function fixture() {
       return { topRect: { height: type === 0 ? state.top : state.cutout } };
     },
     getWindowProperties: () => ({ displayId: 7 }),
-    getUIContext: () => { state.uiReads++; throw Error('UI content not loaded'); },
+    getUIContext: () => { state.uiReads++; assert.equal(state.loaded, true); return {}; },
     setSpecificSystemBarEnabled: async (name, enabled) => {
       state.enabledBars[name] = enabled;
       state.events.push(name);
@@ -51,7 +52,8 @@ function fixture() {
     } : name === '../jobs/WirelessDebugLifecycle' ? {
       WirelessDebugLifecycle: { configure() {}, onForeground() {}, onBackground() {} }
     } : name === '../data/AppearancePreferences' ? { AppearancePreferences: { async load() {} } }
-      : name === '../jobs/ForegroundIdle' ? { ForegroundIdle: { onForeground() {}, onBackground() {} } } : name === '../jobs/ExternalInstallOpen' ? { ExternalInstallOpen: { receive: () => false, openPending() {}, suspendRouting() {} } } : name === '@kit.AbilityKit' ? {
+      : name === '../data/ManagementPreferences' ? { ManagementPreferences: { load: () => state.managementLoad() } }
+      : name === '../jobs/ForegroundIdle' ? { ForegroundIdle: { onForeground() {}, onBackground() {} } } : name === '../jobs/ExternalInstallOpen' ? { ExternalInstallOpen: { receive: () => false, configure: () => state.events.push('file-open-context'), openPending() {}, suspendRouting() {} } } : name === '@kit.AbilityKit' ? {
       UIAbility: class {}, ConfigurationConstant: { ColorMode: { COLOR_MODE_DARK: 1 } }
     } : {
       window: { AvoidAreaType: { TYPE_SYSTEM: 0, TYPE_CUTOUT: 1 } },
@@ -90,14 +92,15 @@ test('saved appearance controls page colors and transparent system bars independ
   assert.equal(f.state.bars.navigationBarColor, '#00000000');
 });
 
-test('edge-to-edge startup reads real insets before UI content without obtaining UIContext', async () => {
+test('edge-to-edge startup reads real insets before UI content without obtaining UIContext before loadContent', async () => {
   const f = fixture();
   f.ability.onWindowStageCreate(f.stage);
   f.ability.onForeground();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.state.loaded, true);
   assert.equal(f.state.fullscreen, true);
-  assert.equal(f.state.uiReads, 0);
+  assert.equal(f.state.uiReads, 1);
+  assert.ok(f.state.events.indexOf('file-open-context') > f.state.events.indexOf('load'));
   assert.equal(f.storage.get('statusBarInset'), 48);
   assert.equal(f.state.bars.statusBarColor, '#00000000');
   assert.equal(f.state.bars.navigationBarColor, '#00000000');
@@ -106,6 +109,25 @@ test('edge-to-edge startup reads real insets before UI content without obtaining
   const load = f.state.events.indexOf('load');
   assert.ok(f.state.events.slice(transition + 1, load).includes('bars'));
   assert.ok(f.state.events.slice(load + 1).includes('bars'));
+});
+
+test('management layout is restored before the first home page is loaded', async () => {
+  const f = fixture(); let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  f.state.managementLoad = async () => {
+    await gate;
+    f.storage.set('managementPublishedCollapsed', true);
+    f.storage.set('managementInstalledCollapsed', true);
+    f.state.events.push('management-restored');
+  };
+  f.ability.onWindowStageCreate(f.stage);
+  await new Promise(setImmediate);
+  assert.equal(f.state.loaded, false);
+  release(); await new Promise(setImmediate);
+  assert.equal(f.state.loaded, true);
+  assert.equal(f.storage.get('managementPublishedCollapsed'), true);
+  assert.equal(f.storage.get('managementInstalledCollapsed'), true);
+  assert.ok(f.state.events.indexOf('management-restored') < f.state.events.indexOf('load'));
 });
 
 test('a rejected full-screen transition still loads the page with transparent bars', async () => {

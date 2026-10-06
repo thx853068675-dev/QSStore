@@ -55,6 +55,9 @@ import { StoreIconButton, StoreImmersiveIconButton, StoreLayout, StoreTopStyle, 
 import { StoreSelect } from '../theme/StoreSelect';
 import { StorePageMotion } from '../theme/StorePageMotion';
 import { AppDisplayName } from '../data/AppDisplayName';
+import { ManagementPreferences } from '../data/ManagementPreferences';
+import { NavigationForeground } from '../theme/NavigationContrast';
+import { NavigationContrastSampler } from '../theme/NavigationContrastSampler';
 
 
 class AppIcon {
@@ -163,7 +166,7 @@ struct FeaturedCardStars {
 @Component
 struct Index {
   // 每个颜色使用点通过 colors() 读取此状态，主题变化会更新对应组件。
-  @StorageProp('darkMode') darkMode: boolean = false;
+  @StorageProp('darkMode') @Watch('onNavigationThemeChanged') darkMode: boolean = false;
   @StorageProp('statusBarInset') statusBarInset: number = 0;
   @State private discoverTitleHeight: number = 88;
   @State private discoverMotion: DiscoverMotion = new DiscoverMotion();
@@ -182,8 +185,8 @@ struct Index {
   @State @Watch('syncManagementRows') private storeInstalled: InstallJob[] = [];
   @State @Watch('syncManagementRows') private deviceInstalled: InstallJob[] = [];
   @State private installedLocalOnly: boolean = false;
-  @State private publishedCollapsed: boolean = false;
-  @State private installedCollapsed: boolean = false;
+  @StorageLink('managementPublishedCollapsed') private publishedCollapsed: boolean = false;
+  @StorageLink('managementInstalledCollapsed') private installedCollapsed: boolean = false;
   @State @Watch('syncManagementRows') private signingExpiries: Map<string, number> = new Map();
   @State @Watch('syncManagementRows') private signingExpiryEstimates: Map<string, number> = new Map();
   @State private bulkUpdating: boolean = false;
@@ -211,6 +214,8 @@ struct Index {
   @StorageProp('wirelessDebugRestoring') @Watch('onWirelessLinkChanged') private wirelessDebugRestoring: boolean = false;
   @StorageProp('signingIdentityRevision') @Watch('onSigningIdentityChanged') private signingIdentityRevision: number = 0;
   @State private pageVisible: boolean = true;
+  @State private navigationForeground: NavigationForeground[] = [];
+  private navigationContrast?: NavigationContrastSampler;
   @State private installerVersionName: string = '';
   private resumeMaintenancePending: boolean = false;
   private catalogProjectionSource?: CatalogApp[];
@@ -380,6 +385,19 @@ struct Index {
 
   private colors(): Palette { return Palette.forMode(this.darkMode); }
 
+  private navigationColor(index: number, selected: boolean): string {
+    const foreground = this.navigationForeground[index];
+    return foreground ? (selected ? foreground.selected : foreground.idle) :
+      (selected ? this.colors().accent : this.colors().tabIdle);
+  }
+
+  private onNavigationThemeChanged(): void {
+    this.navigationForeground = [];
+    this.navigationContrast?.reset();
+    this.navigationContrast?.request(500);
+  }
+
+
   private pageInset(): number { return StoreLayout.inset(this.viewportWidth); }
 
   private onReleaseChannelsChanged(): void {
@@ -438,6 +456,11 @@ struct Index {
   }
 
   aboutToAppear(): void {
+    this.navigationContrast = new NavigationContrastSampler(this.getUIContext(),
+      () => this.rootHeaderVisible(this.currentTab) &&
+        !AppStorage.get<boolean>('routeTransitioning'),
+      (colors: NavigationForeground[]) => { this.navigationForeground = colors; },
+      () => 'navigation-content-' + this.currentTab, StoreLayout.navigationBottomMargin);
     this.installerVersionName = LocalBundles.selfVersionName();
     InstallCoordinator.configure(getContext(this) as common.UIAbilityContext);
     this.observeReconnect();
@@ -465,6 +488,7 @@ struct Index {
    */
   onPageShow(): void {
     this.pageVisible = true;
+    this.navigationContrast?.request(500);
     // 系统在路由离开时关闭 Popup。重新创建其锚点，避免缓存页面仍绑定旧的已隐藏 Popup。
     this.topActionEpoch++;
     this.refreshOpeningSettings = false;
@@ -498,6 +522,9 @@ struct Index {
   private onTabChanged(index: number): void {
     if (index === this.currentTab) return;
     this.currentTab = index;
+    this.navigationForeground = [];
+    this.navigationContrast?.reset();
+    this.navigationContrast?.request(180);
     ForegroundIdle.interaction();
     // Paint the selected tab first. Rapid tab changes retain only the final automatic check.
     ForegroundIdle.defer('index-tab', () => {
@@ -537,6 +564,7 @@ struct Index {
     this.configSourceGeneration++;
     this.expiryReadToken++;
     this.pageVisible = false;
+    this.navigationContrast?.cancel();
     this.cancelResumeMaintenance();
     this.completeRefreshConnection(false);
     InstallConfirmation.unsubscribe(this.confirmationSubscription);
@@ -1972,6 +2000,7 @@ struct Index {
 
   onPageHide(): void {
     this.pageVisible = false;
+    this.navigationContrast?.cancel();
     this.cancelResumeMaintenance();
     // 路由缓存中的首页不跟随下载进度重绘；执行与队列仍由 Coordinator 持有。
     if (this.installSubscription >= 0) InstallTaskState.unsubscribe(this.installSubscription);
@@ -3564,7 +3593,7 @@ struct Index {
       DiscoverTopOverlay({ motion: this.discoverMotion, darkMode: this.darkMode, inset: this.pageInset(),
         active: this.pageVisible && this.currentTab === Index.TAB_DISCOVER, epoch: this.topActionEpoch,
         action: () => this.backToDiscoverTop() })
-    }.width('100%').height('100%').backgroundColor(this.colors().bg)
+    }.width('100%').height('100%').backgroundColor(this.colors().bg).id('navigation-content-0')
   }
 
   @Builder
@@ -3728,7 +3757,9 @@ struct Index {
           // 留白属于滚动内容；列表视口一直延伸到透明状态栏下。
           .contentStartOffset(this.statusBarInset)
           .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
-          .onDidScroll(() => this.syncDiscoverScroll())
+          .onDidScroll(() => { this.syncDiscoverScroll(); this.navigationContrast?.motion(); })
+          .onScrollStart(() => this.navigationContrast?.cancel())
+          .onScrollStop(() => this.navigationContrast?.request())
           .onScrollIndex((_start: number, end: number) => this.prefetchCatalog(end))
           .onReachStart(() => this.revealDiscoverTop())
           .onReachEnd(() => this.loadMoreApps())
@@ -3770,7 +3801,7 @@ struct Index {
       .bindToScrollable([this.localScroller])
       .expandSafeArea([SafeAreaType.SYSTEM],[SafeAreaEdge.TOP,SafeAreaEdge.BOTTOM])
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],[LayoutSafeAreaEdge.BOTTOM])
-      .width('100%').height('100%').backgroundColor(this.colors().bg)
+      .width('100%').height('100%').backgroundColor(this.colors().bg).id('navigation-content-1')
   }
 
   @Builder
@@ -3784,7 +3815,7 @@ struct Index {
       .bindToScrollable([this.managementScroller])
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
-      .width('100%').height('100%').backgroundColor(this.colors().bg)
+      .width('100%').height('100%').backgroundColor(this.colors().bg).id('navigation-content-2')
   }
 
   @Builder
@@ -3819,6 +3850,10 @@ struct Index {
       if (published) this.publishedCollapsed = !this.publishedCollapsed;
       else this.installedCollapsed = !this.installedCollapsed;
     });
+    ManagementPreferences.save(getContext(this) as common.UIAbilityContext, published,
+      published ? this.publishedCollapsed : this.installedCollapsed).catch((error: Error) => {
+        console.warn('Unable to save management layout: ' + JSON.stringify(error));
+      });
   }
 
   @Builder
@@ -4133,7 +4168,9 @@ struct Index {
         .width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + this.pageInset() * 2 }).height('100%')
         .contentStartOffset(this.statusBarInset + 56)
         .cachedCount(4)
-        .onDidScroll(() => ForegroundIdle.interaction())
+        .onDidScroll(() => { ForegroundIdle.interaction(); this.navigationContrast?.motion(); })
+        .onScrollStart(() => this.navigationContrast?.cancel())
+        .onScrollStop(() => this.navigationContrast?.request())
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
@@ -4613,7 +4650,9 @@ struct Index {
         }.width('calc(100% - ' + (this.pageInset() * 2) + 'vp)').constraintSize({ maxWidth: StoreLayout.contentWidth })
           .padding({ top: this.statusBarInset + 58, bottom: 110 })
       }.width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Off)
-        .onDidScroll(() => ForegroundIdle.interaction())
+        .onDidScroll(() => { ForegroundIdle.interaction(); this.navigationContrast?.motion(); })
+        .onScrollStart(() => this.navigationContrast?.cancel())
+        .onScrollStop(() => this.navigationContrast?.request())
     }.titleBar({style:this.scrollTitleBarStyle(56),avoidLayoutSafeArea:true,
       content:{stackBuilder:()=>this.mineTitleBar(),divider:{showType:DividerShowType.OFF}}
     }).titleMode(HdsNavigationTitleMode.MINI).mode(NavigationMode.Stack).hideBackButton(true)
@@ -4621,7 +4660,7 @@ struct Index {
       .bindToScrollable([this.mineScroller])
       .expandSafeArea([SafeAreaType.SYSTEM],[SafeAreaEdge.TOP,SafeAreaEdge.BOTTOM])
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],[LayoutSafeAreaEdge.BOTTOM])
-      .width('100%').height('100%').backgroundColor(this.colors().bg)
+      .width('100%').height('100%').backgroundColor(this.colors().bg).id('navigation-content-3')
   }
 
   /**
@@ -4718,36 +4757,38 @@ struct Index {
       TabContent() { Stack() { this.discoverPage(); if (deviceInfo.sdkApiVersion < 26) { StoreTabBarBackdrop(); } }.width('100%').height('100%') }
         .tabBar(BottomTabBarStyle.of({
           normal: new SymbolGlyphModifier($r('sys.symbol.compass_circle'))
-            .fontColor([this.colors().tabIdle]).fontSize(23),
+            .fontColor([this.navigationColor(0, false)]).fontSize(23),
           selected: new SymbolGlyphModifier($r('sys.symbol.compass_circle_fill'))
-            .fontColor([this.colors().accent]).fontSize(23)
-        }, '发现').iconStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle })
-          .labelStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle }))
+            .fontColor([this.navigationColor(0, true)]).fontSize(23)
+        }, '发现').iconStyle({ selectedColor: this.navigationColor(0, true), unselectedColor: this.navigationColor(0, false) })
+          .id('bottom-tab-0').labelStyle({ selectedColor: this.navigationColor(0, true), unselectedColor: this.navigationColor(0, false) }))
       TabContent() { Stack() { this.localPage(); if (deviceInfo.sdkApiVersion < 26) { StoreTabBarBackdrop(); } }.width('100%').height('100%') }
         .tabBar(BottomTabBarStyle.of({
           normal: new SymbolGlyphModifier($r('sys.symbol.folder'))
-            .fontColor([this.colors().tabIdle]).fontSize(23),
+            .fontColor([this.navigationColor(1, false)]).fontSize(23),
           selected: new SymbolGlyphModifier($r('sys.symbol.folder_fill'))
-            .fontColor([this.colors().accent]).fontSize(23)
-        }, '本地').iconStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle })
-          .labelStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle }))
+            .fontColor([this.navigationColor(1, true)]).fontSize(23)
+        }, '本地').iconStyle({ selectedColor: this.navigationColor(1, true), unselectedColor: this.navigationColor(1, false) })
+          .id('bottom-tab-1').labelStyle({ selectedColor: this.navigationColor(1, true), unselectedColor: this.navigationColor(1, false) }))
       TabContent() { Stack() { this.managePage(); if (deviceInfo.sdkApiVersion < 26) { StoreTabBarBackdrop(); } }.width('100%').height('100%') }
         .tabBar(BottomTabBarStyle.of({
           normal: new SymbolGlyphModifier($r('sys.symbol.square_stack_3d'))
-            .fontColor([this.colors().tabIdle]).fontSize(23),
+            .fontColor([this.navigationColor(2, false)]).fontSize(23),
           selected: new SymbolGlyphModifier($r('sys.symbol.square_stack_3d_fill'))
-            .fontColor([this.colors().accent]).fontSize(23)
-        }, '管理').iconStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle })
-          .labelStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle }))
+            .fontColor([this.navigationColor(2, true)]).fontSize(23)
+        }, '管理').iconStyle({ selectedColor: this.navigationColor(2, true), unselectedColor: this.navigationColor(2, false) })
+          .id('bottom-tab-2').labelStyle({ selectedColor: this.navigationColor(2, true), unselectedColor: this.navigationColor(2, false) }))
       TabContent() { Stack() { this.minePage(); if (deviceInfo.sdkApiVersion < 26) { StoreTabBarBackdrop(); } }.width('100%').height('100%') }
         .tabBar(BottomTabBarStyle.of({
           normal: new SymbolGlyphModifier($r('sys.symbol.person'))
-            .fontColor([this.colors().tabIdle]).fontSize(23),
+            .fontColor([this.navigationColor(3, false)]).fontSize(23),
           selected: new SymbolGlyphModifier($r('sys.symbol.person_fill'))
-            .fontColor([this.colors().accent]).fontSize(23)
-        }, '我的').iconStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle })
-          .labelStyle({ selectedColor: this.colors().accent, unselectedColor: this.colors().tabIdle }))
+            .fontColor([this.navigationColor(3, true)]).fontSize(23)
+        }, '我的').iconStyle({ selectedColor: this.navigationColor(3, true), unselectedColor: this.navigationColor(3, false) })
+          .id('bottom-tab-3').labelStyle({ selectedColor: this.navigationColor(3, true), unselectedColor: this.navigationColor(3, false) }))
     }
+    .id('bottom-navigation-root')
+    .onAppear(() => this.navigationContrast?.request(500))
     .barMode(BarMode.Fixed)
     .vertical(false)
     .scrollable(false)
@@ -4761,7 +4802,7 @@ struct Index {
       gradientMask: { maskColor: '#00000000', maskHeight: 0 },
       barSideMargin: 12,
       // 与透明系统手势条保持距离，内容仍可绘制在其下方。
-      barBottomMargin: 20,
+      barBottomMargin: StoreLayout.navigationBottomMargin,
       barOpacity: 1,
       systemMaterialEffect: {
         materialType: hdsMaterial.MaterialType.IMMERSIVE,

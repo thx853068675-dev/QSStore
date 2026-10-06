@@ -10,6 +10,7 @@ export class StoreLayout {
   static readonly cardActionRadius: number = 14;
   static readonly cardActionWidth: number = 64;
   static readonly cardWideActionWidth: number = 84;
+  static readonly navigationBottomMargin: number = 20;
   static inset(width: number): number { return width > 0 && width < 360 ? 16 : 24; }
 }
 
@@ -26,7 +27,7 @@ export struct StoreTabBarBackdrop {
           policy: BlurStyleActivePolicy.ALWAYS_ACTIVE }, { disableSystemAdaptation: true })
         .borderRadius(28).clip(true)
         .border({ width: 0.5, color: Palette.forMode(this.darkMode).border, radius: 28 })
-        .margin({ bottom: 20 })
+        .margin({ bottom: StoreLayout.navigationBottomMargin })
     }.width('100%').height('100%').justifyContent(FlexAlign.End)
       .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
   }

@@ -29,6 +29,73 @@ function appearanceFixture(disk = new Map()) {
   return { service: AppearancePreferences, context, storage, native, events, disk,
     fail: () => { failing = true; } };
 }
+
+function managementFixture(disk = new Map()) {
+  const storage = new Map(), memory = new Map(disk);
+  let failing = false, flushGate;
+  const { ManagementPreferences } = load('data/ManagementPreferences', {
+    '@kit.ArkData': { preferences: { getPreferences: async (_ctx, name) => {
+      assert.equal(name, 'management-layout');
+      if (failing) throw Error('preferences unavailable');
+      return { get: async (key, fallback) => memory.get(key) ?? fallback,
+        put: async (key, value) => memory.set(key, value),
+        flush: async () => {
+          if (flushGate) await flushGate;
+          for (const [key, value] of memory) disk.set(key, value);
+        } };
+    } } }
+  }, { AppStorage: { setOrCreate: (key, value) => storage.set(key, value) } });
+  return { service: ManagementPreferences, context: {}, disk, storage,
+    fail: value => { failing = value; },
+    holdFlush: () => { let release; flushGate = new Promise(resolve => { release = resolve; }); return release; } };
+}
+
+test('management section choices survive restart independently', async () => {
+  const first = managementFixture();
+  await first.service.load(first.context);
+  assert.equal(first.storage.get('managementPublishedCollapsed'), false);
+  assert.equal(first.storage.get('managementInstalledCollapsed'), false);
+  await first.service.save(first.context, true, true);
+  await first.service.save(first.context, false, true);
+  const restarted = managementFixture(first.disk);
+  await restarted.service.load(restarted.context);
+  assert.equal(restarted.storage.get('managementPublishedCollapsed'), true);
+  assert.equal(restarted.storage.get('managementInstalledCollapsed'), true);
+  await restarted.service.save(restarted.context, true, false);
+  const again = managementFixture(first.disk);
+  await again.service.load(again.context);
+  assert.equal(again.storage.get('managementPublishedCollapsed'), false);
+  assert.equal(again.storage.get('managementInstalledCollapsed'), true);
+});
+
+test('rapid section toggles and restore wait for durable writes in order', async () => {
+  const f = managementFixture(), release = f.holdFlush();
+  const one = f.service.save(f.context, true, true);
+  const two = f.service.save(f.context, true, false);
+  const three = f.service.save(f.context, false, true);
+  const restore = f.service.load(f.context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.disk.size, 0);
+  assert.equal(f.storage.size, 0, 'restore must not read an unfinished older write');
+  release(); await Promise.all([one, two, three, restore]);
+  assert.equal(f.disk.get('publishedCollapsed'), false);
+  assert.equal(f.disk.get('installedCollapsed'), true);
+  assert.equal(f.storage.get('managementPublishedCollapsed'), false);
+  assert.equal(f.storage.get('managementInstalledCollapsed'), true);
+});
+
+test('unavailable layout preferences use defaults and a failed save does not poison later writes', async () => {
+  const f = managementFixture(); f.fail(true);
+  await f.service.load(f.context);
+  assert.equal(f.storage.get('managementPublishedCollapsed'), false);
+  assert.equal(f.storage.get('managementInstalledCollapsed'), false);
+  await assert.rejects(f.service.save(f.context, true, true), /preferences unavailable/);
+  f.fail(false);
+  await f.service.save(f.context, true, true);
+  const restarted = managementFixture(f.disk); await restarted.service.load(restarted.context);
+  assert.equal(restarted.storage.get('managementPublishedCollapsed'), true);
+});
+
 test('appearance survives process restart and system mode releases the native override', async () => {
   const first = appearanceFixture();
   await first.service.save(first.context, 'dark');

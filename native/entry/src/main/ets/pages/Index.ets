@@ -3576,7 +3576,7 @@ struct Index {
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
         .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
         .width('100%').height('100%')
-      DiscoverRefreshIndicator({ motion: this.discoverMotion, refreshing: this.catalogRefreshing,
+      DiscoverRefreshIndicator({ motion: this.discoverMotion, darkMode: this.darkMode, refreshing: this.catalogRefreshing,
         statusInset: this.statusBarInset, titleHeight: this.discoverTitleHeight })
       DiscoverHeader({ motion: this.discoverMotion, darkMode: this.darkMode,
         active: this.pageVisible && this.currentTab === Index.TAB_DISCOVER && this.signedIn &&
@@ -3618,7 +3618,7 @@ struct Index {
             }
             if (this.catalogLoading && !this.catalogRefreshing) {
               ListItem() {
-                Row() { LoadingProgress().width(30).height(30) }
+                Row() { LoadingProgress().width(30).height(30).color(this.colors().accent) }
                   .width('100%').justifyContent(FlexAlign.Center).padding({ top: 36 })
               }
             } else if (this.catalogError.length > 0) {

@@ -105,13 +105,15 @@ export struct DiscoverHeader {
 @Component
 export struct DiscoverRefreshIndicator {
   @ObjectLink motion: DiscoverMotion;
+  @Prop darkMode: boolean = false;
   @Prop refreshing: boolean = false;
   @Prop statusInset: number = 0;
   @Prop titleHeight: number = 88;
 
   build() {
     Row() {
-      LoadingProgress().width(24).height(24).accessibilityText('正在刷新应用')
+      LoadingProgress().width(24).height(24).color(Palette.forMode(this.darkMode).accent)
+        .accessibilityText('正在刷新应用')
     }.width('100%').height(24).justifyContent(FlexAlign.Center)
       .position({ x: 0, y: this.statusInset + this.titleHeight + 70 + this.motion.pullOffset / 2 - 12 })
       .opacity(this.refreshing ? 1 : Math.min(1, this.motion.pullOffset / 24))

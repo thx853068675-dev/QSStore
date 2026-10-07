@@ -36,6 +36,37 @@ test('FileOpen from explicit third-party callers is independent of action and MI
   assert.equal(f.open.take(),uri);
  }
 });
+test('Petrelgram generic MIME and archive MIME declarations coexist with system UTD associations',()=>{
+ const manifest=ts.parseConfigFileTextToJson('module.json5',fs.readFileSync(path.join(__dirname,'../entry/src/main/module.json5'),'utf8'));
+ assert.equal(manifest.error,undefined);
+ const ability=manifest.config.module.abilities.find(a=>a.name==='EntryAbility');
+ assert.equal(ability.exported,true);
+ assert.equal(ability.launchType,'singleton');
+ const skills=ability.skills.filter(s=>s.actions.includes('ohos.want.action.viewData'));
+ const uris=skills.flatMap(s=>s.uris);
+ for(const type of ['openharmony.hap','openharmony.package','com.tonghongxiang.hapstore.app',
+  'general.zip-archive','application/binary','application/octet-stream','application/vnd.harmonyos.hap',
+  'application/vnd.harmonyos.app','application/zip','application/x-zip-compressed',
+  'application/x-7z-compressed','application/vnd.rar','application/x-rar-compressed',
+  'application/x-tar','application/gzip','application/x-gzip','application/x-bzip2',
+  'application/x-xz','application/x-lzma']){
+  const uri=uris.find(u=>u.type===type);
+  assert.ok(uri,type);assert.equal(uri.scheme,'file');assert.equal(uri.linkFeature,'FileOpen');
+  assert.equal(uri.maxFileSupported,1);
+ }
+ assert.equal(uris.some(u=>u.type==='*/*'||u.type==='application/*'),false);
+});
+test('Petrelgram binary file opens preview while unrelated binary files never enter installation',async()=>{
+ const f=fixture();
+ const uri='file://com.miramira8295.petrelgram/data/storage/el2/base/files/tdlib/documents/%E8%BD%BB%E5%90%AF-0.4.48.hap';
+ assert.equal(f.open.receive({action:'ohos.want.action.viewData',uri,type:'application/binary',flags:1}),true);
+ f.open.openPending();await new Promise(setImmediate);
+ assert.equal(f.routes.length,1);assert.equal(f.routes[0].url,'pages/LocalInstall');
+ assert.equal(f.routes[0].params.external,true);assert.equal(f.open.take(),uri);
+ for(const extension of ['pdf','exe','bin','txt'])
+  assert.equal(f.open.receive({action:'ohos.want.action.viewData',uri:'file://sender/file.'+extension,type:'application/binary'}),false);
+ assert.equal(f.open.take(),'');assert.equal(f.routes.length,1);
+});
 test('single standard file streams enter the same preview without treating dependencies as the main file',()=>{
  const f=fixture(),uri='file://com.example.sender/shared/archive.zip';
  for(const stream of [uri,[uri]]){

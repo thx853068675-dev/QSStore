@@ -107,6 +107,33 @@
                 "maxFileSupported": 1
               }
             ]
+          },
+          {
+            // Chat clients can pass a MIME instead of a UTD. Petrelgram sends
+            // application/binary for HAP files. Do not use application/* or */*:
+            // ordinary documents should keep their existing open handlers.
+            // Generic binary files still require a supported filename and pass
+            // the same read-only package inspection before installation.
+            "entities": ["entity.system.default"],
+            "actions": ["ohos.want.action.viewData"],
+            "uris": [
+              { "scheme": "file", "type": "application/binary", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/octet-stream", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/vnd.harmonyos.hap", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/x-hap", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/vnd.harmonyos.app", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/zip", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/x-zip-compressed", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/x-7z-compressed", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/vnd.rar", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/x-rar-compressed", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/x-tar", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/gzip", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/x-gzip", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/x-bzip2", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/x-xz", "linkFeature": "FileOpen", "maxFileSupported": 1 },
+              { "scheme": "file", "type": "application/x-lzma", "linkFeature": "FileOpen", "maxFileSupported": 1 }
+            ]
           }
         ]
       }

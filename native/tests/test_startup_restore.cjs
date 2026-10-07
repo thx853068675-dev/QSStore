@@ -1,6 +1,6 @@
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm');
-const ts=require('/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+const ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source=fs.readFileSync(__dirname+'/../entry/src/main/ets/pages/Index.ets','utf8');
 function method(name){const a=source.search(new RegExp('^  private async '+name+'\\(','m'));return source.slice(a,source.indexOf('\n  }',a)+4);}
 function fixture(){

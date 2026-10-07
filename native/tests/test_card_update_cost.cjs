@@ -1,5 +1,5 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const ts=require('/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+const ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const s=fs.readFileSync(__dirname+'/../entry/src/main/ets/pages/Index.ets','utf8'),a=s.indexOf('  private updateForApp(');
 const method=s.slice(a,s.indexOf('\n  }',a)+4);
 function fixture(version){

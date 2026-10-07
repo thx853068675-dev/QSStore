@@ -1,5 +1,13 @@
 import { CatalogApp } from './CatalogApp';
 
+/** Filter only a verified complete catalog; keep the server's Discover ordering. */
+export function filterCatalogCategory(catalog: CatalogApp[], category: string): CatalogApp[] {
+  return catalog.filter((app: CatalogApp) => app.category.trim() === category.trim())
+    .sort((a: CatalogApp, b: CatalogApp) => Number(b.stars > 100) - Number(a.stars > 100) ||
+      (a.stars > 100 && b.stars > 100 ? b.stars - a.stars : 0) ||
+      (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '') || b.id - a.id);
+}
+
 /** Rank a new page without moving any card the user has already scrolled past. */
 export function appendCatalogPage(previous: CatalogApp[], incoming: CatalogApp[]): CatalogApp[] {
   const known = new Set<number>(previous.map((app: CatalogApp) => app.id));

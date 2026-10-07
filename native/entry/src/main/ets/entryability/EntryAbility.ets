@@ -26,6 +26,7 @@ export default class EntryAbility extends UIAbility {
   private mainWindow?: window.Window;
   private backgroundWindow?: window.Window;
   private contentReady: boolean = false;
+  private appearanceTail: Promise<void> = Promise.resolve();
   private onAppearanceChanged = (): void => { this.applyAppearance(); };
   private onAvoidAreaChange = (options: window.AvoidAreaOptions): void => {
     if (options.type === window.AvoidAreaType.TYPE_SYSTEM ||
@@ -56,6 +57,23 @@ export default class EntryAbility extends UIAbility {
       this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
   }
 
+  private sameBarColor(value: string | undefined, expected: string | undefined): boolean {
+    const actual = (value ?? '').toLowerCase();
+    const wanted = (expected ?? '').toLowerCase();
+    return (actual.length === 7 ? '#ff' + actual.substring(1) : actual) ===
+      (wanted.length === 7 ? '#ff' + wanted.substring(1) : wanted);
+  }
+
+  private systemBarsMatch(mainWindow: window.Window, bars: window.SystemBarProperties): boolean {
+    try {
+      const current = mainWindow.getWindowSystemBarProperties();
+      return this.sameBarColor(current.statusBarColor, bars.statusBarColor) &&
+        this.sameBarColor(current.statusBarContentColor, bars.statusBarContentColor) &&
+        this.sameBarColor(current.navigationBarColor, bars.navigationBarColor) &&
+        this.sameBarColor(current.navigationBarContentColor, bars.navigationBarContentColor);
+    } catch (_) { return false; }
+  }
+
   private applyAppearance(): Promise<void> {
     const dark = this.isDark();
     // 页面据此切换调色板（theme/Palette.ets）。
@@ -71,13 +89,21 @@ export default class EntryAbility extends UIAbility {
     } catch (error) {
       console.warn('Unable to clear window background: ' + JSON.stringify(error));
     }
-    // 保留系统手势条。恢复系统栏可能重置底色，因此最后再应用透明颜色。
-    return mainWindow.setSpecificSystemBarEnabled('navigation', true).catch(() => {})
-      .then(() => mainWindow.setSpecificSystemBarEnabled('navigationIndicator', true).catch(() => {}))
-      .then(() => mainWindow.setWindowSystemBarProperties(dark ? BARS_DARK : BARS_LIGHT))
-      .catch((error: Error) => {
-        console.warn('Unable to apply transparent system bars: ' + JSON.stringify(error));
-      });
+    // Read the actual window state. Warm returns do not rewrite unchanged bars
+    // during the desktop's scale animation; reset defaults still get restored.
+    const apply = this.appearanceTail.then(async (): Promise<void> => {
+      if (this.mainWindow !== mainWindow) return;
+      const bars = this.isDark() ? BARS_DARK : BARS_LIGHT;
+      if (this.systemBarsMatch(mainWindow, bars)) return;
+      // Restoring navigation may reset its background, so apply colors last.
+      await mainWindow.setSpecificSystemBarEnabled('navigation', true).catch(() => {});
+      await mainWindow.setSpecificSystemBarEnabled('navigationIndicator', true).catch(() => {});
+      await mainWindow.setWindowSystemBarProperties(bars);
+    });
+    this.appearanceTail = apply.catch((error: Error) => {
+      console.warn('Unable to apply transparent system bars: ' + JSON.stringify(error));
+    });
+    return this.appearanceTail;
   }
 
   onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {

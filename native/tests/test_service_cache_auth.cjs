@@ -27,11 +27,31 @@ function storeFixture(responses, refresh = async () => {}) {
   const { StoreClient } = load('data/StoreClient', {
     '@kit.NetworkKit': { http: f.http }, '@kit.ArkTS': { util: { TextDecoder: class { decodeToString(bytes) { return new TextDecoder().decode(bytes); } } } },
     './AccountService': { AccountService: { configure() {}, refresh } },
+    './CatalogApp': { CatalogApp: { fromJson: row => row } },
     './ServiceFailure': failures, '../jobs/InstallJob': { FailureKind }
   });
   f.client = new StoreClient({ resourceManager: { getRawFileContentSync: () => new Uint8Array() } });
   return f;
 }
+
+test('repeated category reads reuse fresh responses, keep filters separate and manual refresh still revalidates', async () => {
+  const response = id => ({ responseCode: 200, header: { ETag: '"rev' + id + '"' },
+    result: JSON.stringify({ ok: true, data: { items: [{ id }], total: 1 } }) });
+  const f = storeFixture([response(1), response(2), { responseCode: 304, result: '' }, response(3)]);
+  await f.client.listApps(1, 30, 'discover', '', '工具');
+  await f.client.listApps(1, 30, 'discover', '', '影音');
+  for (let i = 0; i < 50; i++) {
+    const rows = await f.client.listApps(1, 30, 'discover', '', i % 2 ? '工具' : '影音');
+    assert.equal(rows.items[0].id, i % 2 ? 1 : 2);
+  }
+  assert.equal(f.calls.length, 2);
+  await f.client.listApps(1, 30, 'discover', '', '工具', true);
+  assert.equal(f.calls.length, 3); assert.equal(f.calls[2].options.header['If-None-Match'], '"rev1"');
+  const cached = f.client.constructor.responses.get(new URL(f.calls[0].url).pathname + new URL(f.calls[0].url).search);
+  cached.receivedAt = Date.now() - 31000;
+  assert.equal((await f.client.listApps(1, 30, 'discover', '', '工具')).items[0].id, 3);
+  assert.equal(f.calls.length, 4);
+});
 test('public catalog ETag produces a conditional request and reuses a 304 body', async () => {
   const f = storeFixture([{ responseCode: 200, header: { ETag: '"rev1"' },
     result: JSON.stringify({ ok: true, data: { items: [42] } }) },

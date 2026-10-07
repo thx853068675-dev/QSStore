@@ -10,7 +10,17 @@ export interface NavigationSampleRegion {
   height: number;
 }
 
-/** Contrast selection uses the actual glass background, independently for each native tab. */
+export interface NavigationPaintRegion extends NavigationSampleRegion {
+  color: string;
+  radius: number;
+}
+
+export interface NavigationBackdrop {
+  background: string;
+  regions: NavigationPaintRegion[];
+}
+
+/** Contrast selection uses the background independently for each native tab. */
 export class NavigationContrast {
   private static channel(value: number): number {
     const c = value / 255;
@@ -52,8 +62,35 @@ export class NavigationContrast {
       }
     }
     if (background.length < 16) return undefined;
-    // Glass has bright reflections and dark edges. Its dominant luminance, not
-    // the worst few pixels, determines whether the visible region is light/dark.
+    return NavigationContrast.dominant(background, previous);
+  }
+
+  /** Sample the page's known opaque paints, without a GPU snapshot/readback.
+   * Regions come from mounted card rectangles, so scrolling and rounded gaps
+   * use the same background that is drawn under the floating navigation.
+   */
+  static paint(region: NavigationSampleRegion, backdrop: NavigationBackdrop,
+    previous?: NavigationForeground): NavigationForeground {
+    const samples: number[] = [];
+    for (let row = 0; row < 8; row++) {
+      for (const column of [0.12, 0.22, 0.78, 0.88]) {
+        const x = region.left + region.width * column;
+        const y = region.top + region.height * (0.15 + row * 0.1);
+        let color = backdrop.background;
+        for (const paint of backdrop.regions) {
+          if (x < paint.left || x > paint.left + paint.width || y < paint.top || y > paint.top + paint.height) continue;
+          const radius = Math.min(paint.radius, paint.width / 2, paint.height / 2);
+          const dx = Math.max(paint.left + radius - x, x - (paint.left + paint.width - radius), 0);
+          const dy = Math.max(paint.top + radius - y, y - (paint.top + paint.height - radius), 0);
+          if (dx * dx + dy * dy <= radius * radius) color = paint.color;
+        }
+        samples.push(NavigationContrast.colorLuminance(color));
+      }
+    }
+    return NavigationContrast.dominant(samples, previous);
+  }
+
+  private static dominant(background: number[], previous?: NavigationForeground): NavigationForeground {
     background.sort((a: number, b: number) => a - b);
     const middle = Math.floor(background.length / 2);
     const backdrop = (background[middle] + background[Math.floor((background.length - 1) / 2)]) / 2;

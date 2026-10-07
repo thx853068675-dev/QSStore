@@ -30,7 +30,7 @@ const code = ts.transpileModule(`class Index {
   static STARRED_MIN_STARS = 100;
   ${['catalogHasMore', 'loadMoreApps', 'prefetchCatalog', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
     'latestAssets', 'installedAssets', 'assetForBundle', 'refreshCatalogInstallState', 'runCatalogStateRefreshes', 'readCatalogInstallState', 'cancelResumeMaintenance', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion', 'commitCatalogVersions',
-    'displayApps', 'featuredTier', 'featuredColors']
+    'displayApps', 'featuredTier', 'featuredColors', 'openDiscoverySearch', 'selectDiscoveryCategory', 'resetCatalogFilter', 'applySearch']
     .map(method).join('\n')}
 }; globalThis.Page = Index;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
 function deferred() {
@@ -39,17 +39,26 @@ function deferred() {
   return { promise, resolve, reject };
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+function filterClock() {
+  let serial = 0;
+  const pending = new Map();
+  return {
+    setTimeout(fn) { const id = ++serial; pending.set(id, fn); return id; },
+    clearTimeout(id) { pending.delete(id); },
+    flush() { const rows = Array.from(pending.values()); pending.clear(); rows.forEach(fn => fn()); }
+  };
+}
 const page = (ids, total = ids.length) => ({ items: ids.map(id => {
   const row = typeof id === 'object' ? id : { id };
   return { stars: 0, iconRev: 'rev-1', iconUrl: '/api/v1/apps/' + row.id + '/icon', ...row };
 }), total, rawItems: [] });
-function fixture() {
+function fixture(clock) {
   const requests = [], icons = [], saved = [], savedIcons = [], releases = [];
   // 声明必须在使用之前：f 的字面量会引用它（TDZ）
   const staleRefreshes = [];
   const removed = [];
   const calls = [];
-  const f = { requests, icons, saved, savedIcons, releases, staleRefreshes,
+  const f = { requests, icons, saved, savedIcons, releases, staleRefreshes, cachedIcons: new Map(),
     staleChanged: 0, icon: async () => undefined,
     decode: async () => ({ release: async () => releases.push('pixels') }) };
   const f2 = {};
@@ -88,19 +97,21 @@ function fixture() {
   f2.deviceUnparsable = false;
   f2.deviceVersions = {};
   f2.knownBundles = [];
-  const sandbox = { ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, ForegroundIdle: { cancel() {}, defer: (_key, fn) => setTimeout(fn, 0) }, VersionCacheEntry: class {}, InstalledBundleState: class { versionCode = -1; versionName = ''; }, setTimeout, clearTimeout, console, Curve: { EaseOut: 'ease-out' },
+  const sandbox = { ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, ForegroundIdle: { wait: async () => {}, cancel() {}, defer: (_key, fn) => setTimeout(fn, 0) }, VersionCacheEntry: class {}, InstalledBundleState: class { versionCode = -1; versionName = ''; }, setTimeout: clock?.setTimeout ?? setTimeout, clearTimeout: clock?.clearTimeout ?? clearTimeout, console, Curve: { EaseOut: 'ease-out' },
     InstallReconnect: { clear() {}, deactivate() {} }, InstallConfirmation: { deactivate() {} }, InstallCoordinator: { conditionReady() {} }, InstallStage: { WAITING_DEVICE: 'waiting-device' },
     StoreClient: class {
-      listApps(number, size, sort, query) {
-        const d = deferred(); requests.push({ ...d, number, query, sort }); return d.promise;
+      listApps(number, size, sort, query, category, forceRefresh) {
+        const d = deferred(); requests.push({ ...d, number, query, sort, category, forceRefresh }); return d.promise;
       }
       appIconBytes(app) { icons.push(app.id); return f.icon(app); }
       /** 服务端批量重采：记录客户端点名了哪几个应用。 */
       refreshStaleApps(appIds = []) { staleRefreshes.push({ appIds }); return f.staleChanged; }
     },
     getContext: () => ({}), errorText: e => (e && e.message) || String(e),
-    AppIcon: class {}, CachedIcon: class {},
+    AppIcon: class {}, CachedIcon: class {}, ListPage: class { items = []; rawItems = []; },
     CatalogCache: { iconWithinLimit: () => true,
+      loadIcons: async (_, apps) => new Map(apps.filter(app => f.cachedIcons.has(app.id + ':' + app.iconRev))
+        .map(app => [app.id, f.cachedIcons.get(app.id + ':' + app.iconRev)])),
       save: (_, rows) => saved.push(rows.map(r => r.id)),
       saveIcons: (_, rows) => savedIcons.push(rows) },
     image: { createImageSource: () => ({ createPixelMap: () => f.decode(),
@@ -114,7 +125,7 @@ function fixture() {
   vm.runInNewContext(code, sandbox);
   sandbox.Page.REFRESH_MIN_VISIBLE_MS = 20;
   const ui = new sandbox.Page();
-  Object.assign(ui, { resumeMaintenancePending: false, catalogStatePending: false, catalogStateRescan: false, catalogToken: 0, activeQuery: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
+  Object.assign(ui, { resumeMaintenancePending: false, catalogStatePending: false, catalogStateRescan: false, catalogToken: 0, catalogFilterTimer: -1, activeQuery: '', activeCategory: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
     catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false, catalogMoreError: '',
     catalogRefreshing: false, catalogRefreshBusy: false, catalogError: '',
     getUIContext: () => ({ animateTo: (_options, change) => change() }),
@@ -128,6 +139,7 @@ function fixture() {
   sandbox.JobStore = { open: async () => f.store };
   f.ui = ui;
   f.PageClass = sandbox.Page;
+  f.StoreClientClass = sandbox.StoreClient;
   return f;
 }
 test('Refresh binding true before callback still starts a request; duplicate callbacks are coalesced', async () => {
@@ -160,6 +172,19 @@ test('older network rejection cannot replace a successful search with an error',
   f.requests[1].resolve(page([2])); await latest;
   f.requests[0].reject(Error('old timeout')); await old;
   assert.equal(ui.catalogError, ''); assert.equal(ui.apps[0].id, 2); assert.equal(ui.catalogTotal, 1);
+});
+test('opening search clears the category and preserves the current query without duplicate requests', async () => {
+  const clock=filterClock(),f=fixture(clock),ui=f.ui;
+  ui.activeQuery='Kazumi';ui.searchText='Kazumi';ui.activeCategory='影音';ui.categoriesExpanded=true;
+  let returnedToTop=0;ui.backToDiscoverTop=()=>returnedToTop++;
+  ui.openDiscoverySearch();
+  clock.flush();
+  assert.equal(ui.categoriesExpanded,false);assert.equal(ui.activeCategory,'');
+  assert.equal(ui.activeQuery,'Kazumi');assert.equal(ui.searchText,'Kazumi');
+  assert.equal(returnedToTop,1);assert.equal(f.requests.length,1);
+  assert.equal(f.requests[0].category,'');assert.equal(f.requests[0].query,'Kazumi');
+  f.requests[0].resolve(page([1]));await tick();
+  ui.openDiscoverySearch();assert.equal(f.requests.length,1);
 });
 test('late icon download cannot overwrite search metadata, icons or first-page cache', async () => {
   const f = fixture(), ui = f.ui, icon = deferred();
@@ -400,6 +425,7 @@ test('a page starts at most four concurrent icon transfers and stops queuing whe
   ui.apps = page([1, 2, 3, 4, 5, 6, 7, 8]).items;
   const client = { appIconBytes: app => { f.icons.push(app.id); return pending.promise; } };
   const flight = ui.loadCatalogIcons(client, ui.apps, '', false);
+  await tick();
   assert.equal(f.icons.length, 4);
   ui.activeQuery = 'another'; pending.resolve(undefined);
   await flight;
@@ -644,7 +670,7 @@ test('the asynchronous dispatcher limits system queries to four outstanding call
   ui.apps = Array.from({ length: 9 }, (_, id) => ({ id, latestAsset: { bundleName: 'app.n' + id } }));
   delete ui.refreshCatalogInstallState;
   f.localBundles.liveInstalledState = name => { names.push(name); const gate = deferred(); gates.push(gate); return gate.promise; };
-  const work = ui.refreshCatalogInstallState(); assert.equal(names.length, 4);
+  const work = ui.refreshCatalogInstallState(); await tick(); assert.equal(names.length, 4);
   gates[0].resolve({ versionCode: 1, versionName: '1' }); await tick(); assert.equal(names.length, 5);
   for (let i = 1; i < 9; i++) { gates[i].resolve({ versionCode: 1, versionName: '1' }); await tick(); }
   await work; assert.equal(ui.installedVersions.size, 9);
@@ -663,4 +689,105 @@ test('unchanged device observations preserve visible maps and do not rebuild Man
   ui.commitCatalogVersions(new Map(display), new Map(versions)); assert.equal(projections, 2);
   ui.applyDetectedCatalogVersion('com.example.one', 0);
   assert.equal(ui.installedVersions.get(1), 0); assert.equal(projections, 3);
+});
+
+test('category filtering accompanies paginated discovery queries and cannot overwrite the global first-page cache', async () => {
+  const f = fixture(), ui = f.ui; ui.activeQuery = 'video'; ui.activeCategory = '影音';
+  const work = ui.loadApps(); assert.equal(f.requests[0].query, 'video'); assert.equal(f.requests[0].category, '影音');
+  f.requests[0].resolve(page([1], 60)); await work; assert.equal(f.saved.length, 0);
+  const more = ui.loadApps(false); assert.equal(f.requests[1].number, 2); assert.equal(f.requests[1].category, '影音');
+  f.requests[1].resolve(page([2], 60)); await more; assert.equal(ui.apps.length, 2);
+});
+test('a late response or error from the previous category cannot replace the current filter', async () => {
+  for (const reject of [false, true]) {
+    const f = fixture(), ui = f.ui; ui.activeCategory = '工具'; const old = ui.loadApps();
+    ui.activeCategory = '影音'; const current = ui.loadApps();
+    f.requests[1].resolve(page([2])); await current;
+    if (reject) f.requests[0].reject(Error('old failure')); else f.requests[0].resolve(page([1]));
+    await old; assert.equal(ui.apps[0].id, 2); assert.equal(ui.catalogError, '');
+  }
+});
+
+test('fifty rapid category changes make one request for the final selection and clear the previous error immediately', async () => {
+  const clock = filterClock(), f = fixture(clock), ui = f.ui;
+  ui.backToDiscoverTop = () => {};
+  ui.catalogError = '请求过于频繁';
+  for (let i = 0; i < 50; i++) ui.selectDiscoveryCategory(i % 2 ? '影音' : '工具');
+  assert.equal(f.requests.length, 0);
+  assert.equal(ui.catalogError, ''); assert.equal(ui.catalogLoading, true);
+  clock.flush(); assert.equal(f.requests.length, 1); assert.equal(f.requests[0].category, '影音');
+  f.requests[0].resolve(page([2])); await tick();
+  assert.equal(ui.catalogLoading, false); assert.equal(ui.apps[0].id, 2);
+});
+
+test('a superseded rejection during the category debounce cannot show an error or dismiss the latest loading state', async () => {
+  const clock = filterClock(), f = fixture(clock), ui = f.ui;
+  ui.backToDiscoverTop = () => {};
+  ui.activeCategory = '工具'; const old = ui.loadApps();
+  ui.selectDiscoveryCategory('影音');
+  f.requests[0].reject(Error('429')); await old;
+  assert.equal(ui.catalogError, ''); assert.equal(ui.catalogLoading, true);
+  clock.flush(); f.requests[1].resolve(page([2])); await tick();
+  assert.equal(ui.catalogError, ''); assert.equal(ui.apps[0].id, 2);
+});
+
+test('typing a search cancels the queued category read instead of issuing a duplicate query', async () => {
+  const clock = filterClock(), f = fixture(clock), ui = f.ui;
+  ui.backToDiscoverTop = () => {};
+  ui.selectDiscoveryCategory('影音'); ui.searchText = 'Kazumi'; ui.applySearch();
+  clock.flush(); assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].query, 'Kazumi'); assert.equal(f.requests[0].category, '影音');
+  f.requests[0].resolve(page([3])); await tick();
+});
+
+test('a complete catalog filters all category apps locally and pins pagination even when the shared catalog changes', async () => {
+  const f = fixture(), ui = f.ui;
+  ui.updateCatalogReady = true;
+  ui.updateCatalog = page(Array.from({ length: 61 }, (_, i) => ({ id: i + 1, category: '工具', updatedAt: String(100-i) }))).items;
+  ui.updateCatalog.push({ id: 99, category: '影音', stars: 200 });
+  ui.activeCategory = '工具';
+  await ui.loadApps(); assert.equal(f.requests.length, 0); assert.equal(ui.apps.length, 30); assert.equal(ui.catalogTotal, 61);
+  ui.updateCatalog = [];
+  await ui.loadApps(false); await ui.loadApps(false);
+  assert.equal(f.requests.length, 0); assert.equal(ui.apps.length, 61);
+  assert.equal(new Set(ui.apps.map(row => row.id)).size, 61);
+});
+
+test('an incomplete catalog never supplies partial category results, and pull refresh bypasses the local snapshot', async () => {
+  const f = fixture(), ui = f.ui;
+  ui.activeCategory = '工具'; ui.updateCatalogReady = false; ui.updateCatalog = [{ id: 1, category: '工具' }];
+  const first = ui.loadApps(); assert.equal(f.requests.length, 1);
+  f.requests[0].resolve(page([2])); await first;
+  ui.updateCatalogReady = true;
+  const refresh = ui.pullRefreshCatalog(); assert.equal(f.requests.length, 2);
+  assert.equal(f.requests[1].forceRefresh, true);
+  f.requests[1].resolve(page([3])); await refresh;
+  assert.equal(ui.apps[0].id, 3); assert.equal(ui.catalogLocalRows, undefined);
+});
+
+test('a filtered page restores cached icons with no downloads, and persists newly fetched category icons', async () => {
+  const f = fixture(), ui = f.ui;
+  ui.activeCategory = '工具'; ui.apps = page([1, 2]).items;
+  f.cachedIcons.set('1:rev-1', new ArrayBuffer(4)); f.icon = async () => new ArrayBuffer(4);
+  await ui.loadCatalogIcons(new f.StoreClientClass(), ui.apps, '');
+  assert.deepEqual(f.icons, [2]); assert.equal(ui.appIcons.length, 2);
+  assert.deepEqual(f.savedIcons.map(rows => Array.from(rows, row => row.id)), [['2']]);
+});
+
+test('a corrupt cached category icon retries the network instead of retaining a broken placeholder', async () => {
+  const f = fixture(), ui = f.ui; ui.apps = page([1]).items;
+  f.cachedIcons.set('1:rev-1', new ArrayBuffer(2)); f.icon = async () => new ArrayBuffer(4);
+  let decodes = 0; f.decode = async () => { if (++decodes === 1) throw Error('corrupt cache'); return { release: async () => {} }; };
+  await ui.loadCatalogIcons(new f.StoreClientClass(), ui.apps, '');
+  assert.deepEqual(f.icons, [1]); assert.equal(ui.appIcons.length, 1);
+});
+
+test('switching category also stops the old icon batch when the search text is unchanged', async () => {
+  const f = fixture(), ui = f.ui, gate = deferred();
+  ui.activeCategory = '工具'; ui.apps = page([1, 2, 3, 4, 5, 6, 7, 8]).items;
+  f.icon = () => gate.promise;
+  const work = ui.loadCatalogIcons(new f.StoreClientClass(), ui.apps, '');
+  await tick(); assert.equal(f.icons.length, 4);
+  ui.activeCategory = '影音'; gate.resolve(undefined); await work;
+  assert(f.icons.every(id => id <= 4));
 });

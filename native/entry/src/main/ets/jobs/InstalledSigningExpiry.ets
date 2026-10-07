@@ -1,7 +1,7 @@
 import { bundleManager, common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
 import { cert } from '@kit.DeviceCertificateKit';
-import { hash } from '@kit.CoreFileKit';
+import { fileIo, hash } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { readSignedProfile } from 'libhap_core.so';
 import { AgcProfile } from '../data/AgcProfile';
@@ -25,6 +25,7 @@ export class SigningExpiryMaterial {
 export class InstalledSigningExpiry {
   private static readonly DEFAULT_DURATION_SECONDS: number = 365 * 86400;
   private static profiles: Map<string, Promise<number>> = new Map();
+  private static materials: Map<string, Promise<SigningExpiryMaterial | undefined>> = new Map();
   private static inspectedBundles: Set<string> = new Set();
 
   static asn1Seconds(value: string): number {
@@ -159,38 +160,71 @@ export class InstalledSigningExpiry {
     }
     let paths: string[] = [];
     try { paths = LocalProfileStore.retainedFiles(context); } catch (_) { return result; }
-    for (let i = 0; i < paths.length; i++) {
+    const retained = new Set<string>(paths);
+    for (const key of InstalledSigningExpiry.materials.keys()) {
+      if (!retained.has(key.substring(0, key.lastIndexOf('|')))) InstalledSigningExpiry.materials.delete(key);
+    }
+    for (const path of paths) {
+      await ForegroundIdle.wait();
       if (!active()) return [];
       try {
-        const path = paths[i];
-        const digest = (await hash.hash(path, 'sha256')).toLowerCase();
-        const data = JSON.parse(readSignedProfile(path)) as Record<string, Object>;
-        const bundle = data['bundle-info'] as Record<string, Object> | undefined;
-        const name = String(bundle?.['bundle-name'] ?? '');
-        const fingerprint = await AgcProfile.signingFingerprint(path);
-        if (!wanted.has(name) && !fingerprints.has(fingerprint.toUpperCase())) continue;
-        const before = Number((data['validity'] as Record<string, Object> | undefined)?.['not-before'] ?? 0);
-        if (!Number.isFinite(before) || before <= 0) continue;
-        const job = new InstallJob();
-        job.profilePath = path; job.bundleName = name; job.profileSha256 = digest;
-        const expiry = await InstalledSigningExpiry.profileExpiry(job);
-        const certificateExpiry = await InstalledSigningExpiry.certificateExpiry(String(bundle?.['development-certificate'] ?? ''));
-        // Recheck after asynchronous reads so a replaced file cannot combine two identities.
-        if ((await hash.hash(path, 'sha256')).toLowerCase() !== digest ||
-          expiry <= before || !/^[A-Fa-f0-9]{64}$/.test(fingerprint)) continue;
-        const material = new SigningExpiryMaterial();
-        material.bundleName = name; material.fingerprint = fingerprint.toUpperCase();
-        material.appIdentifier = String(bundle?.['app-identifier'] ?? '');
-        material.notBefore = before; material.expiresAt = expiry;
-        material.certificateExpiresAt = certificateExpiry;
-        material.durationSeconds = Number((data['validity'] as Record<string, Object> | undefined)?.['not-after'] ?? 0) - before;
-        result.push(material);
+        // A file replacement, write or deletion invalidates display metadata.
+        // This cache is never used to authorize a signature or installation.
+        const stamp = await InstalledSigningExpiry.materialStamp(path);
+        const key = path + '|' + stamp;
+        let flight = InstalledSigningExpiry.materials.get(key);
+        if (flight === undefined) {
+          for (const old of InstalledSigningExpiry.materials.keys()) {
+            if (old.startsWith(path + '|')) InstalledSigningExpiry.materials.delete(old);
+          }
+          flight = InstalledSigningExpiry.inspectMaterial(path, stamp).catch(() => undefined);
+          InstalledSigningExpiry.materials.set(key, flight);
+          if (InstalledSigningExpiry.materials.size > 200) {
+            InstalledSigningExpiry.materials.delete(Array.from(InstalledSigningExpiry.materials.keys())[0]);
+          }
+        }
+        const material = await flight;
+        if (!active()) return [];
+        if (material === undefined) { InstalledSigningExpiry.materials.delete(key); continue; }
+        if (wanted.has(material.bundleName) || fingerprints.has(material.fingerprint)) result.push(material);
       } catch (_) {
-        // Missing/deleted/unreadable files cannot supply an estimated deadline.
+        // Missing/unreadable files cannot supply an estimated deadline.
+        for (const key of InstalledSigningExpiry.materials.keys()) {
+          if (key.startsWith(path + '|')) InstalledSigningExpiry.materials.delete(key);
+        }
       }
-      if (i % 12 === 11) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
     return result;
+  }
+
+  private static async materialStamp(path: string): Promise<string> {
+    const stat = await fileIo.lstat(path);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > 4 * 1024 * 1024) throw new Error('Invalid Profile');
+    return String(stat.ino) + ':' + stat.size + ':' + String(stat.mtimeNs ?? stat.mtime) + ':' +
+      String(stat.ctimeNs ?? stat.ctime);
+  }
+
+  private static async inspectMaterial(path: string, stamp: string): Promise<SigningExpiryMaterial | undefined> {
+    const digest = (await hash.hash(path, 'sha256')).toLowerCase();
+    const data = JSON.parse(readSignedProfile(path)) as Record<string, Object>;
+    const bundle = data['bundle-info'] as Record<string, Object> | undefined;
+    const validity = data['validity'] as Record<string, Object> | undefined;
+    const before = Number(validity?.['not-before'] ?? 0), end = Number(validity?.['not-after'] ?? 0);
+    const name = String(bundle?.['bundle-name'] ?? '');
+    if (!name || !Number.isFinite(before) || before <= 0 || !Number.isFinite(end) || end <= before) return undefined;
+    const fingerprint = await AgcProfile.signingFingerprint(path);
+    const certificateExpiry = await InstalledSigningExpiry.certificateExpiry(String(bundle?.['development-certificate'] ?? ''));
+    const expiry = Math.floor(Math.min(end, certificateExpiry));
+    // Protect asynchronous reads from mixing two different file revisions.
+    if (expiry <= before || !/^[A-Fa-f0-9]{64}$/.test(fingerprint) ||
+      await InstalledSigningExpiry.materialStamp(path) !== stamp ||
+      (await hash.hash(path, 'sha256')).toLowerCase() !== digest) return undefined;
+    const material = new SigningExpiryMaterial();
+    material.bundleName = name; material.fingerprint = fingerprint.toUpperCase();
+    material.appIdentifier = String(bundle?.['app-identifier'] ?? '');
+    material.notBefore = before; material.expiresAt = expiry;
+    material.certificateExpiresAt = certificateExpiry; material.durationSeconds = end - before;
+    return material;
   }
 
   static estimate(bundleName: string, versionCode: number, materials: SigningExpiryMaterial[], fallbackAt: number = 0): number {

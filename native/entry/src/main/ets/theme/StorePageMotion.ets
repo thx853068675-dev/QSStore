@@ -17,6 +17,8 @@ export class StorePageMotion {
   static stationary(type: RouteType): PageTransitionOptions {
     return { type: type, duration: StorePageMotion.duration, curve: Curve.Linear };
   }
+  /** Only real page transitions invalidate a cached page's native popup ownership. */
+  static routeRevision(): number { return StorePageMotion.revision; }
   static prepare(): void {
     const revision = ++StorePageMotion.revision;
     StorePageMotion.revealReady = false;

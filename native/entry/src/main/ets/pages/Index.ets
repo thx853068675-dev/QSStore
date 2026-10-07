@@ -1,3 +1,4 @@
+import { afterPaint } from '../theme/AfterPaint';
 import { InstalledInspection } from '../data/InstalledInspection';
 import { repositoryUrl } from '../data/RepositoryAddress';
 import { InstalledSigningExpiry } from '../jobs/InstalledSigningExpiry';
@@ -8,7 +9,7 @@ import { CatalogAppTitle } from '../components/CatalogAppTitle';
 import { ListDataSource } from '../data/ListDataSource';
 import { RenewalDialog } from '../components/RenewalDialog';
 import { LocalProfileDialog } from '../components/LocalProfileDialog';
-import { appendCatalogPage, shouldPrefetchCatalog } from '../data/CatalogPaging';
+import { appendCatalogPage, filterCatalogCategory, shouldPrefetchCatalog } from '../data/CatalogPaging';
 import { ReleaseChannelRegistry } from '../data/ReleaseChannelRegistry';
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
 import { InstallCertificatePrompt } from '../components/InstallCertificatePrompt';
@@ -43,7 +44,7 @@ import { CatalogCache, CachedIcon } from '../data/CatalogCache';
 import { InstalledIconCache } from '../data/InstalledIconCache';
 import { ManagementAction, ManagementActions } from '../data/ManagementActions';
 import { ReleaseInfo, HapAsset } from '../data/ReleaseInfo';
-import { StoreClient } from '../data/StoreClient';
+import { StoreClient, ListPage } from '../data/StoreClient';
 import { AccountSession, DeveloperAccount } from '../data/DeveloperAccount';
 import { DevEcoLogin } from '../data/DevEcoLogin';
 import { LocalSigningIdentity, SigningIdentityRecovery, EnrollmentOptions, EnrollmentOutcome } from '../data/SigningIdentity';
@@ -56,7 +57,7 @@ import { StoreSelect } from '../theme/StoreSelect';
 import { StorePageMotion } from '../theme/StorePageMotion';
 import { AppDisplayName } from '../data/AppDisplayName';
 import { ManagementPreferences } from '../data/ManagementPreferences';
-import { NavigationForeground } from '../theme/NavigationContrast';
+import { NavigationForeground, NavigationBackdrop, NavigationPaintRegion } from '../theme/NavigationContrast';
 import { NavigationContrastSampler } from '../theme/NavigationContrastSampler';
 
 
@@ -172,6 +173,8 @@ struct Index {
   @State private discoverMotion: DiscoverMotion = new DiscoverMotion();
   @State private discoverCanRefresh: boolean = true;
   @State private topActionEpoch: number = 0;
+  private headerRouteRevision: number = 0;
+  private headerRestoreGeneration: number = 0;
   private discoverScroller: Scroller = new Scroller();
   private managementScroller: Scroller = new Scroller();
   private localScroller: Scroller = new Scroller();
@@ -203,8 +206,14 @@ struct Index {
   private searchTimer: number = -1;
   /** 目录请求序号：用来丢弃过期响应。 */
   private catalogToken: number = 0;
+  private catalogFilterTimer: number = -1;
+  /** Pin the complete category snapshot through pagination; never mix it with remote pages. */
+  private catalogLocalRows?: CatalogApp[];
   /** 已提交给服务端的关键词（与输入框可能不同：改词后按搜索才生效）。 */
   @State private activeQuery: string = '';
+  @State private activeCategory: string = '';
+  @State private discoveryCategories: string[] = [];
+  @State private categoriesExpanded: boolean = false;
   /** 目录里每个应用在本机的版本（来自系统 bundleManager），0/缺失表示没装。 */
   @State private installedVersions: Map<number, number> = new Map<number, number>();
   @State @Watch('syncManagementRows') private installedDisplay: Map<string, VersionCacheEntry> = new Map();
@@ -214,8 +223,15 @@ struct Index {
   @StorageProp('wirelessDebugRestoring') @Watch('onWirelessLinkChanged') private wirelessDebugRestoring: boolean = false;
   @StorageProp('signingIdentityRevision') @Watch('onSigningIdentityChanged') private signingIdentityRevision: number = 0;
   @State private pageVisible: boolean = true;
+  @State private shellReady: boolean = false;
+  @State private discoveryReady: boolean = false;
+  @State private discoverChromeReady: boolean = false;
+  @State private discoverListReady: boolean = false;
+  private discoveryPublication: number = 0;
+  private discoverHydrating: boolean = false;
   @State private navigationForeground: NavigationForeground[] = [];
   private navigationContrast?: NavigationContrastSampler;
+  private visibleFeatured: Set<number> = new Set();
   @State private installerVersionName: string = '';
   private resumeMaintenancePending: boolean = false;
   private catalogProjectionSource?: CatalogApp[];
@@ -296,6 +312,7 @@ struct Index {
   @State private cardDestructiveIndex: number = -1;
   private cardActionResolver?: (index: number) => void;
   @State private identityBusy: boolean = false;
+  private identityRecoveryFlight: Promise<void> | undefined = undefined;
   @State private identityMessage: string = '';
   /**
    * 云端备份未成功的提示。
@@ -363,6 +380,9 @@ struct Index {
   @State private updateCatalogError: string = '';
   @State private deviceConnected: boolean = false;
   @State private deviceBusy: boolean = false;
+  private deviceStatusKnown: boolean = false;
+  private deviceCheckGeneration: number = 0;
+  private deviceCheckFlight: Promise<void> | undefined = undefined;
   @State private certReady: boolean = false;
   @State private certLabel: string = '';
   @State private certId: string = '';
@@ -391,6 +411,27 @@ struct Index {
     const foreground = this.navigationForeground[index];
     return foreground ? (selected ? foreground.selected : foreground.idle) :
       (selected ? this.colors().accent : this.colors().tabIdle);
+  }
+
+  private navigationBackdrop(): NavigationBackdrop {
+    const regions: NavigationPaintRegion[] = [];
+    if (this.currentTab === 0) {
+      const utils = this.getUIContext().getComponentUtils();
+      for (const id of this.visibleFeatured) {
+        const app = this.apps.find((row: CatalogApp) => row.id === id);
+        if (!app || app.stars <= Index.STARRED_MIN_STARS) continue;
+        try {
+          const rect = utils.getRectangleById('discover-featured-' + id);
+          if (rect.size.width <= 0 || rect.size.height <= 0) continue;
+          // All stops of each featured gradient require the same light foreground.
+          // Use its shared palette rather than sampling icons/text on the card.
+          regions.push({ left: rect.windowOffset.x, top: rect.windowOffset.y,
+            width: rect.size.width, height: rect.size.height,
+            radius: this.getUIContext().vp2px(19), color: this.featuredColors(app.stars)[1][0] });
+        } catch (_) {}
+      }
+    }
+    return { background: this.colors().bg, regions: regions };
   }
 
   private onNavigationThemeChanged(): void {
@@ -458,12 +499,14 @@ struct Index {
   }
 
   aboutToAppear(): void {
+    // A real first paint precedes the native material/navigation initialization.
+    afterPaint(this.getUIContext(), () => { this.shellReady = true; });
     if (deviceInfo.sdkApiVersion >= 26) {
       this.navigationContrast = new NavigationContrastSampler(this.getUIContext(),
         () => this.rootHeaderVisible(this.currentTab) &&
           !AppStorage.get<boolean>('routeTransitioning'),
         (colors: NavigationForeground[]) => { this.navigationForeground = colors; },
-        () => 'navigation-content-' + this.currentTab, StoreLayout.navigationBottomMargin);
+        () => this.navigationBackdrop(), StoreLayout.navigationBottomMargin);
     }
     this.installerVersionName = LocalBundles.selfVersionName();
     InstallCoordinator.configure(getContext(this) as common.UIAbilityContext);
@@ -472,10 +515,14 @@ struct Index {
     InstalledAppRegistry.load(getContext(this) as common.UIAbilityContext)
       .then(() => { this.syncDeviceInstalled(); this.refreshCatalogInstallState(); });
     this.loadJobs();
-    this.loadUpdateCatalog();
-    this.migrateLegacyJobs();
-    // 先等缓存画出来，再发起刷新：刷新会重置 appIcons，顺序反了会把刚恢复的图标清掉
-    this.loadCatalogFromCache().then(() => this.loadApps());
+    ForegroundIdle.defer('index-boot-inventory', () => {
+      this.loadUpdateCatalog(); this.migrateLegacyJobs();
+    });
+    // The first frame only builds the selected shell. Catalog work does not
+    // compete with HDS initialization or the system's opening animation.
+    ForegroundIdle.defer('index-boot-catalog', () => {
+      this.loadCatalogFromCache(); this.loadApps();
+    });
     this.recoverDownloads().finally(() => {
       this.queueRecoveryReady = true;
       this.drainInstallQueue();
@@ -493,8 +540,17 @@ struct Index {
   onPageShow(): void {
     this.pageVisible = true;
     this.navigationContrast?.request(500);
-    // 系统在路由离开时关闭 Popup。重新创建其锚点，避免缓存页面仍绑定旧的已隐藏 Popup。
-    this.topActionEpoch++;
+    // Home/background returns keep the same component and gesture observer.
+    // Renew ownership after an actual page transition, outside the first paint.
+    const routeRevision = StorePageMotion.routeRevision();
+    const generation = ++this.headerRestoreGeneration;
+    if (routeRevision !== this.headerRouteRevision) {
+      afterPaint(this.getUIContext(), () => {
+        if (!this.pageVisible || generation !== this.headerRestoreGeneration) return;
+        this.headerRouteRevision = routeRevision;
+        this.topActionEpoch++;
+      });
+    }
     this.refreshOpeningSettings = false;
     // 暖启动先复用当前画面；自动维护等待开场动画和用户的立即滚动结束。
     ForegroundIdle.onForeground();
@@ -511,6 +567,7 @@ struct Index {
       this.refreshCatalogInstallState();
       if (this.currentTab === Index.TAB_MANAGE) {
         this.scanDeviceInstalled(); this.syncManagementIcons(); this.loadSigningExpiries();
+        this.syncDeviceIcons();
       }
       this.reconcileInterruptedInstalls().then(() => this.reconcileStuckJobs());
     });
@@ -535,6 +592,7 @@ struct Index {
       if (!this.pageVisible || this.currentTab !== index) return;
       if (index === Index.TAB_MANAGE) {
         this.loadJobs(); this.loadMyApps(); this.loadUpdateCatalog(); this.scanDeviceInstalled();
+        this.syncDeviceIcons();
         // loadJobs already refreshes signing expiries; avoid a competing second scan.
       } else if (index === Index.TAB_MINE) {
         this.recoverSigningIdentity();
@@ -564,6 +622,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    this.headerRestoreGeneration++;
     this.dismissCardActions(-1);
     this.configSourceGeneration++;
     this.expiryReadToken++;
@@ -577,6 +636,9 @@ struct Index {
     this.reconnectSubscription = -1;
     InstallTaskState.unsubscribe(this.installSubscription);
     this.installSubscription = -1;
+    this.catalogToken++;
+    if (this.catalogFilterTimer !== -1) clearTimeout(this.catalogFilterTimer);
+    this.catalogFilterTimer = -1;
     if (this.managementRowsTimer !== -1) clearTimeout(this.managementRowsTimer);
     this.managementRowsTimer = -1;
     // 页面离开时取消搜索防抖，避免定时器在后台空转
@@ -604,30 +666,34 @@ struct Index {
         this.loginMessage = '';
         return;
       }
-      try {
-        AccountService.configure(context);
-        const refreshed = await AccountService.refresh(saved);
-        this.account = refreshed;
-        this.sessionNotice = '';
-      } catch (error) {
-        // 断网 / 账号服务 5xx 时不要把用户踢回登录页：本地账号还在，
-        // 沿用已保存的登录态，等下次启动或操作时再校验。
-        if ((error as ClassifiedFailure).failureKind !== FailureKind.NETWORK) throw new Error(String(error));
-        this.account = saved;
-        this.sessionNotice = '账号服务暂时不可用，正在使用本地登录态';
-      }
+      this.account = saved;
       this.signedIn = true;
       this.loginMessage = '';
-      InstallCoordinator.conditionReady(context, InstallStage.WAITING_ACCOUNT);
-      this.drainInstallQueue();
-      this.recoverSigningIdentity();
-      this.loadMyApps();
+      ForegroundIdle.defer('index-account-refresh', () => this.refreshRestoredAccount(saved, context));
     } catch (_) {
       this.signedIn = false;
       this.loginMessage = '登录状态已过期，请重新登录';
     } finally {
       this.accountChecked = true;
       this.updateInstallScanPrompt();
+    }
+  }
+
+  private async refreshRestoredAccount(saved: DeveloperAccount, context: common.UIAbilityContext): Promise<void> {
+    try {
+      AccountService.configure(context);
+      const refreshed = await AccountService.refresh(saved);
+      if (this.account !== saved || !this.signedIn) return;
+      this.account = refreshed; this.sessionNotice = '';
+      InstallCoordinator.conditionReady(context, InstallStage.WAITING_ACCOUNT);
+      this.drainInstallQueue(); this.recoverSigningIdentity(); this.loadMyApps();
+    } catch (error) {
+      if (this.account !== saved || !this.signedIn) return;
+      if ((error as ClassifiedFailure).failureKind === FailureKind.NETWORK) {
+        this.sessionNotice = '账号服务暂时不可用，正在使用本地登录态';
+      } else {
+        this.signedIn = false; this.loginMessage = '登录状态已过期，请重新登录';
+      }
     }
   }
 
@@ -675,33 +741,34 @@ struct Index {
     });
   }
 
-  private async recoverSigningIdentity(): Promise<void> {
-    if (!this.signedIn || this.identityBusy) return;
+  private recoverSigningIdentity(): Promise<void> {
+    if (!this.signedIn || this.identityBusy) return Promise.resolve();
+    if (this.identityRecoveryFlight !== undefined) return this.identityRecoveryFlight;
+    this.identityRecoveryFlight = this.readSigningIdentity().finally(() => {
+      this.identityRecoveryFlight = undefined;
+    });
+    return this.identityRecoveryFlight;
+  }
+
+  /** Passive checks retain confirmed pixels; identityBusy belongs to user operations. */
+  private async readSigningIdentity(): Promise<void> {
     const account = this.account;
-    this.identityBusy = true;
-    this.identityMessage = '正在核对账号现有调试证书…';
+    const revision = this.signingIdentityRevision;
     try {
       const identity = await SigningIdentityRecovery.restore(
         getContext(this) as common.UIAbilityContext, account);
-      // 过期材料仅用于展示，不能当作可用身份或上传为有效备份。
       const displayed = identity ?? await SigningIdentityRecovery.load(
         getContext(this) as common.UIAbilityContext, account, true);
-      if (this.signedIn && this.account.userId === account.userId) {
-        this.certReady = identity !== undefined;
-        // 复用成功是正常状态，不需要一行说明文字；这个字段继续用于报错与
-        // 需要用户动作的提示（未配对、重置失败等）。
-        this.identityMessage = displayed ? '' :
-          '安装时会自动准备调试证书，也可在此提前获取';
-        if (displayed !== undefined) await this.loadCertificateDetail(displayed);
-        else this.clearCertificateDetail();
-        if (identity !== undefined) await this.syncIdentityToCloud(getContext(this) as common.UIAbilityContext, identity);
-      }
+      if (!this.signedIn || this.account.userId !== account.userId ||
+        this.account.teamId !== account.teamId || revision !== this.signingIdentityRevision || this.identityBusy) return;
+      this.certReady = identity !== undefined;
+      this.identityMessage = displayed ? '' : '安装时会自动准备调试证书，也可在此提前获取';
+      if (displayed !== undefined) await this.loadCertificateDetail(displayed);
+      else this.clearCertificateDetail();
+      if (identity !== undefined) await this.syncIdentityToCloud(getContext(this) as common.UIAbilityContext, identity);
     } catch (error) {
-      if (this.signedIn && this.account.userId === account.userId) {
-        this.identityMessage = errorText(error);
-      }
-    } finally {
-      this.identityBusy = false;
+      if (this.signedIn && this.account.userId === account.userId && this.account.teamId === account.teamId &&
+        revision === this.signingIdentityRevision && !this.identityBusy) this.identityMessage = errorText(error);
     }
   }
 
@@ -785,6 +852,7 @@ struct Index {
     if (!this.signedIn || this.identityBusy || this.certDeleting.length > 0) return;
     const account = this.account;
     this.identityBusy = true;
+    await this.identityRecoveryFlight;
     this.certMessage = '';
     this.identityMessage = '正在核对账号现有调试证书…';
     try {
@@ -953,6 +1021,7 @@ struct Index {
       return;
     }
     this.identityBusy = true;
+    await this.identityRecoveryFlight;
     this.identityMessage = '正在核对并取回本机证书…';
     try {
       // 按本机证书取回备份；缺少备份时先同步已经配对的本机材料。
@@ -1109,12 +1178,18 @@ struct Index {
 
   private catalogHasMore(): boolean {
     return this.catalogPage > 0 && this.catalogPage * Index.CATALOG_PAGE_SIZE < this.catalogTotal &&
-      !this.catalogLoading && !this.catalogMoreBusy;
+      !this.catalogLoading && !this.catalogMoreBusy && !this.discoverHydrating;
   }
 
   private async loadApps(reset: boolean = true, rescanInstalled: boolean = false): Promise<void> {
     if (reset) {
+      if (this.catalogFilterTimer !== -1) clearTimeout(this.catalogFilterTimer);
+      this.catalogFilterTimer = -1;
       this.catalogLoading = true;
+      this.catalogError = '';
+      this.catalogLocalRows = !rescanInstalled && this.updateCatalogReady &&
+        this.activeQuery.length === 0 && this.activeCategory.length > 0 ?
+        filterCatalogCategory(this.updateCatalog, this.activeCategory) : undefined;
     } else if (!this.catalogHasMore()) {
       return;
     }
@@ -1124,15 +1199,21 @@ struct Index {
     // 否则「搜 quiet」的慢响应会盖掉「搜 quietstart」的结果。
     const token = ++this.catalogToken;
     const query = this.activeQuery;
+    const category = this.activeCategory;
     const nextPage = reset ? 1 : this.catalogPage + 1;
     try {
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
       const requestStartedAt = Date.now();
-      const page = await client.listApps(nextPage, Index.CATALOG_PAGE_SIZE,
-        'discover', query);
+      const local = this.catalogLocalRows;
+      const page = local === undefined ? await client.listApps(nextPage, Index.CATALOG_PAGE_SIZE,
+        'discover', query, category, rescanInstalled) : new ListPage<CatalogApp>();
+      if (local !== undefined) {
+        page.items = local.slice((nextPage - 1) * Index.CATALOG_PAGE_SIZE, nextPage * Index.CATALOG_PAGE_SIZE);
+        page.total = local.length; page.page = nextPage; page.pageSize = Index.CATALOG_PAGE_SIZE;
+      }
       await ReleaseChannelRegistry.restore(getContext(this) as common.UIAbilityContext);
       console.info('Catalog read: page=' + nextPage + ' elapsedMs=' + (Date.now() - requestStartedAt));
-      if (token !== this.catalogToken || query !== this.activeQuery) return;
+      if (token !== this.catalogToken || query !== this.activeQuery || category !== this.activeCategory) return;
       // 先加载的页在后，追加时按 id 去重，避免上架/删除后翻页出现重复项。
       const previous: CatalogApp[] = reset ? [] : this.apps;
       const appended = appendCatalogPage(previous, page.items);
@@ -1147,7 +1228,7 @@ struct Index {
             app.id === entry.id && app.iconRev.length > 0 && app.iconRev === entry.rev));
       }
       // 目录先提交，图标下载、解码和缓存都不占用刷新动画。
-      const cacheablePage = reset && this.activeQuery.length === 0;
+      const cacheablePage = reset && query.length === 0 && category.length === 0;
       this.catalogPage = nextPage;
       this.catalogTotal = page.total;
       this.catalogError = '';
@@ -1161,11 +1242,11 @@ struct Index {
         const context = getContext(this) as common.UIAbilityContext;
         CatalogCache.save(context, page.items, page.rawItems);
       }
-      this.loadCatalogIcons(client, reset ? this.apps : fresh, query, cacheablePage);
+      this.loadCatalogIcons(client, reset ? this.apps : fresh, query);
       // 主动下拉等待本轮真实识别完成；启动、搜索和翻页继续异步识别。
       if (rescanInstalled) await recognition;
     } catch (error) {
-      if (token !== this.catalogToken || query !== this.activeQuery) return;
+      if (token !== this.catalogToken || query !== this.activeQuery || category !== this.activeCategory) return;
       if (reset) this.catalogError = errorText(error);
       else this.catalogMoreError = errorText(error);
     } finally {
@@ -1199,7 +1280,7 @@ struct Index {
     try {
       // 只读取服务端已有目录；GitHub 采集由服务端周期任务或详情页主动检查负责。
       await this.loadApps(true, true);
-      this.loadUpdateCatalog();
+      this.loadUpdateCatalog(true);
     } finally {
       const elapsed = Date.now() - startedAt;
       if (elapsed < Index.REFRESH_MIN_VISIBLE_MS) {
@@ -1262,18 +1343,19 @@ struct Index {
 
 
   /** 同查询、同图标修订只下载一次；翻页和重复刷新共用尚未完成的请求。 */
-  private async loadCatalogIcons(client: StoreClient, apps: CatalogApp[], query: string,
-    cacheable: boolean): Promise<void> {
+  private async loadCatalogIcons(client: StoreClient, apps: CatalogApp[], query: string): Promise<void> {
+    const category = this.activeCategory;
+    const cached = await CatalogCache.loadIcons(getContext(this) as common.UIAbilityContext, apps);
     const records: CachedIcon[] = [];
     let cursor = 0;
     const worker = async (): Promise<void> => {
-      while (cursor < apps.length && query === this.activeQuery) {
+      while (cursor < apps.length && query === this.activeQuery && category === this.activeCategory) {
         const app = apps[cursor++];
         if (this.iconFor(app.id) !== undefined || app.iconRev.length === 0) continue;
         const key = app.id + ':' + app.iconRev + ':' + query;
         let load = this.catalogIconFlights.get(key);
         if (load === undefined) {
-          load = this.loadAppIcon(client, app, query);
+          load = this.loadAppIcon(client, app, query, cached.get(app.id));
           this.catalogIconFlights.set(key, load);
           load.then(() => this.catalogIconFlights.delete(key));
         }
@@ -1283,7 +1365,7 @@ struct Index {
     };
     // 下载和 PixelMap 解码都限制为四路，避免一页的图标同时争抢滚动帧。
     await Promise.all([worker(), worker(), worker(), worker()]);
-    if (!cacheable || query !== this.activeQuery) return;
+    if (query !== this.activeQuery || category !== this.activeCategory) return;
     const current = records.filter((record: CachedIcon | undefined) =>
       record !== undefined && this.apps.some((app: CatalogApp) =>
         String(app.id) === record.id && app.iconRev === record.rev)) as CachedIcon[];
@@ -1298,41 +1380,46 @@ struct Index {
   }
 
   private async loadAppIcon(client: StoreClient, app: CatalogApp,
-    query: string): Promise<CachedIcon | undefined> {
+    query: string, cached?: ArrayBuffer): Promise<CachedIcon | undefined> {
     try {
       if (app.iconRev.length === 0 || app.iconUrl.length === 0) return undefined;
-      let bytes: ArrayBuffer | undefined;
-      for (let attempt = 0; attempt < 2; attempt++) {
+      const attempts = cached === undefined ? 2 : 3;
+      for (let attempt = 0; attempt < attempts; attempt++) {
         if (!this.isCurrentCatalogIcon(app, query)) return undefined;
-        try { bytes = await client.appIconBytes(app); }
-        catch (_) { bytes = undefined; }
-        if (bytes !== undefined) break;
-      }
-      if (bytes === undefined || !this.isCurrentCatalogIcon(app, query)) return undefined;
-      const source = image.createImageSource(bytes);
-      try {
-        const pixels = await source.createPixelMap({ desiredSize: { width: 192, height: 192 } });
-        if (!this.isCurrentCatalogIcon(app, query) ||
-          this.appIcons.some((icon: AppIcon) => icon.id === app.id && icon.rev === app.iconRev)) {
-          await pixels.release();
-          return undefined;
+        const fromCache = attempt === 0 && cached !== undefined;
+        try {
+          const bytes = fromCache ? cached : await client.appIconBytes(app);
+          if (bytes === undefined) continue;
+          if (!this.isCurrentCatalogIcon(app, query)) return undefined;
+          const source = image.createImageSource(bytes);
+          try {
+            const pixels = await source.createPixelMap({ desiredSize: { width: 192, height: 192 } });
+            if (!this.isCurrentCatalogIcon(app, query) ||
+              this.appIcons.some((icon: AppIcon) => icon.id === app.id && icon.rev === app.iconRev)) {
+              await pixels.release();
+              return undefined;
+            }
+            const icon = new AppIcon();
+            icon.id = app.id;
+            icon.rev = app.iconRev;
+            icon.pixels = pixels;
+            this.appIcons = this.appIcons.filter((old: AppIcon) => old.id !== app.id).concat([icon]);
+            if (!fromCache && CatalogCache.iconWithinLimit(bytes)) {
+              const record = new CachedIcon();
+              record.id = String(app.id);
+              record.rev = app.iconRev;
+              record.data = new util.Base64Helper().encodeToStringSync(new Uint8Array(bytes));
+              return record;
+            }
+            return undefined;
+          } finally {
+            await source.release();
+          }
+        } catch (_) {
+          // A corrupt cached icon falls through to the bounded network retry.
         }
-        const icon = new AppIcon();
-        icon.id = app.id;
-        icon.rev = app.iconRev;
-        icon.pixels = pixels;
-        this.appIcons = this.appIcons.filter((old: AppIcon) => old.id !== app.id).concat([icon]);
-        if (CatalogCache.iconWithinLimit(bytes)) {
-          const record = new CachedIcon();
-          record.id = String(app.id);
-          record.rev = app.iconRev;
-          record.data = new util.Base64Helper().encodeToStringSync(new Uint8Array(bytes));
-          return record;
-        }
-        return undefined;
-      } finally {
-        await source.release();
       }
+      return undefined;
     } catch (_) {
       return undefined;
     }
@@ -1350,32 +1437,31 @@ struct Index {
     const cached = await CatalogCache.load(context);
     if (cached.length === 0) return;
     // 期间已经拿到新数据就不要用旧数据覆盖
-    if (this.apps.length > 0 || this.activeQuery.length > 0) return;
+    if (this.apps.length > 0 || this.activeQuery.length > 0 || this.activeCategory.length > 0) return;
     this.apps = appendCatalogPage([], cached);
     this.catalogTotal = Math.max(this.catalogTotal, cached.length);
     this.refreshCatalogInstallState();
     this.catalogLoading = false;
     const icons = await CatalogCache.loadIcons(context, cached);
-    icons.forEach((bytes: ArrayBuffer, id: number) => {
+    for (const id of icons.keys()) {
+      await ForegroundIdle.wait();
+      if (this.activeQuery.length > 0 || this.activeCategory.length > 0) return;
+      const expected = cached.find((app: CatalogApp) => app.id === id)?.iconRev;
+      if (!expected || !this.apps.some((app: CatalogApp) => app.id === id && app.iconRev === expected) ||
+        this.iconFor(id) !== undefined) continue;
+      const bytes = icons.get(id);
+      if (bytes === undefined) continue;
+      const source = image.createImageSource(bytes);
       try {
-        const source = image.createImageSource(bytes);
-        source.createPixelMap({ desiredSize: { width: 192, height: 192 } }).then((pixels: image.PixelMap) => {
-          const expected = cached.find((app: CatalogApp) => app.id === id)?.iconRev;
-          if (!expected || !this.apps.some((app: CatalogApp) =>
-            app.id === id && app.iconRev === expected) || this.iconFor(id) !== undefined) {
-            pixels.release();
-            return;
-          }
-          const icon = new AppIcon();
-          icon.id = id;
-          icon.rev = expected;
-          icon.pixels = pixels;
-          this.appIcons = this.appIcons.concat([icon]);
-        }).finally(() => source.release()).catch((e: Object) => {
-        });
-      } catch (e) {
-      }
-    });
+        const pixels = await source.createPixelMap({ desiredSize: { width: 192, height: 192 } });
+        if (this.activeQuery.length > 0 || this.activeCategory.length > 0 || !this.apps.some((app: CatalogApp) =>
+          app.id === id && app.iconRev === expected) || this.iconFor(id) !== undefined) {
+          await pixels.release(); continue;
+        }
+        const icon = new AppIcon(); icon.id = id; icon.rev = expected; icon.pixels = pixels;
+        this.appIcons = this.appIcons.concat([icon]);
+      } catch (_) {} finally { await source.release(); }
+    }
   }
 
   private iconFor(id: number): image.PixelMap | undefined {
@@ -1527,6 +1613,7 @@ struct Index {
 
   /** 后台补齐本地 HAP 的图标，失败不影响列表本身。 */
   private syncLocalIcons(): void {
+    if (!this.pageVisible || this.currentTab !== Index.TAB_MANAGE) return;
     const jobs = this.allInstalledJobs().filter((job: InstallJob) =>
       job.appId <= 0);
     if (jobs.length === 0) return;
@@ -2003,6 +2090,7 @@ struct Index {
   }
 
   onPageHide(): void {
+    this.headerRestoreGeneration++;
     this.pageVisible = false;
     this.navigationContrast?.cancel();
     this.cancelResumeMaintenance();
@@ -2179,6 +2267,11 @@ struct Index {
       job.stage = InstallStage.INSTALLED;
       return job;
     });
+    this.syncDeviceIcons();
+  }
+
+  private syncDeviceIcons(): void {
+    if (!this.pageVisible || this.currentTab !== Index.TAB_MANAGE) return;
     for (const job of this.deviceInstalled) {
       const resource = InstalledAppRegistry.iconResource(job.bundleName);
       const key = job.bundleName + ':' + job.versionCode + ':' + (resource?.id ?? 0) + ':' +
@@ -2350,10 +2443,49 @@ struct Index {
     const next = this.searchText.trim();
     if (next === this.activeQuery) return;
     this.activeQuery = next;
-    this.apps = [];
-    this.catalogTotal = 0;
-    this.catalogPage = 0;
-    this.loadApps();
+    this.resetCatalogFilter(0);
+  }
+
+  /** Reuse the complete published catalog already maintained for updates; no per-category requests. */
+  private syncDiscoveryCategories(): void {
+    const rows = this.updateCatalogReady ? this.updateCatalog :
+      (this.activeQuery.length === 0 && this.activeCategory.length === 0 ? this.apps : []);
+    if (!this.updateCatalogReady && rows.length === 0) return;
+    const categories = Array.from(new Set(rows.map((app: CatalogApp) => app.category.trim())
+      .filter((category: string) => category.length > 0))).sort((a: string, b: string) => a.localeCompare(b));
+    if (JSON.stringify(categories) !== JSON.stringify(this.discoveryCategories)) this.discoveryCategories = categories;
+  }
+
+  private selectDiscoveryCategory(category: string): void {
+    if (this.activeCategory === category) return;
+    this.activeCategory = category;
+    this.backToDiscoverTop();
+    this.resetCatalogFilter(180);
+  }
+
+  /** Invalidate old responses immediately; rapid category taps publish only the final selection. */
+  private resetCatalogFilter(delayMs: number): void {
+    if (this.catalogFilterTimer !== -1) clearTimeout(this.catalogFilterTimer);
+    this.catalogFilterTimer = -1;
+    this.catalogToken++;
+    this.catalogLocalRows = undefined;
+    this.catalogError = ''; this.catalogMoreError = '';
+    this.catalogLoading = true; this.catalogMoreBusy = false;
+    this.apps = []; this.catalogPage = 0; this.catalogTotal = 0;
+    if (delayMs === 0) { this.loadApps(); return; }
+    this.catalogFilterTimer = setTimeout(() => {
+      this.catalogFilterTimer = -1;
+      this.loadApps();
+    }, delayMs);
+  }
+
+  private toggleDiscoveryCategories(): void {
+    this.categoriesExpanded = !this.categoriesExpanded;
+  }
+
+  private openDiscoverySearch(): void {
+    this.categoriesExpanded = false;
+    this.selectDiscoveryCategory('');
   }
 
   /** 上架入口统一在这里：发现页原来那个 ＋ 已改成搜索。 */
@@ -2488,6 +2620,7 @@ struct Index {
     const read = async (): Promise<void> => {
       while (cursor < names.length) {
         const name = names[cursor++];
+        if (!rescanInstalled) await ForegroundIdle.wait();
         states.set(name, await LocalBundles.liveInstalledState(name));
       }
     };
@@ -2557,6 +2690,12 @@ struct Index {
   @State private catalogProbeBusy: boolean = false;
 
   onWirelessLinkChanged(): void {
+    if (!this.wirelessDebugRestoring) {
+      this.deviceCheckGeneration++;
+      this.deviceConnected = HdcDeviceBridge.deviceLinked();
+      this.deviceStatusKnown = true;
+      this.deviceBusy = false;
+    }
     if (!this.pageVisible || this.wirelessDebugRestoring) return;
     if (this.resumeMaintenancePending) return;
     if (HdcDeviceBridge.deviceLinked()) {
@@ -2828,8 +2967,28 @@ struct Index {
   }
 
   private syncDiscoverRows(): void {
-    this.discoverRows.update(this.displayApps());
+    this.syncDiscoveryCategories();
+    const rows = this.displayApps();
+    const token = ++this.discoveryPublication;
+    if (rows.length > 2 && this.discoverRows.totalCount() < 6) {
+      this.discoverHydrating = true;
+      this.publishDiscoverRows(rows, token, Math.max(2, this.discoverRows.totalCount()));
+    } else {
+      this.discoverHydrating = false;
+      this.discoverRows.update(rows);
+    }
     this.syncManagementRows();
+  }
+
+  private publishDiscoverRows(rows: CatalogApp[], token: number, count: number): void {
+    if (token !== this.discoveryPublication) return;
+    const end = Math.min(count, rows.length);
+    this.discoverRows.update(rows.slice(0, end));
+    if (end === rows.length) { this.discoverHydrating = false; return; }
+    afterPaint(this.getUIContext(), () => {
+      // Two new visible cards per paint; remaining offscreen rows stay lazy.
+      this.publishDiscoverRows(rows, token, end < 6 ? end + 2 : rows.length);
+    });
   }
 
   private openJobDetails(job: InstallJob): void {
@@ -2841,7 +3000,7 @@ struct Index {
     } else if (app !== undefined) StorePageMotion.pushUrl({ url: 'pages/Detail', params: { id: app.id } });
   }
 
-  private async loadUpdateCatalog(): Promise<void> {
+  private async loadUpdateCatalog(forceRefresh: boolean = false): Promise<void> {
     if (this.updateCatalogBusy) return;
     this.updateCatalogBusy = true;
     try {
@@ -2850,7 +3009,7 @@ struct Index {
       const seen = new Set<number>();
       let pageNumber = 1;
       while (true) {
-        const page = await client.listApps(pageNumber, 100, 'new', '');
+        const page = await client.listApps(pageNumber, 100, 'new', '', '', forceRefresh);
         const before = collected.length;
         for (const app of page.items) {
           if (seen.has(app.id)) continue;
@@ -2866,6 +3025,7 @@ struct Index {
       }
       if (JSON.stringify(collected) !== JSON.stringify(this.updateCatalog)) this.updateCatalog = collected;
       this.updateCatalogReady = true;
+      this.syncDiscoveryCategories();
       this.updateCatalogError = '';
       ReleaseChannelRegistry.refreshTargets(getContext(this) as common.UIAbilityContext, collected);
       this.refreshCatalogInstallState();
@@ -2920,9 +3080,11 @@ struct Index {
     const asset = bundleName.length > 0 ? this.assetForBundle(app, bundleName, preferredName) : app.latestAsset;
     if (asset === undefined) return undefined;
     const deviceVersion = this.displayInstalledVersion(asset.bundleName);
-    const recorded = this.allInstalledJobs().find((job: InstallJob) => job.bundleName === asset.bundleName);
+    // A live device version already answers this question. Rendering each card
+    // must not merge/sort/clone the complete installed inventory just to discard it.
     const installed = LocalBundles.isKnown(deviceVersion) ? deviceVersion :
-      (recorded?.versionCode ?? (bundleName.length === 0 ? this.installedVersionOf(appId) : -1));
+      (this.allInstalledJobs().find((job: InstallJob) => job.bundleName === asset.bundleName)?.versionCode ??
+        (bundleName.length === 0 ? this.installedVersionOf(appId) : -1));
     if (installed <= 0 || asset.versionCode <= installed) return undefined;
     const target = new UpdateTarget();
     target.bundleName = asset.bundleName;
@@ -3295,35 +3457,37 @@ struct Index {
     } finally { this.uninstallingBundle = ''; }
   }
 
-  /**
-   * 设备连接状态（我的页展示）。
-   *
-   * HdcDeviceBridge.connected() 内部要起 hdc 进程，本身没有超时；
-   * 设备不在线时它可能长时间不返回，界面就会永远停在"正在检测"。
-   * 这里加一个硬超时兜底，超时按未连接处理。
-   * 另外不要再调用 udid()：它内部会重新跑一遍 connected()，等于再赌一次。
-   */
-  private async checkDevice(): Promise<void> {
-    if (this.deviceBusy) return;
-    this.deviceBusy = true;
-    let done = false;
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true;
-      this.deviceConnected = false;
-      this.deviceBusy = false;
-    }, 6000);
+  /** Coalesce passive probes. Only the first unknown state shows a spinner. */
+  private checkDevice(): Promise<void> {
+    if (this.deviceCheckFlight !== undefined) return this.deviceCheckFlight;
+    if (HdcDeviceBridge.deviceLinked()) {
+      this.deviceConnected = true;
+      this.deviceStatusKnown = true;
+    }
+    this.deviceCheckFlight = this.readDeviceStatus().finally(() => {
+      this.deviceCheckFlight = undefined;
+    });
+    return this.deviceCheckFlight;
+  }
+
+  private async readDeviceStatus(): Promise<void> {
+    const generation = ++this.deviceCheckGeneration;
+    this.deviceBusy = !this.deviceStatusKnown;
+    let timer: number = -1;
     try {
+      const timeout = new Promise<boolean | undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), 6000);
+      });
       const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
-      const connected = await bridge.connected();
-      if (done) return;
+      const connected = await Promise.race([bridge.connected(), timeout]);
+      if (generation !== this.deviceCheckGeneration || connected === undefined) return;
       this.deviceConnected = connected;
+      this.deviceStatusKnown = true;
     } catch (_) {
-      if (!done) this.deviceConnected = false;
+      // A failed observation is not proof that an established connection was lost.
     } finally {
-      done = true;
-      clearTimeout(timer);
-      this.deviceBusy = false;
+      if (timer !== -1) clearTimeout(timer);
+      if (generation === this.deviceCheckGeneration) this.deviceBusy = false;
     }
   }
 
@@ -3464,6 +3628,9 @@ struct Index {
    */
   private releaseDeviceLink(): void {
     const dropped = HdcDeviceBridge.releaseDevice();
+    this.deviceCheckGeneration++;
+    this.deviceStatusKnown = true;
+    this.deviceBusy = false;
     this.deviceConnected = false;
     this.deviceMessage = dropped ? '已释放调试链路' : '当前没有占用中的调试链路';
     setTimeout(() => { this.deviceMessage = ''; }, 4000);
@@ -3490,6 +3657,9 @@ struct Index {
       }
       this.animateOverlay(() => { this.showReconnect = false; });
       this.reconnectMessage = '';
+      this.deviceCheckGeneration++;
+      this.deviceStatusKnown = true;
+      this.deviceBusy = false;
       this.deviceConnected = true;
 
       this.completeRefreshConnection(true);
@@ -3569,7 +3739,7 @@ struct Index {
   private discoverPage() {
     Stack({ alignContent: Alignment.Top }) {
       HdsNavigation() {
-        this.discoverList()
+        if (this.discoverListReady) { this.discoverList() }
       }.titleBar({
         style: this.discoverTitleBarStyle(),
         avoidLayoutSafeArea: true,
@@ -3580,9 +3750,20 @@ struct Index {
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
         .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
         .width('100%').height('100%')
+        .onAppear(() => {
+          afterPaint(this.getUIContext(), () => {
+            this.discoverChromeReady = true;
+            afterPaint(this.getUIContext(), () => { this.discoverListReady = true; });
+          });
+        })
+      if (this.discoverChromeReady) {
       DiscoverRefreshIndicator({ motion: this.discoverMotion, darkMode: this.darkMode, refreshing: this.catalogRefreshing,
         statusInset: this.statusBarInset, titleHeight: this.discoverTitleHeight })
       DiscoverHeader({ motion: this.discoverMotion, darkMode: this.darkMode,
+        categories: this.discoveryCategories, selectedCategory: this.activeCategory, categoriesExpanded: this.categoriesExpanded,
+        onToggleCategories: () => this.toggleDiscoveryCategories(),
+        onOpenSearch: () => this.openDiscoverySearch(),
+        onCategory: (category: string) => this.selectDiscoveryCategory(category),
         active: this.pageVisible && this.currentTab === Index.TAB_DISCOVER && this.signedIn &&
           !this.showRenewal && !this.showAppConfig && !this.showSubmit && !this.showReconnect && !this.showCertificatePrompt && !this.showCertSheet &&
           !this.showCardActions && !this.showLocalProfiles,
@@ -3597,6 +3778,7 @@ struct Index {
       DiscoverTopOverlay({ motion: this.discoverMotion, darkMode: this.darkMode, inset: this.pageInset(),
         active: this.pageVisible && this.currentTab === Index.TAB_DISCOVER, epoch: this.topActionEpoch,
         action: () => this.backToDiscoverTop() })
+      }
     }.width('100%').height('100%').backgroundColor(this.colors().bg).id('navigation-content-0')
   }
 
@@ -3689,7 +3871,12 @@ struct Index {
                       .onSizeChange((_oldSize: SizeOptions, size: SizeOptions) => {
                         this.rememberFeaturedHeight(app.id, Number(size.height));
                       })
-                  }.width('100%').backgroundColor('#214FD0')
+                  }.width('100%').id('discover-featured-' + app.id)
+                    .onVisibleAreaChange([0], (visible: boolean) => {
+                      if (visible) this.visibleFeatured.add(app.id);
+                      else this.visibleFeatured.delete(app.id);
+                      this.navigationContrast?.motion();
+                    }).backgroundColor('#214FD0')
                     .linearGradient({ angle: 120, colors: this.featuredColors(app.stars) })
                     .borderRadius(19)
                     .clip(true)
@@ -3729,6 +3916,8 @@ struct Index {
                   }
                 }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + this.pageInset() * 2 })
                   .align(Alignment.Top).padding({ left: this.pageInset(), right: this.pageInset() })
+                  // Reuse mounted card pixels during the desktop's window-scale animation and scrolling.
+                  .renderGroup(true)
               }
             }, (app: CatalogApp) => this.discoverRows.key(app))
             // 接近页尾预取；固定高度的尾项避免加载状态切换改变滚动范围。
@@ -3757,7 +3946,7 @@ struct Index {
               Row().width('100%').height(110)
             }
         }.width('100%')
-          .cachedCount(4)
+          .cachedCount(2)
           // 留白属于滚动内容；列表视口一直延伸到透明状态栏下。
           .contentStartOffset(this.statusBarInset)
           .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
@@ -3773,7 +3962,9 @@ struct Index {
         .pullToRefresh(this.discoverCanRefresh)
         .onOffsetChange((offset: number) => this.discoverMotion.pull(offset))
         .onRefreshing(() => this.pullRefreshCatalog())
-    }.width('100%').height('100%').backgroundColor(this.colors().bg)
+    // Cache only the catalog. Title blur and floating material stay outside
+    // this layer and cannot invalidate it during the desktop's window scaling.
+    }.width('100%').height('100%').backgroundColor(this.colors().bg).renderGroup(true)
   }
 
   @Builder
@@ -3844,7 +4035,7 @@ struct Index {
     if (this.managementRefreshing) return;
     this.managementRefreshing = true;
     try {
-      await Promise.allSettled([this.loadMyApps(true), this.refreshInstalled(), this.loadUpdateCatalog()]);
+      await Promise.allSettled([this.loadMyApps(true), this.refreshInstalled(), this.loadUpdateCatalog(true)]);
     } finally { this.managementRefreshing = false; }
   }
 
@@ -4171,7 +4362,7 @@ struct Index {
       }.padding({ left: this.pageInset(), right: this.pageInset() })
         .width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + this.pageInset() * 2 }).height('100%')
         .contentStartOffset(this.statusBarInset + 56)
-        .cachedCount(4)
+        .cachedCount(2)
         .onDidScroll(() => { ForegroundIdle.interaction(); this.navigationContrast?.motion(); })
         .onScrollStart(() => this.navigationContrast?.cancel())
         .onScrollStop(() => this.navigationContrast?.request())
@@ -4755,10 +4946,11 @@ struct Index {
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
+    if (this.shellReady && this.accountChecked && this.signedIn) {
     HdsTabs({ barPosition: BarPosition.End, index: this.currentTab }) {
       // 每个 Tab 一对「线性 + 实心」系统符号：选中态既换形也换色。
       // 之前「发现」和「管理」共用 square_grid_2x2，且只给了 normal。
-      TabContent() { Stack() { this.discoverPage(); if (deviceInfo.sdkApiVersion < 26) { StoreTabBarBackdrop(); } }.width('100%').height('100%') }
+      TabContent() { Stack() { if (this.discoveryReady) { this.discoverPage(); } if (deviceInfo.sdkApiVersion < 26) { StoreTabBarBackdrop(); } }.width('100%').height('100%') }
         .tabBar(BottomTabBarStyle.of({
           normal: new SymbolGlyphModifier($r('sys.symbol.compass_circle'))
             .fontColor([this.navigationColor(0, false)]).fontSize(23),
@@ -4792,16 +4984,20 @@ struct Index {
           .id('bottom-tab-3').labelStyle({ selectedColor: this.navigationColor(3, true), unselectedColor: this.navigationColor(3, false) }))
     }
     .id('bottom-navigation-root')
-    .onAppear(() => this.navigationContrast?.request(500))
+    // Discover caches its catalog content and each card separately.
+    // The moving embedded toolbar material must never enter the Tabs composition cache.
+    .onAppear(() => {
+      afterPaint(this.getUIContext(), () => { this.discoveryReady = true; });
+      this.navigationContrast?.request(500);
+    })
     .barMode(BarMode.Fixed)
     .vertical(false)
     .scrollable(false)
     .animationDuration(0)
     .barOverlap(true)
-    // lightColor 原本是饱和蓝，被 IMMERSIVE 材质压成一坨暗色 —— 底部那块
-    // "暗区"。改成随主题的卡片色，材质才是正常的玻璃感。
+    // Retain native immersive material; soften its white light tint without fading labels or adding a backdrop.
     .barFloatingStyle({
-      lightColor: this.colors().surface,
+      lightColor: '#66' + this.colors().surface.substring(1),
       // 浮动栏自身保留材质，屏幕底部不再叠加 HDS 默认渐变遮罩。
       gradientMask: { maskColor: '#00000000', maskHeight: 0 },
       barSideMargin: 12,
@@ -4817,6 +5013,7 @@ struct Index {
     .width('100%').height('100%')
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    }
     if (this.showAppConfig) {
       Column() {
         Scroll() { this.appConfigSheet() }
@@ -4871,7 +5068,7 @@ struct Index {
     // 最上层三态互斥：检查登录态时显示加载页，确认未登录才显示登录页。
     // 之前把两者混在一个页面里，检查期间会先把登录页的标题和说明卡
     // 画出来再跳走，看着就是「闪一下登录页」。
-    if (!this.accountChecked) {
+    if (!this.shellReady || !this.accountChecked) {
       this.startupSplash()
     } else if (!this.signedIn) {
       this.loginGate()

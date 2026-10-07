@@ -37,6 +37,8 @@ export class Palette {
   get hero(): string { return this.pick('#ECF3FF', '#16233A'); }
   /** 主色淡底（标签、次要按钮） */
   get accentSoft(): string { return this.pick('#E8EEFF', '#1E2C45'); }
+  /** Selected discovery categories keep a white foreground on a rose material. */
+  get selectionRose(): string { return this.pick('#C62663', '#D82D72'); }
 
   /** 主文字 */
   get text(): string { return this.pick('#17213A', '#EAF0F7'); }

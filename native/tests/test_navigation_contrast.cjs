@@ -82,81 +82,50 @@ test('invalid, unpainted and transparent snapshots preserve the existing theme c
   }
 });
 function fixture(bottomMargin = 0) {
-  const timers = new Map(), published = [], crops = [], requests = [];
-  let id = 0, active = true, calls = 0, releases = 0, failure = false;
-  let contentId = 'navigation-content-0', dimensions = {width:60,height:75};
-  let snapshot = async () => pixels;
-  const pixels = {
-    getImageInfo: async () => ({ size: dimensions }),
-    readPixels: async area => { crops.push(area.region); new Uint8Array(area.pixels).set(bgra(area.region.size.width, area.region.size.height, [255, 255, 255, 255])); },
-    release: async () => { releases++; }
-  };
-  const ui = {
-    vp2px: value => value * 3,
+  const timers = new Map(), published = []; let id = 0, active = true, failure = false, reads = 0;
+  let backdrop = { background: '#FFFFFF', regions: [] };
+  const ui = { vp2px: v => v * 3, getComponentSnapshot: () => { throw Error('Must not render/capture the page'); },
     getComponentUtils: () => ({ getRectangleById: key => {
-      if (failure) throw new Error('not mounted');
-      if (key.startsWith('navigation-content-')) return { size: { width: 240, height: 300 }, windowOffset: { x: 10, y: 20 } };
-      return { size: { width: 40, height: 24 }, windowOffset: { x: 50 + Number(key.at(-1)) * 40, y: 280 } };
-    }}),
-    getComponentSnapshot: () => ({ get: async (key, options) => {
-      calls++; requests.push({key,options});
-      dimensions={width:Math.round(240*options.scale),height:Math.round(300*options.scale)};
-      return snapshot();
-    } })
-  };
-  const { NavigationContrastSampler } = load('NavigationContrastSampler', { './NavigationContrast': { NavigationContrast: contrast }, '@kit.ArkUI': {window:{findWindow: () => {throw new Error('Never sample the glass-composited window');}}} }, {
-    setTimeout: fn => { timers.set(++id, fn); return id; }, clearTimeout: key => timers.delete(key)
+      reads++; if (failure) throw Error('not mounted');
+      return { size: {width:40,height:24}, windowOffset:{x:50+Number(key.at(-1))*40,y:280} };
+    } }) };
+  const { NavigationContrastSampler } = load('NavigationContrastSampler', {'./NavigationContrast': {NavigationContrast:contrast}}, {
+    setTimeout: fn => {timers.set(++id,fn);return id;}, clearTimeout: key => timers.delete(key)
   });
-  const sampler = new NavigationContrastSampler(ui, () => active, rows => published.push(rows), () => contentId, bottomMargin);
-  return { sampler, timers, published, crops, requests, pixels, calls: () => calls, releases: () => releases,
-    source: value => { contentId=value; },
-    active: value => { active = value; }, fail: value => { failure = value; }, snapshot: fn => { snapshot = fn; },
-    flush: async () => { for (const [key, fn] of [...timers]) { timers.delete(key); fn(); } await new Promise(setImmediate); } };
+  const sampler = new NavigationContrastSampler(ui, () => active, colors => published.push(colors), () => backdrop, bottomMargin);
+  return {sampler,timers,published,active:v=>active=v,fail:v=>failure=v,reads:()=>reads,
+    paint:v=>backdrop=v,flush:()=>{for(const [key,fn] of [...timers]){timers.delete(key);fn();}}};
 }
-test('capture reads only underlying page content, excluding the floating glass and its foreground', async () => {
-  const f = fixture(); f.sampler.request(); f.sampler.request(); assert.equal(f.timers.size, 1);
-  await f.flush(); assert.equal(f.calls(), 1); assert.equal(f.published.length, 1); assert.equal(f.releases(), 1);
-  assert.deepEqual(JSON.parse(JSON.stringify(f.requests[0])), {key:'navigation-content-0',options:{scale:0.25,waitUntilRenderFinished:true}});
-  assert.deepEqual(JSON.parse(JSON.stringify(f.crops[0])), {x:10,y:65,size:{width:40,height:6}});
-  assert.equal(f.timers.size, 0);
-  f.sampler.request(); await f.flush(); assert.equal(f.published.length, 1); assert.equal(f.releases(), 2);
-  f.sampler.reset(); f.sampler.request(); await f.flush(); assert.equal(f.published.length, 2);
+test('mounted page paints determine per-tab contrast without snapshots or GPU readback', () => {
+  const f=fixture();f.paint({background:'#FFFFFF',regions:[{left:50,top:280,width:40,height:24,radius:0,color:'#17365E'}]});
+  f.sampler.request();f.sampler.request();assert.equal(f.timers.size,1);f.flush();
+  assert.equal(f.reads(),4);assert.equal(f.published.length,1);
+  assert.equal(f.published[0][0].idle,'#FFFFFF');assert.equal(f.published[0][1].idle,'#17213A');
+  f.sampler.request();f.flush();assert.equal(f.published.length,1,'unchanged paints do not dirty navigation');
+  f.sampler.reset();f.sampler.request();f.flush();assert.equal(f.published.length,2);
 });
-test('HDS floating parent translation is applied using the current display density', async () => {
-  const f = fixture(20); f.sampler.request(); await f.flush();
-  assert.deepEqual(JSON.parse(JSON.stringify(f.crops[0])), {x:10,y:50,size:{width:40,height:6}});
-  assert.equal(f.published.length, 1);
+test('rounded gaps and floating HDS translation use window coordinates at the actual display density', () => {
+  const f=fixture(20);f.paint({background:'#FFFFFF',regions:[{left:50,top:220,width:40,height:24,radius:0,color:'#09152D'}]});
+  f.sampler.request();f.flush();assert.equal(f.published[0][0].idle,'#FFFFFF');
+  const small={background:'#FFFFFF',regions:[{left:0,top:0,width:40,height:20,radius:10,color:'#09152D'}]};
+  assert.equal(contrast.paint({left:0,top:0,width:4,height:4},small).idle,'#17213A','outside a rounded corner stays light');
 });
-test('a capture from the previous page cannot set colors after changing the selected tab', async () => {
-  const f=fixture(); let release; f.snapshot(()=>new Promise(resolve=>{release=resolve;}));
-  f.sampler.request(); await f.flush(); f.source('navigation-content-2'); release(f.pixels);
-  await new Promise(setImmediate); assert.equal(f.published.length,0); assert.equal(f.releases(),1);
-  f.snapshot(async()=>f.pixels); f.sampler.request(); await f.flush();
-  assert.equal(f.requests.at(-1).key,'navigation-content-2'); assert.equal(f.published.length,1);
+test('continuous scrolling updates changing backgrounds once per throttle without starving the update', () => {
+  const f=fixture();f.sampler.motion();const first=[...f.timers.keys()][0];
+  for(let i=0;i<100;i++)f.sampler.motion();assert.deepEqual([...f.timers.keys()],[first]);f.flush();
+  assert.equal(f.published.length,1);f.paint({background:'#111728',regions:[]});f.sampler.motion();f.flush();
+  assert(f.published[1].every(c=>c.idle==='#FFFFFF'));
 });
-test('scroll frames share one leading capture instead of starving a debounced update', async () => {
-  const f = fixture(); f.sampler.motion(); const first = [...f.timers.keys()][0];
-  for (let i = 0; i < 100; i++) f.sampler.motion();
-  assert.deepEqual([...f.timers.keys()], [first]); await f.flush();
-  assert.equal(f.calls(), 1); assert.equal(f.published.length, 1); assert.equal(f.timers.size, 0);
-  f.active(false); f.sampler.motion(); assert.equal(f.timers.size, 0);
+test('background and failed geometry preserve foreground; theme/tab resets recover without stale captures', () => {
+  const f=fixture();f.active(false);f.sampler.request();assert.equal(f.timers.size,0);
+  f.active(true);f.fail(true);f.sampler.request();f.flush();assert.equal(f.published.length,0);
+  f.fail(false);f.sampler.request();f.sampler.cancel();f.flush();assert.equal(f.published.length,0);
+  f.sampler.request();f.flush();assert.equal(f.published.length,1);
+  f.paint({background:'#09152D',regions:[]});f.sampler.reset();f.sampler.request();f.flush();
+  assert.equal(f.published.length,2);assert(f.published[1].every(c=>c.idle==='#FFFFFF'));
 });
-test('background, stale and failed captures never overwrite a native foreground or poison recovery', async () => {
-  const f = fixture(); f.active(false); f.sampler.request(); assert.equal(f.timers.size, 0);
-  f.active(true); f.fail(true); f.sampler.request(); await f.flush(); assert.equal(f.calls(), 0);
-  f.fail(false); let release; f.snapshot(() => new Promise(resolve => { release = resolve; }));
-  f.sampler.request(); await f.flush(); f.sampler.cancel(); f.active(false); release(f.pixels);
-  await new Promise(setImmediate); assert.equal(f.published.length, 0); assert.equal(f.releases(), 1);
-  assert.equal(f.timers.size, 0);
-  f.active(true); f.snapshot(async () => { throw new Error('capture unavailable'); });
-  f.sampler.request(); await f.flush(); assert.equal(f.published.length, 0);
-  f.snapshot(async () => f.pixels); f.sampler.request(); await f.flush(); assert.equal(f.published.length, 1);
-});
-test('requests during a native capture keep only one fresh follow-up', async () => {
-  const f = fixture(); let release; f.snapshot(() => new Promise(resolve => { release = resolve; }));
-  f.sampler.request(); await f.flush(); f.sampler.request(); await f.flush();
-  assert.equal(f.calls(), 1); release(f.pixels); await new Promise(setImmediate);
-  assert.equal(f.published.length, 0); assert.equal(f.timers.size, 1);
-  f.snapshot(async () => f.pixels); await f.flush(); assert.equal(f.calls(), 2);
-  assert.equal(f.published.length, 1); assert.equal(f.releases(), 2); assert.equal(f.timers.size, 0);
+test('every featured gradient stop keeps light foreground, regardless of its tier or theme', () => {
+  for(const color of ['#09152D','#17365E','#563968','#302758','#4E438C','#604279','#204BC0','#3263D5','#426BD3']) {
+    assert.equal(contrast.paint(region,{background:color,regions:[]}).idle,'#FFFFFF',color);
+  }
 });

@@ -9,6 +9,7 @@ export class CatalogApp {
   category: string = '';
   publisherName: string = '';
   stars: number = 0;
+  updatedAt: string = '';
   /** -1: not collected; GitHub Release attachment downloads, not store installs. */
   githubDownloads: number = -1;
   iconUrl: string = '';
@@ -31,7 +32,8 @@ export class CatalogApp {
     copy.id = app.id; copy.displayName = app.displayName; copy.repo = app.repo;
     copy.secondaryRepo = app.secondaryRepo;
     copy.summary = app.summary; copy.category = app.category; copy.publisherName = app.publisherName;
-    copy.stars = app.stars; copy.iconUrl = app.iconUrl; copy.iconRev = app.iconRev;
+    copy.stars = app.stars; copy.updatedAt = app.updatedAt;
+    copy.iconUrl = app.iconUrl; copy.iconRev = app.iconRev;
     copy.githubDownloads = app.githubDownloads;
     copy.latestName = app.latestName; copy.latestAsset = app.latestAsset; copy.latestAssets = app.latestAssets;
     copy.ratingAverage = app.ratingAverage; copy.ratingCount = app.ratingCount;
@@ -48,6 +50,7 @@ export class CatalogApp {
     app.category = String(row['category'] ?? '');
     app.publisherName = String(row['publisher_name'] ?? '');
     app.stars = Number(row['stars'] ?? 0);
+    app.updatedAt = String(row['updated_at'] ?? '');
     const downloads = Number(row['github_downloads'] ?? -1);
     app.githubDownloads = Number.isFinite(downloads) && downloads >= 0 ? Math.floor(downloads) : -1;
     app.iconUrl = String(row['icon_url'] ?? '');

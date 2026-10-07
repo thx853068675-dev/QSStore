@@ -232,12 +232,15 @@ export class StoreClient implements RenewalCatalog {
   /// Other orders: updated/stars/name/new.
   /// ``query`` 走服务端搜索：只过滤本地已加载的那一页会漏掉没加载的应用。
   async listApps(page: number = 1, pageSize: number = 30,
-    sort: string = 'updated', query: string = ''): Promise<ListPage<CatalogApp>> {
+    sort: string = 'updated', query: string = '', category: string = '',
+    forceRefresh: boolean = false): Promise<ListPage<CatalogApp>> {
     const trimmed = query.trim();
     const data = await this.getData('/api/v1/apps?sort=' + encodeURIComponent(sort) +
       '&page=' + Math.max(1, Math.floor(page)) +
       '&page_size=' + Math.min(100, Math.max(1, Math.floor(pageSize))) +
-      (trimmed.length > 0 ? '&q=' + encodeURIComponent(trimmed) : ''));
+      (trimmed.length > 0 ? '&q=' + encodeURIComponent(trimmed) : '') +
+      (category.trim().length > 0 ? '&category=' + encodeURIComponent(category.trim()) : ''),
+      undefined, forceRefresh ? 0 : 30000);
     const result = new ListPage<CatalogApp>();
     const raw = data['items'] as Array<Record<string, Object>> | undefined;
     result.rawItems = raw ?? [];

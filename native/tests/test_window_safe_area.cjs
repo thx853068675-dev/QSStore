@@ -20,6 +20,10 @@ function fixture() {
       return { topRect: { height: type === 0 ? state.top : state.cutout } };
     },
     getWindowProperties: () => ({ displayId: 7 }),
+    getWindowSystemBarProperties: () => {
+      if (state.barReadFails) throw Error('window property unavailable');
+      return state.bars ?? {};
+    },
     getUIContext: () => { state.uiReads++; assert.equal(state.loaded, true); return {}; },
     setSpecificSystemBarEnabled: async (name, enabled) => {
       state.enabledBars[name] = enabled;
@@ -192,7 +196,35 @@ test('returning from settings retains the gesture indicator and clears the backg
 test('warm foreground keeps the same window background and avoids unchanged theme/inset notifications', async () => {
   const f = fixture(); f.ability.onWindowStageCreate(f.stage); await new Promise(setImmediate);
   const storageWrites = f.state.storageWrites;
+  const barWrites = f.state.events.length;
   for (let i = 0; i < 3; i++) { f.ability.onForeground(); await new Promise(setImmediate); }
   assert.equal(f.state.backgroundWrites, 1); assert.equal(f.state.storageWrites, storageWrites);
+  assert.equal(f.state.events.length, barWrites, 'unchanged window properties must not be rewritten during icon expansion');
   assert.equal(f.state.enabledBars.navigation, true); assert.equal(f.state.bars.navigationBarColor, '#00000000');
+});
+
+test('system bar comparison accepts native ARGB colors and still repairs reset or unreadable window state', async () => {
+  const f = fixture(); f.ability.onWindowStageCreate(f.stage); await new Promise(setImmediate);
+  const count = f.state.events.length;
+  f.state.bars = { statusBarColor: '#00000000', navigationBarColor: '#00000000',
+    statusBarContentColor: '#FF17213a', navigationBarContentColor: '#ff17213a' };
+  f.ability.onForeground(); await new Promise(setImmediate);
+  assert.equal(f.state.events.length, count);
+  f.state.bars.navigationBarColor = '#FFFFFFFF';
+  f.ability.onForeground(); await new Promise(setImmediate);
+  assert.equal(f.state.bars.navigationBarColor, '#00000000');
+  assert.equal(f.state.events.length, count + 3);
+  f.state.barReadFails = true;
+  f.ability.onForeground(); await new Promise(setImmediate);
+  assert.equal(f.state.events.length, count + 6);
+});
+
+test('queued appearance requests converge to the current theme without repeating unchanged writes', async () => {
+  const f = fixture(); f.ability.onWindowStageCreate(f.stage); await new Promise(setImmediate);
+  const count = f.state.events.length;
+  f.storage.set('appearanceMode', 'dark');
+  f.ability.onForeground(); f.ability.onForeground(); f.ability.onForeground();
+  await new Promise(setImmediate);
+  assert.equal(f.state.bars.statusBarContentColor, '#EAF0F7');
+  assert.equal(f.state.events.length, count + 3);
 });

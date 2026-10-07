@@ -1,5 +1,5 @@
 import { Palette } from './Palette';
-import { uiMaterial, LengthMetrics } from '@kit.ArkUI';
+import { uiMaterial, LengthMetrics, LevelMode } from '@kit.ArkUI';
 import { hdsMaterial, TitleBarStyleOptions, ScrollEffectType, BlurStrategy } from '@kit.UIDesignKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 
@@ -183,12 +183,34 @@ export struct StorePageHeader {
   }
 }
 
+/** The detail action and selected capsules share the same native tinted material. */
+export function storeTintedImmersiveMaterial(tint: string, strength: number = 1,
+  applyShadow: boolean = true): uiMaterial.ImmersiveMaterial {
+  const alpha = Math.round(153 * Math.min(1, Math.max(0, strength))).toString(16).padStart(2, '0');
+  return new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THIN,
+    materialColor: '#' + alpha + tint.substring(1), colorInvert: false,
+    applyShadow: applyShadow, interactive: true, lightEffect: { color: tint } });
+}
+
 /** 浮动主操作使用系统材质；低版本继续使用原有实色按钮。 */
 @Component
 export struct StoreImmersiveAction {
   @StorageProp('routeTransitioning') @Watch('onPopupRequestChanged') private routeTransitioning:boolean=false;
   @Prop @Watch('onPopupRequestChanged') visible:boolean=true;
   @Prop tint:string='#1F5DEF';
+  @Prop controlHeight:number=52;
+  @Prop controlRadius:number=18;
+  @Prop tintStrength:number=1;
+  @Prop colored:boolean=true;
+  @Prop followsTarget:boolean=false;
+  @Prop anchorAtStart:boolean=false;
+  @Prop embedded:boolean=false;
+  @Prop viewportOffset:number=0;
+  @State private placementCorrectionX:number=0;
+  @State private placementCorrectionY:number=0;
+  private anchorX:number=NaN;
+  private anchorY:number=NaN;
+  @Prop popupShadow:boolean=true;
   backAction:()=>void=()=>{};
   @BuilderParam content:(immersive:boolean)=>void;
   @State @Watch('onPopupRequestChanged') private measuredWidth:number=0;
@@ -197,34 +219,69 @@ export struct StoreImmersiveAction {
     try{return deviceInfo.sdkApiVersion>=26&&uiMaterial.isImmersiveMaterialSupported();}
     catch(_){return false;}
   }
-  private popupRequested():boolean{return this.visible&&!this.routeTransitioning&&this.measuredWidth>0;}
-  private onPopupRequestChanged():void{this.popupVisible=false;}
+  private popupWidth():number{return this.measuredWidth;}
+  private popupRequested():boolean{return this.visible&&!this.routeTransitioning&&this.measuredWidth>0&&this.popupWidth()>0.5;}
+  private onPopupRequestChanged():void{if(!this.popupRequested())this.popupVisible=false;}
   private onPopupStateChanged(visible:boolean):void{this.popupVisible=visible&&this.popupRequested();}
   private fallbackVisible():boolean{
     return this.visible&&!this.routeTransitioning&&(!this.canUseMaterial()||!this.popupVisible);
   }
-  @Builder private immersiveContent(){this.content(true);}
+  private actionMaterial():uiMaterial.ImmersiveMaterial{
+    // Native material shadows override Popup.shadow. Disable both for clipped toolbar pills.
+    if(this.colored)return storeTintedImmersiveMaterial(this.tint,this.tintStrength,this.popupShadow);
+    return new uiMaterial.ImmersiveMaterial({style:uiMaterial.ImmersiveStyle.THIN,
+      materialColor:'#00000000',colorInvert:false,applyShadow:false,interactive:true,lightEffect:{color:this.tint}});
+  }
+  // Keep the native bubble at its full size; only its NavDestination clips it.
+  // Measure and cancel the system's placement inset, rather than hard-code a device margin.
+  private correctEmbeddedPlacement(area:Area):void{
+    if(!this.embedded||!this.popupRequested()||!Number.isFinite(this.anchorX)||!Number.isFinite(this.anchorY))return;
+    const x=Number(area.globalPosition.x),y=Number(area.globalPosition.y);
+    if(!Number.isFinite(x)||!Number.isFinite(y))return;
+    const dx=this.anchorX+this.viewportOffset-x,dy=this.anchorY-y;
+    if(Math.abs(dx)>0.2)this.placementCorrectionX+=dx;
+    if(Math.abs(dy)>0.2)this.placementCorrectionY+=dy;
+  }
+  private popupAnchorX():number{return this.embedded?-this.viewportOffset:0;}
+  private popupOffset():Position{
+    return {x:this.embedded?this.viewportOffset+this.placementCorrectionX:0,
+      y:(this.anchorAtStart?-this.controlHeight:this.controlHeight)+(this.embedded?this.placementCorrectionY:0)};
+  }
+  @Builder private immersiveContent(){
+    Row(){
+      this.content(true);
+    }.width(this.popupWidth()).height(this.controlHeight)
+      .onAreaChange((_old:Area,area:Area)=>{this.correctEmbeddedPlacement(area);})
+  }
   build(){
-    Stack(){
+    Stack({alignContent:Alignment.Start}){
       // Capability support is not proof that the separate popup window has appeared.
       // Keep a usable in-page action until the system confirms actual visibility.
       if(this.fallbackVisible()){this.content(false);}
       if(this.canUseMaterial()){
-      Column(){}.width('100%').height(52)
+      Column(){}.width('100%').height(this.controlHeight)
         .onSizeChange((_old:SizeOptions,size:SizeOptions)=>{
           const width=Number(size.width);
           if(Number.isFinite(width)&&width>0)this.measuredWidth=width;
         })
-        .bindPopup(this.popupRequested(),{builder:this.immersiveContent,width:this.measuredWidth,radius:18,
-          // 底部浮层向上布局后回到锚点；向下布局会触发系统避让，再被负偏移推高。
-          placement:Placement.Top,targetSpace:0,offset:{x:0,y:52},enableArrow:false,autoCancel:false,
+      Column(){}.width(Math.max(0.5,this.popupWidth())).height(this.controlHeight).position({x:this.popupAnchorX(),y:0})
+        .onAreaChange((_old:Area,area:Area)=>{
+          this.anchorX=Number(area.globalPosition.x);this.anchorY=Number(area.globalPosition.y);
+        })
+        .bindPopup(this.popupRequested(),{builder:this.immersiveContent,width:this.popupWidth(),radius:this.controlRadius,
+          // Header anchors open below themselves; the bottom install action retains its upward placement.
+          placement:this.anchorAtStart?Placement.BottomLeft:Placement.Top,targetSpace:0,
+          offset:this.popupOffset(),enableArrow:false,autoCancel:false,
           focusable:false,mask:false,
+          followTransformOfTarget:this.followsTarget,transition:TransitionEffect.IDENTITY,
+          levelMode:this.embedded?LevelMode.EMBEDDED:LevelMode.OVERLAY,
+          shadow:this.popupShadow?undefined:{radius:0,color:Color.Transparent,offsetX:0,offsetY:0},
+          popupColor:this.popupShadow?undefined:Color.Transparent,
+          backgroundBlurStyle:this.popupShadow?undefined:BlurStyle.NONE,
           onStateChange:(event:PopupStateChangeParam)=>{this.onPopupStateChanged(event.isVisible);},
           onWillDismiss:(action:DismissPopupAction)=>{if(action.reason===DismissReason.PRESS_BACK)this.backAction();},
-          systemMaterial:new uiMaterial.ImmersiveMaterial({style:uiMaterial.ImmersiveStyle.THIN,
-            materialColor:'#99'+this.tint.substring(1),colorInvert:false,
-            applyShadow:true,interactive:true,lightEffect:{color:this.tint}})})
+          systemMaterial:this.actionMaterial()})
       }
-    }.width('100%').height(52)
+    }.width('100%').height(this.controlHeight)
   }
 }

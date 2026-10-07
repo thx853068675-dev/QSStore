@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
-const names = ['displayInstalledVersion', 'installedAssets', 'latestAssets', 'assetForBundle', 'updateApps', 'catalogApp', 'catalogForJob', 'renewalAppId', 'openJobDetails', 'loadUpdateCatalog',
+const names = ['displayInstalledVersion', 'installedAssets', 'latestAssets', 'assetForBundle', 'updateApps', 'catalogApp', 'catalogForJob', 'renewalAppId', 'openJobDetails', 'loadUpdateCatalog', 'syncDiscoveryCategories',
   'catalogBundleName', 'catalogInstallable', 'installedVersionOf', 'installedBundleOf', 'installedJobFor', 'updateForApp',
   'installFromCatalog', 'checkInstalledUpdates', 'updateFor', 'allInstalledJobs', 'currentInstalledView',
   'recentInstalledJobs', 'startUpdate', 'updatableInstalledJobs', 'updateAllInstalled', 'managementInstalledJobs', 'versionLabel', 'installedActionLabel', 'performInstalledAction'];
@@ -20,7 +20,7 @@ const code = ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThi
   compilerOptions: { target: ts.ScriptTarget.ES2020 }
 }).outputText;
 function app(id = 7, bundleName = 'com.example.app', versionCode = 2) {
-  return { id, displayName: '同名应用', latestAsset: { bundleName, versionCode,
+  return { id, displayName: '同名应用', category: '工具', latestAsset: { bundleName, versionCode,
     versionName: String(versionCode), name: 'app.hap', url: 'https://example.com/app.hap',
     sha256: 'a'.repeat(64), mirrorUrls: [] } };
 }
@@ -55,7 +55,7 @@ function fixture() {
   sandbox.CatalogInstallIdentity = identity.exports.CatalogInstallIdentity;
   vm.runInNewContext(code, sandbox);
   f.ui = new sandbox.Page();
-  Object.assign(f.ui, { apps: [], updateCatalog: [], updateCatalogReady: false,
+  Object.assign(f.ui, { activeQuery: '', activeCategory: '', discoveryCategories: [], apps: [], updateCatalog: [], updateCatalogReady: false,
     renewalDeadline: () => 1800000000,
     updateCatalogBusy: false, updateCatalogError: '', installedJobs: [local()],
     enqueuingAppIds: [], signedIn: true, taskPending: () => false, loadJobs: async () => {},
@@ -327,4 +327,13 @@ test('bulk enqueue retains failures while continuing other apps and requires log
   let calls = 0; ui.startUpdate = async () => { calls++; if (calls === 1) throw Error('来源暂不可用'); };
   await ui.updateAllInstalled(); assert.equal(calls, 2); assert.match(ui.jobsError, /来源暂不可用/);
   ui.signedIn = false; await ui.updateAllInstalled(); assert.equal(calls, 2); assert.match(ui.jobsError, /登录/);
+});
+
+
+test('category strip uses the complete published catalog, not a searched page, and removes empty categories', () => {
+  const f = fixture(), ui = f.ui; ui.activeQuery = 'query'; ui.apps = [{category: 'searched only'}];
+  ui.updateCatalogReady = true; ui.updateCatalog = [{category: '工具'}, {category: '影音'}, {category: '工具'}, {category: '  '}];
+  ui.syncDiscoveryCategories(); assert.deepEqual(Array.from(ui.discoveryCategories).sort(), ['工具', '影音'].sort());
+  const same = ui.discoveryCategories; ui.syncDiscoveryCategories(); assert.equal(ui.discoveryCategories, same);
+  ui.updateCatalog = [{category: '影音'}]; ui.syncDiscoveryCategories(); assert.deepEqual(Array.from(ui.discoveryCategories), ['影音']);
 });

@@ -54,7 +54,8 @@ test('release caching separates application, channel and page while catalog refr
   await f.client.listReleases(1, 1, 20, false); await f.client.listReleases(1, 1, 20, true);
   await f.client.listReleases(1, 2, 20, true); await f.client.listReleases(1, 1, 20, false);
   assert.equal(f.calls.length, 3);
-  await f.client.listApps(); await f.client.listApps(); assert.equal(f.calls.length, 5);
+  await f.client.listApps(); await f.client.listApps(); assert.equal(f.calls.length, 4);
+  await f.client.listApps(1, 30, 'updated', '', '', true); assert.equal(f.calls.length, 5);
 });
 test('failed reads clear their shared request and do not poison the next detail entry', async () => {
   const f = fixture(); f.queue.push(Error('timeout'), ok({ id: 42 }));

@@ -638,14 +638,26 @@ export class JobStore implements DownloadJournal {
   private async query(sql: string, args: Array<relationalStore.ValueType>): Promise<InstallJob[]> {
     const result = await this.db.querySql(sql, args);
     const rows: InstallJob[] = [];
+    const columns = new Map<string, number>();
     try {
+      for (const name of [
+        'id', 'app_id', 'asset_name', 'source_url', 'mirror_urls',
+        'expected_sha256', 'catalog_bundle_name', 'catalog_version_code', 'bundle_name', 'version_code',
+        'version_name', 'stage_history', 'module_name', 'main_ability', 'stage',
+        'cache_path', 'signed_path', 'profile_path', 'device_udid', 'profile_sha256',
+        'signed_profile_sha256', 'signing_cert_id', 'reinstall_required', 'renewal_requested_at', 'renewal_prepared_at',
+        'renewal_previous_expiry', 'renewal_expires_at', 'renewal_install_baseline', 'authorization_expires_at', 'installed_update_time',
+        'installed_fingerprint', 'allow_data_loss', 'approved_installed_version', 'approved_installed_fingerprint', 'approved_installed_app_identifier',
+        'transfer_task_id', 'staged_ticket', 'attempt', 'last_error', 'updated_at'
+      ]) columns.set(name, result.getColumnIndex(name));
+      let sliceStartedAt = Date.now();
       while (result.goToNextRow()) {
         const job = new InstallJob();
-        job.id = result.getString(result.getColumnIndex('id'));
-        job.appId = result.getLong(result.getColumnIndex('app_id'));
-        job.assetName = result.getString(result.getColumnIndex('asset_name'));
-        job.sourceUrl = result.getString(result.getColumnIndex('source_url'));
-        const mirrorText = result.getString(result.getColumnIndex('mirror_urls'));
+        job.id = result.getString(columns.get('id')!);
+        job.appId = result.getLong(columns.get('app_id')!);
+        job.assetName = result.getString(columns.get('asset_name')!);
+        job.sourceUrl = result.getString(columns.get('source_url')!);
+        const mirrorText = result.getString(columns.get('mirror_urls')!);
         try {
           const parsed = JSON.parse(mirrorText) as string[];
           job.mirrorUrls = Array.isArray(parsed) ? parsed.filter((url: string) =>
@@ -653,13 +665,13 @@ export class JobStore implements DownloadJournal {
         } catch (_) {
           job.mirrorUrls = [];
         }
-        job.expectedSha256 = result.getString(result.getColumnIndex('expected_sha256'));
-        job.catalogBundleName = result.getString(result.getColumnIndex('catalog_bundle_name'));
-        job.catalogVersionCode = result.getLong(result.getColumnIndex('catalog_version_code'));
-        job.bundleName = result.getString(result.getColumnIndex('bundle_name'));
-        job.versionCode = result.getLong(result.getColumnIndex('version_code'));
-        job.versionName = result.getString(result.getColumnIndex('version_name'));
-        const historyText = result.getString(result.getColumnIndex('stage_history'));
+        job.expectedSha256 = result.getString(columns.get('expected_sha256')!);
+        job.catalogBundleName = result.getString(columns.get('catalog_bundle_name')!);
+        job.catalogVersionCode = result.getLong(columns.get('catalog_version_code')!);
+        job.bundleName = result.getString(columns.get('bundle_name')!);
+        job.versionCode = result.getLong(columns.get('version_code')!);
+        job.versionName = result.getString(columns.get('version_name')!);
+        const historyText = result.getString(columns.get('stage_history')!);
         try {
           const parsed = JSON.parse(historyText) as Array<Record<string, Object>>;
           job.stageHistory = Array.isArray(parsed) ? parsed.map((row: Record<string, Object>) => {
@@ -671,35 +683,41 @@ export class JobStore implements DownloadJournal {
         } catch (_) {
           job.stageHistory = [];
         }
-        job.moduleName = result.getString(result.getColumnIndex('module_name'));
-        job.mainAbility = result.getString(result.getColumnIndex('main_ability'));
-        job.stage = result.getString(result.getColumnIndex('stage')) as InstallStage;
-        job.cachePath = result.getString(result.getColumnIndex('cache_path'));
-        job.signedPath = result.getString(result.getColumnIndex('signed_path'));
-        job.profilePath = result.getString(result.getColumnIndex('profile_path'));
-        job.deviceUdid = result.getString(result.getColumnIndex('device_udid'));
-        job.profileSha256 = result.getString(result.getColumnIndex('profile_sha256'));
-        job.signedProfileSha256 = result.getString(result.getColumnIndex('signed_profile_sha256'));
-        job.signingCertId = result.getString(result.getColumnIndex('signing_cert_id'));
-        job.reinstallRequired = result.getLong(result.getColumnIndex('reinstall_required')) === 1;
-        job.renewalRequestedAt = result.getLong(result.getColumnIndex('renewal_requested_at'));
-        job.renewalPreparedAt = result.getLong(result.getColumnIndex('renewal_prepared_at'));
-        job.renewalPreviousExpiry = result.getLong(result.getColumnIndex('renewal_previous_expiry'));
-        job.renewalExpiresAt = result.getLong(result.getColumnIndex('renewal_expires_at'));
-        job.renewalInstallBaseline = result.getLong(result.getColumnIndex('renewal_install_baseline'));
-        job.authorizationExpiresAt = result.getLong(result.getColumnIndex('authorization_expires_at'));
-        job.installedUpdateTime = result.getLong(result.getColumnIndex('installed_update_time'));
-        job.installedFingerprint = result.getString(result.getColumnIndex('installed_fingerprint'));
-        job.allowDataLoss = result.getLong(result.getColumnIndex('allow_data_loss')) === 1;
-        job.approvedInstalledVersion = result.getLong(result.getColumnIndex('approved_installed_version'));
-        job.approvedInstalledFingerprint = result.getString(result.getColumnIndex('approved_installed_fingerprint'));
-        job.approvedInstalledAppIdentifier = result.getString(result.getColumnIndex('approved_installed_app_identifier'));
-        job.transferTaskId = result.getString(result.getColumnIndex('transfer_task_id'));
-        job.stagedTicket = result.getString(result.getColumnIndex('staged_ticket'));
-        job.attempt = result.getLong(result.getColumnIndex('attempt'));
-        job.lastError = result.getString(result.getColumnIndex('last_error'));
-        job.updatedAt = result.getLong(result.getColumnIndex('updated_at'));
+        job.moduleName = result.getString(columns.get('module_name')!);
+        job.mainAbility = result.getString(columns.get('main_ability')!);
+        job.stage = result.getString(columns.get('stage')!) as InstallStage;
+        job.cachePath = result.getString(columns.get('cache_path')!);
+        job.signedPath = result.getString(columns.get('signed_path')!);
+        job.profilePath = result.getString(columns.get('profile_path')!);
+        job.deviceUdid = result.getString(columns.get('device_udid')!);
+        job.profileSha256 = result.getString(columns.get('profile_sha256')!);
+        job.signedProfileSha256 = result.getString(columns.get('signed_profile_sha256')!);
+        job.signingCertId = result.getString(columns.get('signing_cert_id')!);
+        job.reinstallRequired = result.getLong(columns.get('reinstall_required')!) === 1;
+        job.renewalRequestedAt = result.getLong(columns.get('renewal_requested_at')!);
+        job.renewalPreparedAt = result.getLong(columns.get('renewal_prepared_at')!);
+        job.renewalPreviousExpiry = result.getLong(columns.get('renewal_previous_expiry')!);
+        job.renewalExpiresAt = result.getLong(columns.get('renewal_expires_at')!);
+        job.renewalInstallBaseline = result.getLong(columns.get('renewal_install_baseline')!);
+        job.authorizationExpiresAt = result.getLong(columns.get('authorization_expires_at')!);
+        job.installedUpdateTime = result.getLong(columns.get('installed_update_time')!);
+        job.installedFingerprint = result.getString(columns.get('installed_fingerprint')!);
+        job.allowDataLoss = result.getLong(columns.get('allow_data_loss')!) === 1;
+        job.approvedInstalledVersion = result.getLong(columns.get('approved_installed_version')!);
+        job.approvedInstalledFingerprint = result.getString(columns.get('approved_installed_fingerprint')!);
+        job.approvedInstalledAppIdentifier = result.getString(columns.get('approved_installed_app_identifier')!);
+        job.transferTaskId = result.getString(columns.get('transfer_task_id')!);
+        job.stagedTicket = result.getString(columns.get('staged_ticket')!);
+        job.attempt = result.getLong(columns.get('attempt')!);
+        job.lastError = result.getString(columns.get('last_error')!);
+        job.updatedAt = result.getLong(columns.get('updated_at')!);
         rows.push(job);
+        // Result-set conversion runs on the UI event loop even though querySql
+        // is async. Yield by elapsed time, including small but expensive rows.
+        if (Date.now() - sliceStartedAt >= 3) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          sliceStartedAt = Date.now();
+        }
       }
     } finally {
       result.close();

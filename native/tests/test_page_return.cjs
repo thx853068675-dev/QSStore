@@ -10,11 +10,12 @@ function method(name) {
   assert(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
 }
 function fixture() {
-  const f = { viewed: [], icons: [], scans: 0, myAppsCalls: 0, myAppsFetch: async () => [] };
+  const f = { routeRevision: 0, frames: [], viewed: [], icons: [], scans: 0, myAppsCalls: 0, myAppsFetch: async () => [] };
   const timers = new Map(); let nextTimer = 0;
   f.flushResume = () => { for (const [id, fn] of timers) { timers.delete(id); fn(); } };
   f.timers = timers;
-  const box = { ForegroundIdle: { onForeground() {}, interaction() {},
+  const box = { afterPaint: (_ui, callback) => f.frames.push(callback),
+    StorePageMotion: { routeRevision: () => f.routeRevision }, ForegroundIdle: { onForeground() {}, interaction() {},
     defer: (key, fn) => timers.set(key, fn), cancel: key => timers.delete(key) }, setTimeout: fn => { timers.set(++nextTimer, fn); return nextTimer; },
     clearTimeout: id => timers.delete(id), StoreClient: class {
     static consumeViewedApps() { const rows = f.viewed; f.viewed = []; return rows; }
@@ -26,27 +27,37 @@ function fixture() {
   }).outputText, box);
   box.InstallConfirmation = { deactivate() {} }; box.InstallReconnect = { deactivate() {} };
   const ui = new box.Page(); Object.assign(ui, { pageVisible: false, topActionEpoch: 3,
-    resumeMaintenancePending: false,
+    headerRouteRevision: 0, headerRestoreGeneration: 0, getUIContext: () => ({}), resumeMaintenancePending: false,
     currentTab: 0, signedIn: true, account: {}, myApps: [{ id: 1, category: '工具' }], syncManagementIcons() {},
     myAppsLoaded: true, myAppsBusy: false, myAppsRefreshing: false, myAppsMessage: '',
     apps: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
     updateCatalog: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
     appIcons: [{ id: 1, rev: 'old', pixels: 'original pixels' }], catalogPage: 4,
     discoverMotion: { showTop: true }, scrollOffset: 1234, activeQuery: 'saved search',
-    observeReconnect() {}, observeInstallTasks() {}, drainInstallQueue() {}, syncManagementRows() {}, syncDiscoverRows() {},
+    syncDeviceIcons() {}, observeReconnect() {}, observeInstallTasks() {}, drainInstallQueue() {}, syncManagementRows() {}, syncDiscoverRows() {},
     refreshCatalogInstallState() {}, reconcileInterruptedInstalls: async () => {}, reconcileStuckJobs() {},
     scanDeviceInstalled() { f.scans++; }, loadSigningExpiries() {},
     loadApps() { throw Error('return must not restart paginated network loading'); },
     loadAppIcon(_client, app) { f.icons.push(app); } });
   f.ui = ui; return f;
 }
-test('return from detail preserves discovery pagination, scroll and icons, and renews native popup ownership', () => {
-  const { ui } = fixture(); const apps = ui.apps, icons = ui.appIcons;
-  ui.onPageShow(); assert.equal(ui.pageVisible, true); assert.equal(ui.topActionEpoch, 4);
+test('background returns reuse popup ownership while a real route return renews it after painting', () => {
+  const f = fixture(), ui = f.ui; const apps = ui.apps, icons = ui.appIcons;
+  ui.onPageShow(); assert.equal(ui.pageVisible, true); assert.equal(ui.topActionEpoch, 3);
+  assert.equal(f.frames.length, 0);
+  ui.onPageHide(); ui.onPageShow(); assert.equal(ui.topActionEpoch, 3);
+  f.routeRevision++; ui.onPageHide(); ui.onPageShow();
+  assert.equal(ui.topActionEpoch, 3, 'the first return paint must not rebuild the control');
+  f.frames.shift()(); assert.equal(ui.topActionEpoch, 4);
   assert.equal(ui.apps, apps); assert.equal(ui.appIcons, icons); assert.equal(ui.catalogPage, 4);
   assert.equal(ui.scrollOffset, 1234); assert.equal(ui.discoverMotion.showTop, true);
-  ui.onPageHide(); assert.equal(ui.pageVisible, false);
-  ui.onPageShow(); assert.equal(ui.topActionEpoch, 5); assert.equal(ui.discoverMotion.showTop, true);
+});
+test('late popup ownership restoration cannot recreate controls after hiding or during a later return', () => {
+  const f=fixture(),ui=f.ui;f.routeRevision++;
+  ui.onPageShow();ui.onPageHide();f.frames.shift()();assert.equal(ui.topActionEpoch,3);
+  ui.onPageShow();ui.onPageShow();assert.equal(f.frames.length,2);
+  f.frames.shift()();assert.equal(ui.topActionEpoch,3);
+  f.frames.shift()();assert.equal(ui.topActionEpoch,4);assert.equal(ui.headerRouteRevision,1);
 });
 test('return to Management merges only viewed changes, leaving other rows and old icon pixels until replacement', () => {
   const f = fixture(), ui = f.ui; ui.currentTab = 2;

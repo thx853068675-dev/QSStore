@@ -13,7 +13,7 @@ function fixture(identity) {
     SigningIdentityRecovery: { restore: async () => f.restore, load: async (_ctx, _account, allowExpired) => {
       f.calls.push(allowExpired); return identity;
     } } };
-  const code = ['applyCertificateDetail', 'clearCertificateDetail', 'static formatDay', 'async recoverSigningIdentity']
+  const code = ['applyCertificateDetail', 'clearCertificateDetail', 'static formatDay', 'recoverSigningIdentity', 'async readSigningIdentity']
     .map(method).join('\n');
   vm.runInNewContext(ts.transpileModule('class Index {' + code + '};globalThis.Page=Index;', {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }

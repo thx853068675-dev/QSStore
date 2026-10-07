@@ -35,7 +35,7 @@ const code = ts.transpileModule(`class StoreClient {
   static publicReads = new Map();
   static responseEpoch = 0;
   caData = '';
-  ${['requestData', 'getData', 'removeMyApp', 'invalidatePublic'].map(method).join('\n')}
+  ${['requestData', 'getData', 'removeMyApp', 'invalidatePublic', 'listApps'].map(method).join('\n')}
 }; globalThis.StoreClient = StoreClient;`,
 { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
 
@@ -53,6 +53,8 @@ function harness(payload = { ok: true, data: {} }) {
     Promise,
     Object,
     Array,
+    ListPage: class {}, CatalogApp: { fromJson: row => row },
+    numberField: (data, key, fallback) => Number(data[key] ?? fallback),
     http: {
       createHttp: () => ({
         request: (url, options) => {
@@ -125,4 +127,15 @@ test('a signed-out account is rejected before any request goes out', async () =>
 test('a server error envelope surfaces its message', async () => {
   const { client } = harness({ ok: false, error: { code: 'X', message: '下架失败', hint: '稍后再试' } });
   await assert.rejects(() => client.getData('/api/v1/apps'), /下架失败 · 稍后再试/);
+});
+
+
+test('combined search/category filters are safely encoded and have separate public cache keys', async () => {
+  const { client, calls } = harness({ok: true, data: {items: [], total: 0}});
+  await client.listApps(2, 30, 'discover', ' A&B ', ' 影音 ');
+  const url = new URL(calls[0].url);
+  assert.equal(url.searchParams.get('q'), 'A&B'); assert.equal(url.searchParams.get('category'), '影音');
+  assert.equal(url.searchParams.get('page'), '2');
+  await client.listApps(1, 30, 'discover'); assert.equal(calls.length, 2);
+  assert(!new URL(calls[1].url).searchParams.has('category'));
 });

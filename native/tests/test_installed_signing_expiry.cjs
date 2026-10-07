@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 function fixture() {
   const f = { fingerprint: 'A'.repeat(64), profileEnd: 1900000000, profileBefore: 1799900000,
-    certTime: '290101000000Z', digest: 'b'.repeat(64), reads: 0, paths: ['/private/app.p7b'] };
+    stamp: 1, hashes: 0, certTime: '290101000000Z', digest: 'b'.repeat(64), reads: 0, paths: ['/private/app.p7b'] };
   f.live = { name: 'com.example.app', versionCode: 7, updateTime: 1800000000000,
     signatureInfo: { fingerprint: f.fingerprint } };
   const identity = { exports: {}, require: () => ({}) };
@@ -20,7 +20,7 @@ function fixture() {
       getBundleInfoForSelfSync: () => ({ name: 'self' }), getBundleInfoSync: () => { if (f.unavailable) throw Object.assign(Error('query denied'), { code: f.errorCode || 201 }); return f.live; } } },
     '@kit.ArkTS': { util: { Base64Helper: class { decodeSync(text) { return new Uint8Array(Buffer.from(text, 'base64')); } } } },
     '@kit.DeviceCertificateKit': { cert: { EncodingFormat: { FORMAT_DER: 0 }, createX509Cert: async () => ({ getNotAfterTime: () => f.certTime }) } },
-    '@kit.CoreFileKit': { hash: { hash: async () => f.digest } },
+    '@kit.CoreFileKit': { fileIo: { lstat: async () => { if (f.deleted) throw Error('deleted'); return {ino:1n,size:200,mtimeNs:BigInt(f.stamp),ctimeNs:BigInt(f.stamp),isFile:()=>true}; } }, hash: { hash: async () => { f.hashes++; return f.digest; } } },
     'libhap_core.so': { readSignedProfile: () => { f.reads++; return JSON.stringify({
       'bundle-info': { 'bundle-name': f.profileBundle || 'com.example.app', 'app-identifier': f.profileIdentifier || '',
         'development-certificate': '-----BEGIN CERTIFICATE-----YQ==-----END CERTIFICATE-----' },
@@ -205,4 +205,17 @@ test('offline display can reuse a scanned identity but never infer expiry from v
   f.cached.updateTime += 5000; assert.equal(await f.Expiry.read(f.job.bundleName, 7, [f.job]), 0);
   f.cached.updateTime -= 5000; f.errorCode = 17700001;
   assert.equal(await f.Expiry.read(f.job.bundleName, 7, [f.job]), 0, 'confirmed uninstall beats cached signature');
+});
+
+test('unchanged retained Profiles reuse display metadata; replacement, deletion and concurrent reads remain safe', async()=>{
+  const f=fixture();
+  const [first,shared]=await Promise.all([f.Expiry.estimateMaterials({},[f.job.bundleName]),f.Expiry.estimateMaterials({},[f.job.bundleName])]);
+  assert.equal(first.length,1);assert.equal(shared.length,1);assert.equal(f.reads,1);assert.equal(f.hashes,2);
+  await f.Expiry.estimateMaterials({},[f.job.bundleName]);assert.equal(f.reads,1);assert.equal(f.hashes,2);
+  f.stamp++;f.profileEnd=1800500000;
+  const fresh=await f.Expiry.estimateMaterials({},[f.job.bundleName]);assert.equal(fresh[0].expiresAt,1800500000);assert.equal(f.reads,2);
+  f.deleted=true;assert.equal((await f.Expiry.estimateMaterials({},[f.job.bundleName])).length,0);
+  f.deleted=false;await f.Expiry.estimateMaterials({},[f.job.bundleName]);assert.equal(f.reads,3);
+  f.paths=[];await f.Expiry.estimateMaterials({},[f.job.bundleName]);f.paths=['/private/app.p7b'];
+  await f.Expiry.estimateMaterials({},[f.job.bundleName]);assert.equal(f.reads,4,'removed paths cannot remain in the metadata cache');
 });

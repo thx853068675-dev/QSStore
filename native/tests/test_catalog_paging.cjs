@@ -10,7 +10,7 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
   '../entry/src/main/ets/data/CatalogPaging.ets'), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
 }).outputText, { exports: exported });
-const { appendCatalogPage, shouldPrefetchCatalog } = exported;
+const { appendCatalogPage, filterCatalogCategory, shouldPrefetchCatalog } = exported;
 const ids = rows => Array.from(rows, row => row.id);
 
 test('a later high-star page never moves cards already displayed or duplicates a moving page boundary', () => {
@@ -34,4 +34,17 @@ test('prefetch starts before the page boundary and cannot loop on busy, empty, f
   assert.equal(shouldPrefetchCatalog(30, 30, 1, 30, 30, false, false), false);
   assert.equal(shouldPrefetchCatalog(29, 60, 2, 30, 60, false, false), false);
   assert.equal(shouldPrefetchCatalog(0, 90, 0, 30, 0, false, false), false);
+});
+
+test('complete category filtering ranks all high-star apps first and then follows server update time and id ordering', () => {
+  const rows = [
+    { id: 1, category: '工具', stars: 5, updatedAt: '2026-10-07T10:00:00Z' },
+    { id: 2, category: '工具', stars: 100, updatedAt: '2026-10-07T12:00:00Z' },
+    { id: 3, category: '工具', stars: 300, updatedAt: '2026-10-06T00:00:00Z' },
+    { id: 4, category: '影音', stars: 2000, updatedAt: '2026-10-07T00:00:00Z' },
+    { id: 5, category: '工具', stars: 300, updatedAt: '2026-10-07T00:00:00Z' },
+    { id: 6, category: '工具', stars: 3, updatedAt: '2026-10-07T12:00:00Z' }
+  ];
+  assert.deepEqual(ids(filterCatalogCategory(rows, '工具')), [5, 3, 6, 2, 1]);
+  assert.deepEqual(ids(rows), [1, 2, 3, 4, 5, 6]);
 });

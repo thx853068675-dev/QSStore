@@ -1150,8 +1150,9 @@ struct Detail {
     .width('100%').height(52).padding(0)
     .enabled(this.installButtonEnabled())
     .stateEffect(true).accessibilityText(this.installButtonLabel())
-    // 蓝色由系统材质层着色，内容层透明，避免把折射和光感盖住。
-    .backgroundColor(immersive ? Color.Transparent : this.colors().accent)
+    // The action remains blue/readable even if the native material is transparent.
+    // A small translucency still preserves its system light and edge effects.
+    .backgroundColor(immersive ? '#EB' + this.colors().accent.substring(1) : this.colors().accent)
     .borderRadius(18).clip(true)
     .onSizeChange((_old: SizeOptions, size: SizeOptions) => {
       const width = Number(size.width);

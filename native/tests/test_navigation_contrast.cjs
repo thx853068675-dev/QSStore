@@ -11,6 +11,32 @@ function load(name, mocks = {}, globals = {}) {
   return box.exports;
 }
 const { NavigationContrast: contrast } = load('NavigationContrast');
+function navigationPage(api, dark, foreground) {
+  const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
+  const start = source.indexOf('  private navigationColor(');
+  const method = source.slice(start, source.indexOf('\n  }', start) + 4).replace('private ', '');
+  const box = { exports: {}, deviceInfo: { sdkApiVersion: api } };
+  vm.runInNewContext(ts.transpileModule(`class Page { ${method} } exports.Page = Page;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 }
+  }).outputText, box);
+  return Object.assign(new box.exports.Page(), { darkMode: dark, navigationForeground: foreground,
+    colors: () => ({ accent: '#2463E9', tabIdle: '#66758D' }) });
+}
+test('API 24/25 keep black day and white night navigation even above opposite-colored cards', () => {
+  for (const api of [24, 25]) for (const dark of [false, true]) {
+    const page = navigationPage(api, dark, [{ idle: dark ? '#000000' : '#FFFFFF', selected: '#2463E9' }]);
+    for (const index of [0, 1, 2, 3]) for (const selected of [false, true]) {
+      assert.equal(page.navigationColor(index, selected), dark ? '#FFFFFF' : '#000000');
+    }
+  }
+});
+test('API 26 retains per-region adaptive navigation and its visible initial theme colors', () => {
+  const page = navigationPage(26, false, [{ idle: '#FFFFFF', selected: '#BDD3FF' }]);
+  assert.equal(page.navigationColor(0, false), '#FFFFFF');
+  assert.equal(page.navigationColor(0, true), '#BDD3FF');
+  assert.equal(page.navigationColor(1, false), '#66758D');
+  assert.equal(page.navigationColor(1, true), '#2463E9');
+});
 function bgra(w, h, color) {
   const bytes = new Uint8Array(w * h * 4);
   for (let i = 0; i < bytes.length; i += 4) bytes.set(color, i);

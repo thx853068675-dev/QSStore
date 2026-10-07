@@ -386,6 +386,8 @@ struct Index {
   private colors(): Palette { return Palette.forMode(this.darkMode); }
 
   private navigationColor(index: number, selected: boolean): string {
+    // API 24/25 use the theme-backed material fallback, not adaptive foreground sampling.
+    if (deviceInfo.sdkApiVersion < 26) return this.darkMode ? '#FFFFFF' : '#000000';
     const foreground = this.navigationForeground[index];
     return foreground ? (selected ? foreground.selected : foreground.idle) :
       (selected ? this.colors().accent : this.colors().tabIdle);
@@ -456,11 +458,13 @@ struct Index {
   }
 
   aboutToAppear(): void {
-    this.navigationContrast = new NavigationContrastSampler(this.getUIContext(),
-      () => this.rootHeaderVisible(this.currentTab) &&
-        !AppStorage.get<boolean>('routeTransitioning'),
-      (colors: NavigationForeground[]) => { this.navigationForeground = colors; },
-      () => 'navigation-content-' + this.currentTab, StoreLayout.navigationBottomMargin);
+    if (deviceInfo.sdkApiVersion >= 26) {
+      this.navigationContrast = new NavigationContrastSampler(this.getUIContext(),
+        () => this.rootHeaderVisible(this.currentTab) &&
+          !AppStorage.get<boolean>('routeTransitioning'),
+        (colors: NavigationForeground[]) => { this.navigationForeground = colors; },
+        () => 'navigation-content-' + this.currentTab, StoreLayout.navigationBottomMargin);
+    }
     this.installerVersionName = LocalBundles.selfVersionName();
     InstallCoordinator.configure(getContext(this) as common.UIAbilityContext);
     this.observeReconnect();

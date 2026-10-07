@@ -186,25 +186,45 @@ export struct StorePageHeader {
 /** 浮动主操作使用系统材质；低版本继续使用原有实色按钮。 */
 @Component
 export struct StoreImmersiveAction {
-  @StorageProp('routeTransitioning') private routeTransitioning:boolean=false;
-  @Prop visible:boolean=true;
+  @StorageProp('routeTransitioning') @Watch('onPopupRequestChanged') private routeTransitioning:boolean=false;
+  @Prop @Watch('onPopupRequestChanged') visible:boolean=true;
   @Prop tint:string='#1F5DEF';
   backAction:()=>void=()=>{};
   @BuilderParam content:(immersive:boolean)=>void;
-  @State private measuredWidth:number=0;
+  @State @Watch('onPopupRequestChanged') private measuredWidth:number=0;
+  @State private popupVisible:boolean=false;
+  private canUseMaterial():boolean{
+    try{return deviceInfo.sdkApiVersion>=26&&uiMaterial.isImmersiveMaterialSupported();}
+    catch(_){return false;}
+  }
+  private popupRequested():boolean{return this.visible&&!this.routeTransitioning&&this.measuredWidth>0;}
+  private onPopupRequestChanged():void{this.popupVisible=false;}
+  private onPopupStateChanged(visible:boolean):void{this.popupVisible=visible&&this.popupRequested();}
+  private fallbackVisible():boolean{
+    return this.visible&&!this.routeTransitioning&&(!this.canUseMaterial()||!this.popupVisible);
+  }
   @Builder private immersiveContent(){this.content(true);}
   build(){
-    if(deviceInfo.sdkApiVersion>=26&&uiMaterial.isImmersiveMaterialSupported()){
+    Stack(){
+      // Capability support is not proof that the separate popup window has appeared.
+      // Keep a usable in-page action until the system confirms actual visibility.
+      if(this.fallbackVisible()){this.content(false);}
+      if(this.canUseMaterial()){
       Column(){}.width('100%').height(52)
-        .onSizeChange((_old:SizeOptions,size:SizeOptions)=>{this.measuredWidth=Number(size.width);})
-        .bindPopup(this.visible&&!this.routeTransitioning&&this.measuredWidth>0,{builder:this.immersiveContent,width:this.measuredWidth,radius:18,
+        .onSizeChange((_old:SizeOptions,size:SizeOptions)=>{
+          const width=Number(size.width);
+          if(Number.isFinite(width)&&width>0)this.measuredWidth=width;
+        })
+        .bindPopup(this.popupRequested(),{builder:this.immersiveContent,width:this.measuredWidth,radius:18,
           // 底部浮层向上布局后回到锚点；向下布局会触发系统避让，再被负偏移推高。
           placement:Placement.Top,targetSpace:0,offset:{x:0,y:52},enableArrow:false,autoCancel:false,
           focusable:false,mask:false,
+          onStateChange:(event:PopupStateChangeParam)=>{this.onPopupStateChanged(event.isVisible);},
           onWillDismiss:(action:DismissPopupAction)=>{if(action.reason===DismissReason.PRESS_BACK)this.backAction();},
           systemMaterial:new uiMaterial.ImmersiveMaterial({style:uiMaterial.ImmersiveStyle.THIN,
             materialColor:'#99'+this.tint.substring(1),colorInvert:false,
             applyShadow:true,interactive:true,lightEffect:{color:this.tint}})})
-    }else{this.content(false);}
+      }
+    }.width('100%').height(52)
   }
 }

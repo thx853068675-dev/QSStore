@@ -37,6 +37,8 @@ export class Palette {
   get hero(): string { return this.pick('#ECF3FF', '#16233A'); }
   /** 主色淡底（标签、次要按钮） */
   get accentSoft(): string { return this.pick('#E8EEFF', '#1E2C45'); }
+  /** A quiet brand accent, separate from installation and selection states. */
+  get brand(): string { return this.pick('#286D60', '#83C3AF'); }
   /** Selected discovery categories keep a white foreground on a rose material. */
   get selectionRose(): string { return this.pick('#C62663', '#D82D72'); }
 
@@ -72,7 +74,7 @@ export class Palette {
   get danger(): string { return this.pick('#B14848', '#FF8A80'); }
   get dangerSoft(): string { return this.pick('#FFF0F0', '#3A1F22'); }
   /** Signing authorization expires within seven days. */
-  get renewalWarning(): string { return this.pick('#FFEAF1', '#382434'); }
+  get renewalWarning(): string { return this.pick('#FFF0F5', '#30232E'); }
   /** 成功 */
   get success(): string { return this.pick('#257B65', '#5DD3AE'); }
   get successSoft(): string { return this.pick('#E7F5EF', '#14322A'); }

@@ -1195,13 +1195,13 @@ struct Detail {
       Column({ space: 12 }) {
         this.skeletonLine('35%', 14)
         this.skeletonLine('70%', 12)
-      }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(17)
+      }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
       Column({ space: 12 }) {
         this.skeletonLine('30%', 16)
         this.skeletonLine('100%', 36)
         this.skeletonLine('85%', 12)
         this.skeletonLine('60%', 12)
-      }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(17)
+      }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
     }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth })
       .padding({ left: 24, right: 24, top: this.statusBarInset + 72, bottom: 28 })
       .id('detail-information-skeleton').accessibilityText('正在读取应用信息')
@@ -1222,8 +1222,8 @@ struct Detail {
       } else {
         Stack({ alignContent: Alignment.Bottom }) {
           Scroll(this.detailScroller) {
-            Column({ space: 20 }) {
-              Column({ space: 17 }) {
+            Column({ space: 16 }) {
+              Column({ space: 12 }) {
                 Row({ space: 16 }) {
                   if (this.appIcon) {
                     Image(this.appIcon).width(74).height(74).borderRadius(20)
@@ -1246,37 +1246,34 @@ struct Detail {
                     }.width('100%')
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                 }.width('100%')
-                Text(this.app.summary).fontSize(14).fontColor(this.colors().textBody)
-                  .lineHeight(22).maxLines(3).width('100%')
+                if (this.app.summary.trim().length > 0) {
+                  Text(this.app.summary).fontSize(14).fontColor(this.colors().textBody)
+                    .lineHeight(20).maxLines(2).width('100%')
+                }
                 Row({ space: 8 }) {
-                  Text('由 ' + this.app.publisherName + ' 上架').fontSize(11)
+                  Text('由 ' + this.app.publisherName + ' 上架').fontSize(12)
                     .fontColor(this.colors().textSecondary).maxLines(1)
                     .constraintSize({ maxWidth: '50%' })
-                  Text(this.packageSizeLabel()).fontSize(10).fontColor(this.colors().textSecondary)
+                  Text(this.packageSizeLabel()).fontSize(12).fontColor(this.colors().textSecondary)
                     .layoutWeight(1).maxLines(1)
                   RepositoryStats({ stars: this.app.stars, downloads: this.app.githubDownloads,
-                    color: this.colors().accent })
+                    color: this.colors().textSecondary, compact: true })
                 }.width('100%')
               }.alignItems(HorizontalAlign.Start).width('100%')
-                .padding(22)
+                .padding(18)
                 .backgroundColor(this.heroColor.length > 0 ? this.heroColor : this.colors().hero)
-                .borderRadius(26)
+                .borderRadius(StoreLayout.heroRadius)
               // 来源仓库卡片：平台徽章按仓库地址识别，不写死 GitHub
-              Column({ space: 10 }) {
-                Row({ space: 9 }) {
-                  Text(this.repoHostLabel())
-                    .fontSize(10).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
-                    .padding({ left: 7, right: 7, top: 4, bottom: 4 })
-                    .backgroundColor(this.colors().accentSoft).borderRadius(7)
-                  Text('来源仓库').fontSize(11).fontColor(this.colors().textTertiary)
-                    .layoutWeight(1).maxLines(1)
-                  SymbolGlyph($r('sys.symbol.arrow_up_right')).fontSize(15)
-                    .fontColor([this.colors().textSecondary])
-                }.width('100%')
-                Text(this.repoPath()).fontSize(14).fontWeight(FontWeight.Medium)
-                  .fontColor(this.colors().text).maxLines(1)
-              }.alignItems(HorizontalAlign.Start).width('100%').padding(16)
-                .backgroundColor(this.colors().surface).borderRadius(17)
+              Row({ space: 10 }) {
+                Text(this.repoHostLabel()).fontSize(11).fontWeight(FontWeight.Medium)
+                  .fontColor(this.colors().textSecondary).padding({ left: 6, right: 6, top: 4, bottom: 4 })
+                  .backgroundColor(this.colors().fill).borderRadius(6).flexShrink(0)
+                Text(this.repoPath()).fontSize(13).fontColor(this.colors().textSecondary)
+                  .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+                SymbolGlyph($r('sys.symbol.arrow_up_right')).fontSize(15)
+                  .fontColor([this.colors().textSecondary])
+              }.width('100%').padding(14).constraintSize({ minHeight: 52 })
+                .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
                 .accessibilityText('来源仓库 ' + this.repoPath() + '，在浏览器打开')
                 .onClick(() => this.openRepo())
               if (this.app.secondaryRepo.length > 0) {
@@ -1288,7 +1285,8 @@ struct Detail {
                     .maxLines(1).layoutWeight(1)
                   SymbolGlyph($r('sys.symbol.arrow_up_right')).fontSize(14)
                     .fontColor([this.colors().textSecondary])
-                }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(17)
+                }.width('100%').padding(14).constraintSize({ minHeight: 52 })
+                  .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
                   .onClick(() => this.openSecondaryRepo())
               }
               Row({ space: 8 }) {
@@ -1357,8 +1355,8 @@ struct Detail {
                 }.alignItems(HorizontalAlign.Start).width('100%')
                   .padding(16)
                   .backgroundColor(this.colors().surface)
-                  .borderRadius(18)
-                  .border({ width: 1, color: this.colors().border })
+                  .borderRadius(StoreLayout.cardRadius)
+                  .border({ width: 0.5, color: this.colors().border })
               }
               Row() {
                 Text('用户评价').fontSize(18).fontWeight(FontWeight.Bold)
@@ -1387,7 +1385,7 @@ struct Detail {
                   Text('满分 5 分').fontSize(10).fontColor(this.colors().textTertiary)
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
               }.width('100%').padding(14)
-                .backgroundColor(this.colors().surface).borderRadius(17)
+                .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
               // 发布区默认收起：收起时只有一行入口，点 ✎ 展开
               Column({ space: 9 }) {
                 if (!this.reviewComposeOpen) {
@@ -1434,13 +1432,13 @@ struct Detail {
                     .onClick(() => { this.reviewComposeOpen = false; })
                 }
               }.alignItems(HorizontalAlign.Start).width('100%').padding(14)
-                .backgroundColor(this.colors().surface).borderRadius(17)
+                .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
               if (this.reviewPageBusy && this.reviewPage === 0) {
                 Column({ space: 10 }) {
                   this.skeletonLine('40%', 12)
                   this.skeletonLine('100%', 12)
                   this.skeletonLine('70%', 12)
-                }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(17)
+                }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
               }
               if (this.reviews.length > 0) {
                 Column() {
@@ -1490,7 +1488,7 @@ struct Detail {
                     }.width('100%').padding({ top: 8, bottom: 2 })
                   }
                 }.width('100%').padding({ left: 14, right: 14, top: 2, bottom: 6 })
-                  .backgroundColor(this.colors().surface).borderRadius(17)
+                  .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
               }
             }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + 40 })
               .padding({ left: 20, right: 20, top: this.statusBarInset + 68, bottom: 115 })

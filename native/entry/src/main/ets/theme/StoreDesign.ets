@@ -10,6 +10,10 @@ export class StoreLayout {
   static readonly cardActionRadius: number = 14;
   static readonly cardActionWidth: number = 64;
   static readonly cardWideActionWidth: number = 84;
+  static readonly cardRadius: number = 22;
+  static readonly heroRadius: number = 24;
+  static readonly dialogRadius: number = 24;
+  static readonly fieldHeight: number = 46;
   static readonly navigationBottomMargin: number = 20;
   static inset(width: number): number { return width > 0 && width < 360 ? 16 : 24; }
 }
@@ -21,9 +25,9 @@ export struct StoreTabBarBackdrop {
   build() {
     Column() {
       Column().width('calc(100% - 24vp)').constraintSize({ maxWidth: 328 }).height(56)
-        .backgroundColor('#B3' + Palette.forMode(this.darkMode).surface.substring(1))
+        .backgroundColor('#A6' + Palette.forMode(this.darkMode).surface.substring(1))
         .backgroundEffect({ radius: 24, saturation: 1.1, brightness: 1,
-          color: '#66' + Palette.forMode(this.darkMode).surface.substring(1),
+          color: '#33' + Palette.forMode(this.darkMode).surface.substring(1),
           policy: BlurStyleActivePolicy.ALWAYS_ACTIVE }, { disableSystemAdaptation: true })
         .borderRadius(28).clip(true)
         .border({ width: 0.5, color: Palette.forMode(this.darkMode).border, radius: 28 })

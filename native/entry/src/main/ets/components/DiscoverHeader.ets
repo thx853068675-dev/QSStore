@@ -13,7 +13,7 @@ export class DiscoverToolbarMotion {
   static readonly feedbackInset: number = 14;
   static readonly paintHeight: number = DiscoverToolbarMotion.controlHeight + 2 * DiscoverToolbarMotion.feedbackInset;
   static options(begin: number, end: number): AnimatorOptions {
-    return { duration: 560, easing: 'cubic-bezier(0.32, 0.08, 0.2, 1)', begin: begin, end: end,
+    return { duration: 420, easing: 'cubic-bezier(0.32, 0.08, 0.2, 1)', begin: begin, end: end,
       delay: 0, fill: 'forwards', direction: 'normal', iterations: 1 };
   }
 }
@@ -167,7 +167,7 @@ export struct DiscoverHeader {
   @Prop darkMode: boolean = false;
   @Prop statusInset: number = 0;
   @Prop inset: number = 20;
-  @Prop titleHeight: number = 88;
+  @Prop titleHeight: number = 68;
   @Prop @Watch('refreshPopup') active: boolean = true;
   @Prop @Watch('onCategoriesChanged') categories: string[] = [];
   @Prop selectedCategory: string = '';
@@ -390,19 +390,13 @@ export struct DiscoverHeader {
   build() {
     Column() {
       Column() {
-        Column({ space: 5 }) {
-          Text('HARMONYOS').fontSize(11).fontWeight(FontWeight.Bold)
-            .fontColor(Palette.forMode(this.darkMode).accent).letterSpacing(2)
-          Row({ space: 9 }) {
-            Text('发现').fontSize(30).fontWeight(FontWeight.Bold)
-              .fontColor(Palette.forMode(this.darkMode).text)
-            Text('值得安装的应用').fontSize(12)
-              .fontColor(Palette.forMode(this.darkMode).textSecondary).padding({ bottom: 5 })
-          }.alignItems(VerticalAlign.Bottom)
+        Column() {
+          Text('发现').fontSize(30).fontWeight(FontWeight.Bold)
+            .fontColor(Palette.forMode(this.darkMode).text)
         }.alignItems(HorizontalAlign.Start).width('100%')
           // 外层只裁切视口；标题保留完整高度，避免收起时的尺寸回调缩小自然高度。
           .constraintSize({ maxWidth: StoreLayout.contentWidth, minHeight: this.titleHeight })
-          .padding({ top: 20, bottom: 14 })
+          .padding({ top: 12, bottom: 12 })
           .translate({ y: -this.motion.scrollOffset })
           .onSizeChange((_old: SizeOptions, size: SizeOptions) => this.onTitleSize(Number(size.height)))
       }.width('100%').height(Math.max(0, this.titleHeight - this.motion.scrollOffset))
@@ -426,7 +420,7 @@ export struct DiscoverRefreshIndicator {
   @Prop darkMode: boolean = false;
   @Prop refreshing: boolean = false;
   @Prop statusInset: number = 0;
-  @Prop titleHeight: number = 88;
+  @Prop titleHeight: number = 68;
 
   build() {
     Row() {

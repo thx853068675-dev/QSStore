@@ -137,7 +137,7 @@ struct Settings {
           .accessibilityText(this.cacheBusy ? '正在清理缓存' : '清理图标、目录及闲置安装文件')
           .accessibilityDescription('保留未完成任务和签名材料').onClick(() => this.cleanCache())
       }.width('100%').padding({ left: 16, right: 12, top: 12, bottom: 12 })
-    }.width('100%').backgroundColor(this.colors().surface).borderRadius(22).clip(true)
+    }.width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius).clip(true)
   }
 
   @Builder private information(label: string, value: () => string) {
@@ -159,7 +159,7 @@ struct Settings {
               this.information('应用', () => '轻启·安装器')
               this.information('版本', () => this.version)
               this.information('内部编号', () => this.versionCode)
-            }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(22)
+            }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
           }.width('100%')
         }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth })
           .padding({ left: 24, right: 24, top: this.statusInset + 72, bottom: 28 })

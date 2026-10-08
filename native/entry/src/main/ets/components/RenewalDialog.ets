@@ -213,8 +213,8 @@ export struct RenewalDialog {
           }
           if (this.message) { Text(this.message).fontSize(12).fontColor(this.colors().danger).width('100%') }
           Text('关闭后任务会继续，可点击卡片的“续签中”查看进度。')
-            .fontSize(11).fontColor(this.colors().textTertiary).width('100%')
-        }.padding(24).width('100%').backgroundColor(this.colors().surface).borderRadius(26)
+            .fontSize(12).fontColor(this.colors().textSecondary).width('100%')
+        }.padding(22).width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
       }.width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth, maxHeight: '80%' })
     }.width('100%').height('100%').justifyContent(FlexAlign.Center).backgroundColor(this.colors().scrim)
   }

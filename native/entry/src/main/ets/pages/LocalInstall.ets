@@ -221,7 +221,7 @@ struct LocalInstall {
             if(this.preview||(!this.selected.id&&!this.busy)){Row({space:12}){
               Button(this.preview?(this.renewal?'续签':'安装'):'选择安装文件').layoutWeight(1).height(48).fontSize(15).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent).enabled(!this.busy).id('local-install-primary').onClick(()=>{if(this.preview)this.install();else this.pick();});
             }.width('100%');}
-          }.width('100%').padding(24).backgroundColor(this.colors().surface).borderRadius(22)
+          }.width('100%').padding(20).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
           if(this.message){Text(this.message).width('100%').fontSize(12).fontColor(this.colors().danger);}
           if(this.timeline.visible){this.timelineCard();}
         }.width('100%').constraintSize({maxWidth:StoreLayout.contentWidth}).padding({left:24,right:24,top:this.statusBarInset+78,bottom:36})}.width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Off)

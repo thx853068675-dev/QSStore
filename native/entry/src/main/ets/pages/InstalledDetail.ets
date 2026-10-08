@@ -105,11 +105,12 @@ struct InstalledDetail {
         if(!this.query&&section.fields.length>8){Text(this.expanded.includes(section.name)?'收起':'展开 '+section.fields.length+' 项').fontSize(12).fontColor(this.colors().accent).onClick(()=>{this.expanded=this.expanded.includes(section.name)?this.expanded.filter((name:string)=>name!==section.name):this.expanded.concat(section.name);});}}
       ForEach(this.query||this.expanded.includes(section.name)?section.fields:section.fields.slice(0,8),(field:InspectionField)=>{
         Row({space:14}){
-          Text(field.key).fontSize(11).wordBreak(WordBreak.BREAK_ALL).fontColor(this.colors().textTertiary).width('34%');
-          Text(field.value).fontSize(12).fontColor(this.colors().text).wordBreak(WordBreak.BREAK_ALL).textAlign(TextAlign.End).layoutWeight(1).onClick(()=>this.copy(field.value)).accessibilityText(field.key+'：'+field.value+'，点按复制');
+          Text(field.key).fontSize(12).wordBreak(WordBreak.BREAK_ALL).fontColor(this.colors().textSecondary).width('34%');
+          Text(field.value).fontSize(13).fontColor(this.colors().text).wordBreak(WordBreak.BREAK_ALL).textAlign(TextAlign.End).layoutWeight(1).onClick(()=>this.copy(field.value)).accessibilityText(field.key+'：'+field.value+'，点按复制');
         }.width('100%').alignItems(VerticalAlign.Top);
       },(field:InspectionField)=>field.key)
-    }.width('100%').alignItems(HorizontalAlign.Start).padding(18).backgroundColor(this.colors().surface).borderRadius(18)
+    }.width('100%').alignItems(HorizontalAlign.Start).padding(18)
+      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
   }
   @Builder private searchInput(){
     Row({space:8}){SymbolGlyph($r('sys.symbol.magnifyingglass')).fontSize(16).fontColor([this.colors().textSecondary]);

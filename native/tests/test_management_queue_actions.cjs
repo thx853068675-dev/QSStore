@@ -10,6 +10,11 @@ const method = ['queueActions', 'showQueueActions'].map(name => {
   return source.slice(start, source.indexOf('\n  }', start) + 4);
 }).join('\n');
 const actionsExports = {};
+const jobExports = {};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
+  '../entry/src/main/ets/jobs/InstallJob.ets'), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
+}).outputText, { exports: jobExports });
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
   '../entry/src/main/ets/data/ManagementActions.ets'), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
@@ -18,6 +23,7 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
 }) });
 function fixture(running = false) {
   const box = { ManagementActions: actionsExports.ManagementActions,
+    InstallJob: jobExports.InstallJob,
     InstallStage: { QUEUED: 'queued', TERMINAL_ERROR:'terminal_error' }, Index: { TAB_MINE: 3 }, AlertDialog: { show() {} } };
   vm.runInNewContext(ts.transpileModule('class Page { ' + method + ' }; globalThis.Page = Page;', {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
@@ -27,6 +33,7 @@ function fixture(running = false) {
   f.ui = new box.Page(); Object.assign(f.ui, { pendingJobs: [f.job], signedIn: true, activeJobId: '', cancellingJobs: [],
     managementQueueJobs: () => f.ui.pendingJobs,
     jobRunning: () => running, jobTitle: () => 'app', colors: () => ({ text: '#111', danger: '#f00' }),
+    animateOverlay: action => action(),
     showCardActionMenu: async (title, labels, destructiveIndex) => {
       f.options = { title, buttons: labels.map(text => ({ text })), destructiveIndex };
       if (f.wait) await f.wait; return f.index;
@@ -64,6 +71,21 @@ test('a task that completes while its menu is open is never canceled from the st
   const menu = f.ui.showQueueActions(f.job); await new Promise(setImmediate);
   f.ui.pendingJobs = []; release(); await menu;
   assert.equal(f.canceled.length, 0); assert.equal(f.continued.length, 0);
+});
+test('task information opens with the latest journal state and a separate display copy', async () => {
+  const f = fixture();
+  const captured = { ...f.job, stage: 'queued', lastError: 'old error' };
+  Object.assign(f.job, { stage: 'waiting_device', lastError: 'connection interrupted' });
+  f.ui.taskDetailExpanded = true;
+  await f.ui.showQueueActions(captured, 'details');
+  assert.equal(f.ui.taskDetailId, f.job.id);
+  assert.equal(f.ui.taskDetailExpanded, false);
+  assert.notEqual(f.ui.taskDetailFallback, f.job);
+  assert.equal(f.ui.taskDetailFallback.lastError, 'connection interrupted');
+  f.ui.taskDetailFallback.lastError = 'display only';
+  assert.equal(f.job.lastError, 'connection interrupted');
+  assert.equal(f.continued.length, 0);
+  assert.equal(f.canceled.length, 0);
 });
 test('signed-out paused tasks offer login, while dismissing the menu does not touch work', async () => {
   const f = fixture(); f.ui.signedIn = false; await f.ui.showQueueActions(f.job);

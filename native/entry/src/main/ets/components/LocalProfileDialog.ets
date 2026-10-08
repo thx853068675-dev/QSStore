@@ -81,7 +81,7 @@ export struct LocalProfileDialog {
       Column({ space: 16 }) {
           Row({ space: 12 }) {
             Column({ space: 4 }) {
-              Text('本地 Profile').fontSize(22).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+              Text('本地 Profile').fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
               Text(this.loading ? '正在读取本机授权…' : this.rows.length + ' 个应用 · ' +
                 this.rows.reduce((total: number, row: LocalProfileGroup) => total + row.files.length, 0) + ' 份授权')
                 .fontSize(12).fontColor(this.colors().textSecondary)
@@ -98,9 +98,9 @@ export struct LocalProfileDialog {
                 Column({ space: 5 }) {
                   Text(this.title(row)).fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
                     .maxLines(2).width('100%')
-                  Text(row.bundleName || row.files[0]).fontSize(11).fontColor(this.colors().textSecondary)
+                  Text(row.bundleName || row.files[0]).fontSize(12).fontColor(this.colors().textSecondary)
                     .maxLines(2).width('100%').wordBreak(WordBreak.BREAK_ALL)
-                  Text(this.summary(row)).fontSize(11).fontColor(this.colors().textTertiary).width('100%')
+                  Text(this.summary(row)).fontSize(12).fontColor(this.colors().textSecondary).width('100%')
                 }.alignItems(HorizontalAlign.Start).width('100%').padding(14)
                   .backgroundColor(this.colors().fill).borderRadius(16)
                   .onSizeChange((_old: SizeOptions, size: SizeOptions) => {
@@ -118,7 +118,7 @@ export struct LocalProfileDialog {
       }.alignItems(HorizontalAlign.Start).width('calc(100% - 40vp)').padding(22)
         .height(this.rows.length > 3 ? '80%' : this.listHeight + 106 + (this.message ? 32 : 0))
         .constraintSize({ maxWidth: StoreLayout.sheetWidth, maxHeight: '80%' })
-        .backgroundColor(this.colors().surface).borderRadius(26).clip(true)
+        .backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius).clip(true)
     }.width('100%').height('100%')
   }
 }

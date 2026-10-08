@@ -24,9 +24,9 @@ struct PackageEditCard {
   @StorageProp('darkMode') darkMode:boolean=false;
   inspect:()=>void=()=>{}; chooseIcon:()=>void=()=>{}; generate:()=>void=()=>{}; signInstall:()=>void=()=>{};
   private colors():Palette{return Palette.forMode(this.darkMode);}
-  @Builder private fieldLabel(label:string){Text(label).fontSize(12).fontColor(this.colors().textSecondary).width(64);}
+  @Builder private fieldLabel(label:string){Text(label).fontSize(13).fontColor(this.colors().textSecondary).width(68);}
   build(){
-    Column({space:18}){
+    Column({space:16}){
       Row({space:12}){
         Stack({alignContent:Alignment.BottomEnd}){
           if(this.draft.pixels){Image(this.draft.pixels).width(48).height(48).borderRadius(13);}
@@ -41,18 +41,22 @@ struct PackageEditCard {
       }.width('100%')
       if(this.draft.row.identity.bundleName&&!this.draft.row.status.startsWith('读取失败')){
         Column({space:1}){
-          Row({space:8}){this.fieldLabel('应用名称');TextInput({text:this.draft.name,placeholder:'填写应用名称'}).layoutWeight(1).height(46).fontSize(14).fontColor(this.colors().text).backgroundColor(Color.Transparent).maxLength(64).enabled(!this.busy).id('editor-name-'+this.draft.row.path).onChange((value:string)=>{if(value!==this.draft.name){this.draft.name=value;this.draft.status='待生成';}});}.padding({left:14,right:10}).width('100%')
+          Row({space:8}){this.fieldLabel('应用名称');TextInput({text:this.draft.name,placeholder:'填写应用名称'}).layoutWeight(1).height(StoreLayout.fieldHeight).fontSize(14).fontColor(this.colors().text).backgroundColor(Color.Transparent).maxLength(64).enabled(!this.busy).id('editor-name-'+this.draft.row.path).onChange((value:string)=>{if(value!==this.draft.name){this.draft.name=value;this.draft.status='待生成';}});}.padding({left:14,right:10}).width('100%')
           Divider().color(this.colors().border).margin({left:14,right:14})
-          Row({space:8}){this.fieldLabel('包名');TextInput({text:this.draft.bundle,placeholder:'com.example.app'}).layoutWeight(1).height(46).fontSize(12).fontColor(this.colors().text).backgroundColor(Color.Transparent).maxLength(128).enabled(!this.busy).id('editor-bundle-'+this.draft.row.path).onChange((value:string)=>{if(value!==this.draft.bundle){this.draft.bundle=value;this.draft.status='待生成';}});}.padding({left:14,right:10}).width('100%')
+          Row({space:8}){this.fieldLabel('包名');TextInput({text:this.draft.bundle,placeholder:'com.example.app'}).layoutWeight(1).height(StoreLayout.fieldHeight).fontSize(13).fontColor(this.colors().text).backgroundColor(Color.Transparent).maxLength(128).enabled(!this.busy).id('editor-bundle-'+this.draft.row.path).onChange((value:string)=>{if(value!==this.draft.bundle){this.draft.bundle=value;this.draft.status='待生成';}});}.padding({left:14,right:10}).width('100%')
         }.width('100%').backgroundColor(this.colors().fill).borderRadius(14)
-        Text('改包名会作为新应用安装，外部服务的账号与授权绑定可能失效。').fontSize(10).fontColor(this.colors().textTertiary).width('100%')
+        if(this.draft.bundle.trim()!==this.draft.row.identity.bundleName){
+          Text('将作为新应用安装，原应用的账号与授权绑定可能失效。')
+            .fontSize(12).lineHeight(18).fontColor(this.colors().textSecondary).width('100%')
+        }
         Row({space:10}){
-          Button('生成并导出').layoutWeight(1).height(46).fontSize(14).fontWeight(FontWeight.Medium).backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent).enabled(!this.busy).id('editor-save-'+this.draft.row.path).onClick(()=>this.generate())
-          Button('直接签装').layoutWeight(1).height(46).fontSize(14).fontWeight(FontWeight.Medium).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent).enabled(!this.busy).id('editor-install-'+this.draft.row.path).onClick(()=>this.signInstall())
+          Button('生成并导出', {type:ButtonType.Normal}).borderRadius(StoreLayout.cardActionRadius).layoutWeight(1).height(StoreLayout.fieldHeight).fontSize(14).fontWeight(FontWeight.Medium).backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent).enabled(!this.busy).id('editor-save-'+this.draft.row.path).onClick(()=>this.generate())
+          Button('直接签装', {type:ButtonType.Normal}).borderRadius(StoreLayout.cardActionRadius).layoutWeight(1).height(StoreLayout.fieldHeight).fontSize(14).fontWeight(FontWeight.Medium).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent).enabled(!this.busy).id('editor-install-'+this.draft.row.path).onClick(()=>this.signInstall())
         }.width('100%')
       }
       if(this.draft.status&&this.draft.status!=='已读取'){Text(this.draft.status).fontSize(12).fontColor(this.draft.status.includes('失败')?this.colors().danger:this.colors().textSecondary).width('100%');}
-    }.width('100%').alignItems(HorizontalAlign.Start).padding(20).backgroundColor(this.colors().surface).borderRadius(22)
+    }.width('100%').alignItems(HorizontalAlign.Start).padding(20)
+      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
   }
 }
 @CustomDialog
@@ -71,11 +75,12 @@ struct PackageInformationDialog {
             Row(){Text(section.name).fontSize(13).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1)
               if(section.fields.length>20){Text(this.expanded.includes(section.name)?'收起':'展开 '+section.fields.length+' 项').fontSize(11).fontColor(this.colors().accent).padding({top:8,bottom:8}).onClick(()=>{this.expanded=this.expanded.includes(section.name)?this.expanded.filter((name:string)=>name!==section.name):this.expanded.concat(section.name);});}
             }.width('100%')
-            ForEach(this.expanded.includes(section.name)?section.fields:section.fields.slice(0,20),(field:InspectionField)=>{Row({space:12}){Text(field.key).width('34%').fontSize(11).wordBreak(WordBreak.BREAK_ALL).fontColor(this.colors().textTertiary);Text(field.value).layoutWeight(1).fontSize(12).wordBreak(WordBreak.BREAK_ALL).textAlign(TextAlign.End).fontColor(this.colors().text).onClick(()=>this.copyValue(field.value));}.width('100%').alignItems(VerticalAlign.Top);},(field:InspectionField)=>field.key)
+            ForEach(this.expanded.includes(section.name)?section.fields:section.fields.slice(0,20),(field:InspectionField)=>{Row({space:12}){Text(field.key).width('40%').fontSize(12).wordBreak(WordBreak.BREAK_ALL).fontColor(this.colors().textSecondary);Text(field.value).layoutWeight(1).fontSize(13).wordBreak(WordBreak.BREAK_ALL).textAlign(TextAlign.End).fontColor(this.colors().text).onClick(()=>this.copyValue(field.value));}.width('100%').alignItems(VerticalAlign.Top);},(field:InspectionField)=>field.key)
           }.width('100%').alignItems(HorizontalAlign.Start).padding(14).backgroundColor(this.colors().fill).borderRadius(14)
         },(section:InspectionSection)=>section.name)
       }.width('100%').alignItems(HorizontalAlign.Start)}.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off)
-    }.width('calc(100% - 40vp)').constraintSize({maxWidth:StoreLayout.sheetWidth}).height('72%').padding(20).backgroundColor(this.colors().surface).borderRadius(26)
+    }.width('calc(100% - 40vp)').constraintSize({maxWidth:StoreLayout.sheetWidth}).height('72%').padding(22)
+      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
   }
 }
 @Entry

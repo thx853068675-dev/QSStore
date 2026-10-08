@@ -133,22 +133,25 @@ struct FeaturedCardStars {
       // 光晕先铺底，再绘制星点；渐变在画布内收敛，不留下圆形轮廓。
       const glow = this.ctx.createRadialGradient(w * 0.96, h * 0.12, 0,
         w * 0.96, h * 0.12, Math.max(w * 0.7, h * 1.8));
-      glow.addColorStop(0, this.tier === 3 ? 'rgba(255,225,170,0.20)' :
-        'rgba(223,209,255,0.16)');
-      glow.addColorStop(0.45, this.tier === 3 ? 'rgba(255,225,170,0.07)' :
-        'rgba(223,209,255,0.05)');
+      glow.addColorStop(0, this.tier === 3 ? 'rgba(255,225,170,0.16)' :
+        'rgba(223,209,255,0.12)');
+      glow.addColorStop(0.45, this.tier === 3 ? 'rgba(255,225,170,0.05)' :
+        'rgba(223,209,255,0.03)');
       glow.addColorStop(1, 'rgba(255,255,255,0)');
       this.ctx.fillStyle = glow;
       this.ctx.fillRect(0, 0, w, h);
     }
-    const count = this.tier === 3 ? 48 : this.tier === 2 ? 34 : 24;
+    const count = this.tier === 3 ? 30 : this.tier === 2 ? 22 : 16;
     const gold = this.tier >= 2;
     for (let i = 0; i < count; i++) {
       const x = (this.hash(this.appId, i * 4 + 1) % 10000) / 10000 * w;
       const y = (this.hash(this.appId, i * 4 + 2) % 10000) / 10000 * h;
-      const radius = 0.5 + (this.hash(this.appId, i * 4 + 3) % 100) / 100 *
-        (this.tier === 3 ? 2.7 : 2.0);
-      const alpha = 0.10 + (this.hash(this.appId, i * 4 + 4) % 100) / 100 * 0.30;
+      const contentZone = x > 72 && x < w - 78 && y > 12 && y < h - 12;
+      if (contentZone && i % 4 !== 0) continue;
+      const radius = 0.35 + (this.hash(this.appId, i * 4 + 3) % 100) / 100 *
+        (this.tier === 3 ? 1.25 : 0.9);
+      const alpha = (contentZone ? 0.04 : 0.08) +
+        (this.hash(this.appId, i * 4 + 4) % 100) / 100 * 0.16;
       this.ctx.beginPath();
       this.ctx.arc(x, y, radius, 0, Math.PI * 2);
       this.ctx.fillStyle = gold ? 'rgba(255,226,166,' + alpha.toFixed(2) + ')' :
@@ -172,7 +175,7 @@ struct Index {
   // 每个颜色使用点通过 colors() 读取此状态，主题变化会更新对应组件。
   @StorageProp('darkMode') @Watch('onNavigationThemeChanged') darkMode: boolean = false;
   @StorageProp('statusBarInset') statusBarInset: number = 0;
-  @State private discoverTitleHeight: number = 88;
+  @State private discoverTitleHeight: number = 68;
   @State private discoverMotion: DiscoverMotion = new DiscoverMotion();
   @State private discoverCanRefresh: boolean = true;
   @State private topActionEpoch: number = 0;
@@ -325,6 +328,9 @@ struct Index {
   @State private cardActionLabels: string[] = [];
   @State private cardDestructiveIndex: number = -1;
   private cardActionResolver?: (index: number) => void;
+  @State private taskDetailId: string = '';
+  @State private taskDetailExpanded: boolean = false;
+  private taskDetailFallback: InstallJob = new InstallJob();
   @State private identityBusy: boolean = false;
   private identityRecoveryFlight: Promise<void> | undefined = undefined;
   @State private identityMessage: string = '';
@@ -442,7 +448,7 @@ struct Index {
           // Use its shared palette rather than sampling icons/text on the card.
           regions.push({ left: rect.windowOffset.x, top: rect.windowOffset.y,
             width: rect.size.width, height: rect.size.height,
-            radius: this.getUIContext().vp2px(19), color: this.featuredColors(app.stars)[1][0] });
+            radius: this.getUIContext().vp2px(StoreLayout.cardRadius), color: this.featuredColors(app.stars)[1][0] });
         } catch (_) {}
       }
     }
@@ -1188,7 +1194,7 @@ struct Index {
         .borderRadius(12).enabled(!this.certSheetBusy)
         .onClick(() => this.loadCertRows())
     }.padding(24).width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth })
-      .backgroundColor(this.colors().surface).borderRadius(28)
+      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
       .transition(TransitionEffect.translate({ y: 16 }))
   }
 
@@ -2431,6 +2437,19 @@ struct Index {
   }
 
   @Builder
+  private catalogMetadata(app: CatalogApp, featured: boolean = false) {
+    Row({ space: 6 }) {
+      Text(app.category).fontSize(11).fontWeight(FontWeight.Medium).maxLines(1).flexShrink(0)
+        .fontColor(featured ? '#E8EEFF' : this.colors().textSecondary)
+        .padding({ left: 5, right: 5, top: 3, bottom: 3 })
+        .backgroundColor(featured ? '#1AFFFFFF' : this.colors().fill).borderRadius(6)
+      RepositoryStats({ stars: app.stars, downloads: app.githubDownloads, compact: true,
+        color: featured ? (this.featuredTier(app.stars) >= 2 ? '#EAD9B4' : '#E8EEFF') : this.colors().textSecondary,
+        tagBackground: featured ? '#14FFFFFF' : this.colors().fill }).layoutWeight(1)
+    }.width('100%').alignItems(VerticalAlign.Center)
+  }
+
+  @Builder
   private catalogCardAction(app: CatalogApp, featured: boolean = false) {
     Column() {
       if (this.taskPending(app.id, (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName ?? '')) {
@@ -3317,6 +3336,7 @@ struct Index {
   }
 
   onBackPress(): boolean {
+    if (this.taskDetailId) { this.closeTaskDetails(); return true; }
     if (this.showCertificatePrompt) { this.certificatePromptDismiss++; return true; }
     if (this.showLocalProfiles) {
       this.animateOverlay(() => { this.showLocalProfiles = false; });
@@ -3450,10 +3470,9 @@ struct Index {
       else if (key === 'renew') this.renewInstalled(current);
       else if (key === 'login') this.currentTab = Index.TAB_MINE;
       else if (key === 'details') {
-        AlertDialog.show({ title: this.jobTitle(job),
-          message: '版本 ' + this.versionLabel(job) + '\n' + this.taskJobLabel(job) +
-            (job.lastError ? '\n' + job.lastError : ''),
-          confirm: { value: '知道了', action: () => {} } });
+        this.taskDetailFallback = InstallJob.displayCopy(current);
+        this.taskDetailExpanded = false;
+        this.animateOverlay(() => { this.taskDetailId = current.id; });
       }
     } catch (_) { /* Dismissing the system action menu leaves the job unchanged. */ }
   }
@@ -3868,7 +3887,7 @@ struct Index {
         onCategory: (category: string) => this.selectDiscoveryCategory(category),
         active: this.currentTab === Index.TAB_DISCOVER && this.signedIn &&
           !this.showRenewal && !this.showAppConfig && !this.showSubmit && !this.showReconnect && !this.showCertificatePrompt && !this.showCertSheet &&
-          !this.showCardActions && !this.showLocalProfiles,
+          !this.showCardActions && !this.showLocalProfiles && !this.taskDetailId,
         statusInset: this.statusBarInset, inset: this.pageInset(), titleHeight: this.discoverTitleHeight,
         onTitleSize: (height: number): void => {
           // 收起时子组件会受裁切视口约束；不能把此时的高度保存成标题自然高度。
@@ -3956,16 +3975,7 @@ struct Index {
                           versionBackground: '#FFFFFF', active: this.currentTab === 0 })
                         Text(app.summary).fontSize(12)
                           .fontColor('#E5ECFF').maxLines(1)
-                        Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center,
-                          space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(5) } }) {
-                          Text(app.category).fontSize(11).fontWeight(FontWeight.Medium)
-                            .fontColor('#FFFFFF')
-                            .padding({ left: 6, right: 6, top: 3, bottom: 3 })
-                            .backgroundColor('#32FFFFFF').borderRadius(6)
-                          RepositoryStats({ stars: app.stars, downloads: app.githubDownloads,
-                            color: this.featuredTier(app.stars) >= 2 ? '#FFE4A8' : '#FFFFFF',
-                            tagBackground: '#20FFFFFF' })
-                        }
+                        this.catalogMetadata(app, true)
                       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                         .onClick(() => this.openDetail(app.id))
                       this.catalogCardAction(app, true)
@@ -3980,7 +3990,7 @@ struct Index {
                       this.navigationContrast?.motion();
                     }).backgroundColor('#214FD0')
                     .linearGradient({ angle: 120, colors: this.featuredColors(app.stars) })
-                    .borderRadius(19)
+                    .borderRadius(StoreLayout.cardRadius)
                     .clip(true)
                     .margin({ bottom: 10 })
                   } else {
@@ -4001,19 +4011,12 @@ struct Index {
                             color: this.colors().text, versionColor: this.colors().surface,
                             versionBackground: this.colors().text, active: this.currentTab === 0 })
                           Text(app.summary).fontSize(12).fontColor(this.colors().textSecondary).maxLines(1)
-                          Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center,
-                            space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(5) } }) {
-                            Text(app.category).fontSize(11).fontColor(this.colors().accent)
-                              .padding({ left: 6, right: 6, top: 3, bottom: 3 })
-                              .backgroundColor(this.colors().accentSoft).borderRadius(6)
-                            RepositoryStats({ stars: app.stars, downloads: app.githubDownloads,
-                              color: this.colors().textSecondary, tagBackground: this.colors().accentSoft })
-                          }
+                          this.catalogMetadata(app)
                         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                           .onClick(() => this.openDetail(app.id))
                         this.catalogCardAction(app)
                       }.width('100%').padding(15)
-                    }.width('100%').backgroundColor(this.colors().surface).borderRadius(19)
+                    }.width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
                       .margin({ bottom: 10 })
                   }
                 }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + this.pageInset() * 2 })
@@ -4072,10 +4075,11 @@ struct Index {
     Column({space:10}) {
       SymbolGlyph(tool.symbol).fontSize(27).fontColor([this.colors().accent])
       Text(tool.title).fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.colors().text).textAlign(TextAlign.Center)
-      Text(tool.detail).fontSize(11).fontColor(this.colors().textSecondary).maxLines(2).textAlign(TextAlign.Center)
-      Text(tool.formats).fontSize(10).fontColor(this.colors().textTertiary)
-    }.width('100%').height(160).padding(18).alignItems(HorizontalAlign.Center).justifyContent(FlexAlign.Center)
-      .backgroundColor(this.colors().surface).borderRadius(20).id(tool.id)
+      Text(tool.detail).fontSize(12).fontColor(this.colors().textSecondary).maxLines(2).textAlign(TextAlign.Center)
+      Text(tool.formats).fontSize(11).fontColor(this.colors().textTertiary)
+    }.width('100%').constraintSize({ minHeight: 156 }).padding(18)
+      .alignItems(HorizontalAlign.Center).justifyContent(FlexAlign.Center)
+      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius).id(tool.id)
       .onClick(()=>StorePageMotion.pushUrl({url:tool.page}))
   }
 
@@ -4084,8 +4088,12 @@ struct Index {
     HdsNavigation() {
     Scroll(this.localScroller) {
       Column() {
-        Grid(){ForEach(LocalTools,(tool:LocalTool)=>{GridItem(){this.localToolCard(tool)}},(tool:LocalTool)=>tool.id)}
-          .columnsTemplate('1fr 1fr').columnsGap(12).rowsGap(12).height(Math.ceil(LocalTools.length/2)*172)
+        Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Stretch,
+          space: { main: LengthMetrics.vp(12), cross: LengthMetrics.vp(12) } }) {
+          ForEach(LocalTools, (tool: LocalTool) => {
+            Column() { this.localToolCard(tool) }.width('calc(50% - 6vp)')
+          }, (tool: LocalTool) => tool.id)
+        }.width('100%')
       }.width('100%').constraintSize({maxWidth:StoreLayout.contentWidth+this.pageInset()*2})
         .padding({left:this.pageInset(),right:this.pageInset(),top:this.statusBarInset+72,bottom:110}).alignItems(HorizontalAlign.Start)
     }.width('100%').height('100%').scrollBar(BarState.Off).align(Alignment.Top).backgroundColor(this.colors().bg)
@@ -4128,7 +4136,7 @@ struct Index {
   private rootHeaderVisible(tab: number): boolean {
     return this.currentTab === tab && !this.showSubmit && !this.showAppConfig &&
       !this.showRenewal && !this.showReconnect && !this.showCertSheet && !this.showLocalProfiles &&
-      !this.showCertificatePrompt && !this.showCardActions;
+      !this.showCertificatePrompt && !this.showCardActions && !this.taskDetailId;
   }
 
   private async refreshManagement(): Promise<void> {
@@ -4235,7 +4243,7 @@ struct Index {
                 color: this.colors().text, versionColor: this.colors().surface,
                 versionBackground: this.colors().text, active: this.currentTab === Index.TAB_MANAGE })
               Row({ space: 5 }) {
-                Text(this.renewalLabel(job)).fontSize(10)
+                Text(this.renewalLabel(job)).fontSize(12)
                   .fontColor(this.renewalDueSoon(job) ? this.colors().danger : this.colors().textTertiary)
                   .maxLines(1).flexShrink(1)
                 if (this.renewalButtonLabel(job) === '续签中') {
@@ -4257,7 +4265,7 @@ struct Index {
           }.width('100%')
         }.alignItems(HorizontalAlign.Start).width('100%')
           .padding(15).backgroundColor(this.renewalDueSoon(job) ? this.colors().renewalWarning :
-            this.colors().surface).borderRadius(17)
+            this.colors().surface).borderRadius(StoreLayout.cardRadius)
           .id('installed-card-' + job.bundleName)
           .onClick(() => this.openJobDetails(job))
       }.swipeAction({ end: { builder: () => {
@@ -4323,7 +4331,7 @@ struct Index {
                       color: this.colors().text, versionColor: this.colors().surface,
                       versionBackground: this.colors().text, active: this.currentTab === Index.TAB_MANAGE })
                     if (job.stage === InstallStage.QUEUED) {
-                      Text(this.taskJobLabel(job)).fontSize(10)
+                      Text(this.taskJobLabel(job)).fontSize(12)
                         .fontColor(this.colors().textSecondary).maxLines(1)
                     }
                     if (!this.jobRunning(job.id) && job.lastError.length > 0) {
@@ -4337,7 +4345,7 @@ struct Index {
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                   this.taskIndicator(0, '', job.id)
                 }.width('100%')
-              }.width('100%').padding(15).backgroundColor(this.colors().surface).borderRadius(16)
+              }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
                 .id('queue-card-' + job.id).accessibilityDescription('左滑查看任务操作')
             }.swipeAction({ end: { builder: () => {
               this.cardSwipeActions(this.queueActions(job), job.id, (key: string): void => { this.showQueueActions(job, key); });
@@ -4404,7 +4412,7 @@ struct Index {
                     .backgroundColor(this.colors().accentSoft).borderRadius(10)
                     .enabled(this.removingId === 0 && !this.configBusy)
                     .onClick(() => this.openAppConfig(app))
-                }.width('100%').padding(15).backgroundColor(this.colors().surface).borderRadius(16)
+                }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
               }
             }, (app: CatalogApp) => this.publishedRows.key(app))
             }.transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -10 })))
@@ -4475,7 +4483,7 @@ struct Index {
     Column({ space: 15 }) {
       Row() {
         Text('连接无线调试')
-          .fontSize(22).fontWeight(FontWeight.Bold)
+          .fontSize(20).fontWeight(FontWeight.Bold)
           .fontColor(this.colors().text).layoutWeight(1)
         StoreIconButton({ active: !this.reconnectBusy, action: () => {
           this.completeRefreshConnection(false);
@@ -4512,7 +4520,7 @@ struct Index {
           .width('100%').maxLines(3)
       }
     }.padding(24).width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth })
-      .backgroundColor(this.colors().surface).borderRadius(28)
+      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
       .transition(TransitionEffect.translate({ y: 16 }))
   }
 
@@ -4520,7 +4528,7 @@ struct Index {
   private appConfigSheet() {
     Column({ space: 16 }) {
       Row() {
-        Text('应用配置').fontSize(22).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+        Text('应用配置').fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
           .layoutWeight(1)
         StoreIconButton({ active: (!this.configBusy || this.configSourceChecking) && this.removingId === 0,
           action: () => {
@@ -4590,7 +4598,7 @@ struct Index {
         .enabled(!this.configBusy && this.removingId === 0)
         .onClick(() => this.removeMyApp(this.configApp))
     }.alignItems(HorizontalAlign.Start).width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth }).padding(24)
-      .backgroundColor(this.colors().surface).borderRadius(28)
+      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
       .transition(TransitionEffect.translate({ y: 16 }))
   }
 
@@ -4598,7 +4606,7 @@ struct Index {
   private submitSheet() {
     Column({ space: 15 }) {
       Row() {
-        Text('上架应用').fontSize(22).fontWeight(FontWeight.Bold)
+        Text('上架应用').fontSize(20).fontWeight(FontWeight.Bold)
           .fontColor(this.colors().text).layoutWeight(1)
         StoreIconButton({ active: !this.submitBusy || this.submitDraft.inspectionStatus !== 'ready', action: () => {
           this.submitGeneration++;
@@ -4677,7 +4685,7 @@ struct Index {
           .width('100%').maxLines(3)
       }
     }.alignItems(HorizontalAlign.Start).width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth }).padding(24)
-      .backgroundColor(this.colors().surface).borderRadius(28)
+      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
       .transition(TransitionEffect.translate({ y: 16 }))
   }
 
@@ -4701,7 +4709,7 @@ struct Index {
             Image(this.account.avatarUrl).width(64).height(64).borderRadius(32)
           } else {
             Text(this.signedIn ? this.account.label.substring(0, 1) : '华')
-              .fontSize(28).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
+              .fontSize(28).fontWeight(FontWeight.Bold).fontColor(this.colors().brand)
           }
         }.width(64).height(64).borderRadius(32)
           .backgroundColor('#B3' + this.colors().surface.substring(1))
@@ -4716,7 +4724,7 @@ struct Index {
               .fontSize(12).fontColor(this.colors().textSecondary).margin({ right: 6 })
             if (this.signedIn && this.account.realNameVerified !== undefined) {
               Text(this.account.realNameVerified ? '已实名' : '未实名')
-                .fontSize(10).fontWeight(FontWeight.Medium).maxLines(1)
+                .fontSize(11).fontWeight(FontWeight.Medium).maxLines(1)
                 .fontColor(this.account.realNameVerified ? this.colors().success : this.colors().textSecondary)
                 .backgroundColor(this.account.realNameVerified ? this.colors().successSoft : this.colors().surface)
                 .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(5)
@@ -4746,7 +4754,7 @@ struct Index {
           .borderRadius(14).enabled(!this.loginBusy).width('100%').onClick(() => this.login())
       }
     }.alignItems(HorizontalAlign.Start).padding({ left: 18, right: 18, top: 20, bottom: 20 })
-      .width('100%').borderRadius(24)
+      .width('100%').borderRadius(StoreLayout.heroRadius)
       .linearGradient({ angle: 125, colors: [[this.colors().accentSoft, 0],
         [this.colors().hero, 0.5], [this.colors().surface, 1]] })
       .border({ width: 1, color: '#99' + this.colors().surface.substring(1), radius: 24 })
@@ -4764,11 +4772,11 @@ struct Index {
             Text('本机签名证书').fontSize(15).fontWeight(FontWeight.Medium)
               .fontColor(this.colors().text).maxLines(1)
             Text(this.certLabel.length > 0 ? this.certLabel : '尚未获取证书')
-              .fontSize(11).fontColor(this.colors().textSecondary).maxLines(1)
+              .fontSize(12).fontColor(this.colors().textSecondary).maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
             if (this.certExpiry.length > 0) {
               Text('有效期至 ' + this.certExpiry + (this.certExpired ? ' · 已到期' : ''))
-                .fontSize(11).fontColor(this.certExpired ? this.colors().danger : this.colors().textSecondary)
+                .fontSize(12).fontColor(this.certExpired ? this.colors().danger : this.colors().textSecondary)
                 .maxLines(2)
             }
           }.alignItems(HorizontalAlign.Start).layoutWeight(1)
@@ -4805,30 +4813,29 @@ struct Index {
             .fontColor(this.colors().onAccent).borderRadius(12).enabled(!this.identityBusy)
             .onClick(() => this.prepareSigningIdentity())
         }
-      }.alignItems(HorizontalAlign.Start).width('100%').padding(12)
-        .backgroundColor(this.colors().fill).borderRadius(18)
+      }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 2, bottom: 2 })
       Row({ space: 10 }) {
         Button({ type: ButtonType.Normal }) {
           Row({ space: 7 }) {
             if (this.identityBusy) {
-              LoadingProgress().width(17).height(17).color(this.colors().onAccent)
+              LoadingProgress().width(17).height(17).color(this.colors().accent)
             } else {
-              SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(17).fontColor([this.colors().onAccent])
+              SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(17).fontColor([this.colors().accent])
             }
-            Text(this.identityBusy ? '重置中…' : '证书重置').fontSize(12)
-              .fontWeight(FontWeight.Medium).fontColor(this.colors().onAccent).maxLines(1)
+            Text(this.identityBusy ? '重置中…' : '证书重置').fontSize(13)
+              .fontWeight(FontWeight.Medium).fontColor(this.colors().accent).maxLines(1)
           }.justifyContent(FlexAlign.Center)
         }.height(44).layoutWeight(1).padding({ left: 8, right: 8 })
-          .backgroundColor(this.colors().accent).borderRadius(14)
+          .backgroundColor(this.colors().fill).borderRadius(14)
           .enabled(!this.identityBusy && this.signedIn).onClick(() => this.resetCertificate())
         Button({ type: ButtonType.Normal }) {
           Row({ space: 7 }) {
             SymbolGlyph($r('sys.symbol.gearshape')).fontSize(17).fontColor([this.colors().text])
-            Text('管理 AGC 证书').fontSize(12).fontWeight(FontWeight.Medium)
+            Text('管理 AGC 证书').fontSize(13).fontWeight(FontWeight.Medium)
               .fontColor(this.colors().text).maxLines(1)
           }.justifyContent(FlexAlign.Center)
         }.height(44).layoutWeight(1).padding({ left: 8, right: 8 })
-          .backgroundColor(this.colors().accentSoft).borderRadius(14)
+          .backgroundColor(this.colors().fill).borderRadius(14)
           .onClick(() => {
             this.animateOverlay(() => { this.showCertSheet = true; });
             this.loadCertRows();
@@ -4838,7 +4845,7 @@ struct Index {
         Text(this.certMessage).fontSize(11).fontColor(this.colors().danger).maxLines(2).width('100%')
       }
     }.alignItems(HorizontalAlign.Start).padding(16).width('100%')
-      .backgroundColor(this.colors().surface).borderRadius(24)
+      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
   }
 
   @Builder
@@ -4854,7 +4861,7 @@ struct Index {
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
         SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([this.colors().textTertiary])
       }.width('100%')
-    }.padding(16).width('100%').backgroundColor(this.colors().surface).borderRadius(24)
+    }.padding(16).width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
       .accessibilityText('本地 Profile，查看与管理保存的签名授权')
       .onClick(() => this.animateOverlay(() => { this.showLocalProfiles = true; }))
   }
@@ -4903,7 +4910,7 @@ struct Index {
           Text(this.deviceMessage).fontSize(11).fontColor(this.colors().accent).width('100%')
         }
     }.alignItems(HorizontalAlign.Start).padding(16).width('100%')
-      .backgroundColor(this.colors().surface).borderRadius(24)
+      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
   }
 
   @Builder
@@ -4941,7 +4948,7 @@ struct Index {
                 .maxLines(1).textAlign(TextAlign.Center)
                 .accessibilityText('当前安装器版本 ' + this.installerVersionName)
             }
-          }.alignItems(VerticalAlign.Center).justifyContent(FlexAlign.Center).margin({ top: 44, bottom: 8 })
+          }.alignItems(VerticalAlign.Center).justifyContent(FlexAlign.Center).margin({ top: 28, bottom: 8 })
         }.width('calc(100% - ' + (this.pageInset() * 2) + 'vp)').constraintSize({ maxWidth: StoreLayout.contentWidth })
           .padding({ top: this.statusBarInset + 58, bottom: 110 })
       }.width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Off)
@@ -5020,6 +5027,81 @@ struct Index {
   }
 
   @Builder
+  private taskDetailsSheet(job: InstallJob) {
+    Column({ space: 16 }) {
+      Row({ space: 12 }) {
+        if (this.jobIcon(job)) {
+          Image(this.jobIcon(job)).width(44).height(44).borderRadius(12)
+        }
+        Column({ space: 5 }) {
+          Text(this.jobTitle(job)).fontSize(20).fontWeight(FontWeight.Bold)
+            .fontColor(this.colors().text).maxLines(2)
+          Text(this.versionLabel(job)).fontSize(12).fontColor(this.colors().textSecondary)
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        StoreIconButton({ label: '关闭任务信息', action: () => this.closeTaskDetails() })
+      }.width('100%')
+      Column({ space: 8 }) {
+        Text(this.taskJobLabel(job)).fontSize(15).fontWeight(FontWeight.Medium)
+          .fontColor(this.colors().text).width('100%')
+        Text(this.taskDetailsHint(job)).fontSize(13).lineHeight(20)
+          .fontColor(this.colors().textSecondary).width('100%')
+      }.padding(16).width('100%').backgroundColor(this.colors().fill).borderRadius(14)
+      if (job.lastError) {
+        Row({ space: 8 }) {
+          Text('错误详情').fontSize(13).fontColor(this.colors().textSecondary).layoutWeight(1)
+          SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(12)
+            .fontColor([this.colors().textSecondary]).rotate({ angle: this.taskDetailExpanded ? 180 : 0 })
+        }.width('100%').height(32).id('task-error-toggle')
+          .accessibilityText(this.taskDetailExpanded ? '收起错误详情' : '展开错误详情')
+          .onClick(() => this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseInOut },
+            () => { this.taskDetailExpanded = !this.taskDetailExpanded; }))
+        if (this.taskDetailExpanded) {
+          Scroll() {
+            Text(job.lastError).fontSize(12).lineHeight(18).fontColor(this.colors().textSecondary)
+              .wordBreak(WordBreak.BREAK_ALL).width('100%')
+          }.width('100%').constraintSize({ maxHeight: 180 }).scrollBar(BarState.Auto)
+        }
+      }
+      ForEach(this.queueActions(job).filter((action: ManagementAction) => action.key !== 'details'),
+        (action: ManagementAction) => {
+          Button(action.label, { type: ButtonType.Normal }).width('100%').height(StoreLayout.fieldHeight)
+            .fontSize(14).borderRadius(StoreLayout.cardActionRadius)
+            .fontColor(action.destructive ? this.colors().danger : this.colors().accent)
+            .backgroundColor(action.destructive ? this.colors().dangerSoft : this.colors().accentSoft)
+            .id('task-detail-action-' + action.key).onClick(() => {
+              this.closeTaskDetails(); this.showQueueActions(job, action.key);
+            })
+        }, (action: ManagementAction) => action.key)
+    }.width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth })
+      .padding(22).backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
+      .id('task-detail-dialog').hitTestBehavior(HitTestMode.Default)
+  }
+
+  private taskDetailsJob(): InstallJob {
+    return this.installTasks.find((row: InstallTaskSnapshot) => row.job.id === this.taskDetailId)?.job ??
+      this.taskDetailFallback;
+  }
+
+  private taskDetailsHint(job: InstallJob): string {
+    switch (job.stage) {
+      case InstallStage.WAITING_NETWORK: return '网络恢复后会继续下载，已完成的进度会保留。';
+      case InstallStage.WAITING_ACCOUNT: return '请先连接华为开发者账号，再继续安装。';
+      case InstallStage.WAITING_CERTIFICATE: return '请在证书管理中处理可用签名证书，再继续安装。';
+      case InstallStage.WAITING_DEVICE: return '连接无线调试后，可从当前步骤继续安装。';
+      case InstallStage.WAITING_CONFIRMATION: return '需要确认是否接受卸载重装造成的应用数据丢失。';
+      case InstallStage.RETRYABLE_ERROR: return '遇到临时问题，安装进度已保留。';
+      case InstallStage.TERMINAL_ERROR: return '安装未完成，可查看错误详情，或清理这条记录。';
+      case InstallStage.INSTALLED: return '应用已安装完成。';
+      case InstallStage.QUEUED: return '前面的任务完成后，会按顺序安装。';
+      default: return '正在处理安装任务，关闭窗口不会中断安装。';
+    }
+  }
+
+  private closeTaskDetails(): void {
+    this.animateOverlay(() => { this.taskDetailId = ''; });
+  }
+
+  @Builder
   private cardActionsSheet() {
     WithTheme({ colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT }) {
       Column({ space: 10 }) {
@@ -5036,7 +5118,7 @@ struct Index {
             .onClick(() => this.dismissCardActions(index))
         }, (label: string) => label)
       }.width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth })
-        .padding(22).backgroundColor(this.colors().surface).borderRadius(24)
+        .padding(22).backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
         .border({ width: 0.5, color: this.colors().border, radius: 24 })
         // Block 会连子按钮的触摸一起拦截。Default 允许子项点击并挡住背后的遮罩。
         .hitTestBehavior(HitTestMode.Default).id('card-action-menu')
@@ -5128,6 +5210,13 @@ struct Index {
         Column().width('100%').height('100%').backgroundColor(this.colors().scrim)
           .onClick(() => this.dismissCardActions(-1))
         this.cardActionsSheet()
+      }.width('100%').height('100%').transition(TransitionEffect.opacity(0))
+    }
+    if (this.taskDetailId) {
+      Stack({ alignContent: Alignment.Center }) {
+        Column().width('100%').height('100%').backgroundColor(this.colors().scrim)
+          .onClick(() => this.closeTaskDetails())
+        this.taskDetailsSheet(this.taskDetailsJob())
       }.width('100%').height('100%').transition(TransitionEffect.opacity(0))
     }
     if (this.showSubmit) {

@@ -63,13 +63,13 @@ export struct InstallPrompts {
       Stack({alignContent:Alignment.Center}){
         Column().width('100%').height('100%').backgroundColor(this.colors().scrim).onClick(()=>this.close())
         Column({space:16}){
-          Row(){Text('连接无线调试').fontSize(22).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1);StoreIconButton({label:'关闭连接窗口',active:!this.connecting,action:()=>this.close()});}.width('100%')
+          Row(){Text('连接无线调试').fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1);StoreIconButton({label:'关闭连接窗口',active:!this.connecting,action:()=>this.close()});}.width('100%')
           Text('前往系统设置，开启无线调试').fontSize(12).fontColor(this.colors().accent).width('100%').height(36).decoration({type:TextDecorationType.Underline,color:this.colors().accent}).onClick(()=>new HdcDeviceBridge(getContext(this) as common.UIAbilityContext).openWirelessSettings())
           Text('安装进度已保留，连接后会继续安装。').fontSize(13).fontColor(this.colors().textSecondary).width('100%')
           TextInput({text:this.port,placeholder:'输入无线调试端口'}).type(InputType.Number).textAlign(TextAlign.Center).height(48).backgroundColor(this.colors().fill).fontColor(this.colors().text).onChange((value:string)=>this.port=value)
           Button(){Row({space:8}){if(this.connecting){LoadingProgress().width(18).height(18).color(this.colors().onAccent);}Text(this.connecting?'正在连接…':'连接并继续安装').fontSize(14).fontColor(this.colors().onAccent);}.justifyContent(FlexAlign.Center)}.width('100%').height(48).backgroundColor(this.colors().accent).enabled(!this.connecting).onClick(()=>this.connect())
           if(this.message){Text(this.message).fontSize(12).fontColor(this.colors().textSecondary).width('100%');}
-        }.width('calc(100% - 40vp)').constraintSize({maxWidth:StoreLayout.sheetWidth}).padding(24).backgroundColor(this.colors().surface).borderRadius(26)
+        }.width('calc(100% - 40vp)').constraintSize({maxWidth:StoreLayout.sheetWidth}).padding(22).backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
       }.width('100%').height('100%').position({x:0,y:0})
     }else{Column().width(0).height(0)}
   }

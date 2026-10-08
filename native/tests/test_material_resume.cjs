@@ -47,7 +47,7 @@ test('one frame progress keeps search width and category reveal within the same 
  const f=fixture('DiscoverHeader');
  for(const progress of [0,.1,.5,.9,1]){
   f.ui.toolbarProgress=progress;
-  assert(Math.abs(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+48+20-f.ui.searchWidth)<.0001);
+  assert(Math.abs(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+44+20-f.ui.searchWidth)<.0001);
   assert.equal(f.ui.mainCategoryWidth(),44+20*progress);
  }
 });
@@ -76,7 +76,7 @@ for(const component of ['DiscoverHeader','DiscoverTopAction']){
 test('visibility geometry retains full control dimensions and skips position work for hidden categories',()=>{
  const f=fixture('DiscoverHeader');f.ui.categories=['办公','工具','安全隐私'];f.ui.toolbarProgress=1;
  f.ui.refreshCategorySlices();const safety=f.ui.sliceFor('安全隐私');
- assert.equal(safety.visibleWidth,52);assert.equal(safety.viewportOffset,222);
+ assert.equal(safety.visibleWidth,56);assert.equal(safety.viewportOffset,222);
  f.ui.categoryOffset=40;f.ui.refreshCategorySlices();
  assert.equal(safety.visibleWidth,88);assert.equal(safety.viewportOffset,182);
  f.ui.categoryOffset=450;f.ui.refreshCategorySlices();
@@ -114,7 +114,7 @@ test('search, category and fixed sorting capsule fit compact phones throughout t
   f.ui.searchWidth=width;
   for(const progress of [0,.25,.5,.75,1]){
    f.ui.toolbarProgress=progress;
-   assert.equal(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+48+20,width);
+   assert.equal(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+44+20,width);
    assert(f.ui.searchControlWidth()>=44);assert(f.ui.categoryControlWidth()>=44);
   }
  }

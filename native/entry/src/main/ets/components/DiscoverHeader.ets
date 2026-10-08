@@ -251,12 +251,12 @@ export struct DiscoverHeader {
   }
 
   private searchControlWidth(): number {
-    const fullWidth = Math.max(44, this.searchWidth - 112);
+    const fullWidth = Math.max(44, this.searchWidth - 108);
     return fullWidth + (44 - fullWidth) * this.toolbarProgress;
   }
 
   private categoryControlWidth(): number {
-    return 44 + (Math.max(44, this.searchWidth - 112) - 44) * this.toolbarProgress;
+    return 44 + (Math.max(44, this.searchWidth - 108) - 44) * this.toolbarProgress;
   }
 
   private refreshPopup(): void {
@@ -369,7 +369,7 @@ export struct DiscoverHeader {
     for (const label of [''].concat(this.categories)) {
       const width = label === '' ? this.mainCategoryWidth() : Math.max(64, label.length * 14 + 32);
       this.sliceFor(label).clipTo(left, width, this.categoryOffset, this.categoryControlWidth(),
-        Math.max(44, this.searchWidth - 112));
+        Math.max(44, this.searchWidth - 108));
       left += width + 10;
     }
   }

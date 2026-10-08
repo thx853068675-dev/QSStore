@@ -52,7 +52,7 @@ export struct DiscoverSortControl {
       Text(DiscoverSort.label(this.sortKey)).fontSize(12).fontWeight(FontWeight.Medium)
         .fontColor(Palette.forMode(this.darkMode).text).maxLines(1)
         .opacity(this.loading ? 0.65 : 1)
-    }.width(48).height(44).padding(0).borderRadius(22).focusOnTouch(false)
+    }.width(44).height(44).padding(0).borderRadius(22).focusOnTouch(false)
       .backgroundColor(Color.Transparent).id('discover-sort-menu')
       .accessibilityText('排序，' + DiscoverSort.label(this.sortKey) + '，' +
         (this.sortDirection === 'asc' ? '升序' : '降序'))
@@ -73,6 +73,6 @@ export struct DiscoverSortControl {
       colored: false, tint: Palette.forMode(this.darkMode).surface, followsTarget: true,
       anchorAtStart: true, popupShadow: false,
       backAction: () => { this.menuOpen = false; },
-      content: (immersive: boolean) => { this.contents(immersive); } }).width(48).height(44)
+      content: (immersive: boolean) => { this.contents(immersive); } }).width(44).height(44)
   }
 }

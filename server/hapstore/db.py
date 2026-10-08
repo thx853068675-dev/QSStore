@@ -19,6 +19,7 @@ import sqlite3
 import threading
 import time
 from typing import Any, Iterable
+from . import catalog_paging
 
 DB_PATH = os.environ.get("HAPSTORE_DB", "/var/lib/hapstore/hapstore.db")
 
@@ -347,6 +348,7 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True, related: dict | N
         "verified": bool(row["verified"]),
         "status": row["status"],
         "featured": bool(row["featured"]),
+        "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "synced_at": row["synced_at"],
         "sync_error": row["sync_error"],
@@ -426,6 +428,9 @@ def list_apps(
     featured: bool | None = None,
     page: int = 1,
     page_size: int = 30,
+    direction: str = "",
+    pagination: str = "",
+    snapshot: str = "",
 ) -> dict[str, Any]:
     c = connect()
     where = ["status='published'"]
@@ -441,35 +446,72 @@ def list_apps(
         where.append("featured=?")
         params.append(1 if featured else 0)
 
+    direction = direction if direction in ('asc', 'desc') else ('asc' if sort == 'name' else 'desc')
+    sql_direction = direction.upper()
     order = {
         # Rank the whole catalog before LIMIT/OFFSET, so later pages cannot
         # introduce a featured card above cards the user has already read.
         "discover": "CASE WHEN stars>100 THEN 0 ELSE 1 END ASC, "
                     "CASE WHEN stars>100 THEN stars ELSE 0 END DESC, updated_at DESC, id DESC",
-        "updated": "updated_at DESC",
-        "stars": "stars DESC",
-        "name": "display_name COLLATE NOCASE ASC",
-        "new": "created_at DESC",
+        "updated": "updated_at DESC, id DESC",
+        "stars": "stars DESC, id DESC",
+        "name": "display_name COLLATE NOCASE ASC, id ASC",
+        "new": "created_at DESC, id DESC",
     }.get(sort, "updated_at DESC")
+    # Reverse the whole recommendation tuple, including its deterministic tie break.
+    if direction == 'asc' and sort != 'name':
+        order = order.replace('ASC', 'REVERSE').replace('DESC', 'ASC').replace('REVERSE', 'DESC')
+    elif direction == 'desc' and sort == 'name':
+        order = order.replace('ASC', 'DESC')
     # Ranking and displayed counts must agree before pagination.
     total_stars = "(stars+COALESCE((SELECT p.stars FROM app_source s JOIN app p ON p.id=s.source_app_id WHERE s.app_id=app.id),0))"
     order = order.replace('stars', total_stars)
 
     clause = " AND ".join(where)
-    total = c.execute(f"SELECT COUNT(*) AS n FROM app WHERE {clause}", params).fetchone()["n"]
     page = max(1, page)
     page_size = max(1, min(100, page_size))
     offset = (page - 1) * page_size
-    rows = c.execute(
-        f"SELECT * FROM app WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",
-        params + [page_size, offset],
-    ).fetchall()
+    prefix, table = '', 'app'
+    if sort == 'downloads':
+        # Match _app_related: sum every primary/secondary repository attachment,
+        # preserve unknown totals, and keep them last in both directions.
+        prefix = '''WITH downloads AS (SELECT m.app_id,
+            CASE WHEN COUNT(r.github_downloads)=COUNT(*) AND COUNT(*)>0
+            THEN SUM(r.github_downloads) END AS n
+            FROM catalog_repository m JOIN release r ON r.app_id=m.repository_id GROUP BY m.app_id) '''
+        table = 'app LEFT JOIN downloads ON downloads.app_id=app.id'
+        order = f'downloads.n IS NULL ASC, downloads.n {sql_direction}, app.id {sql_direction}'
+    token = ''
+    if pagination == 'snapshot':
+        key = (DB_PATH, q, category, sort, direction, featured, page_size)
+        ids = catalog_paging.recall(snapshot, key) if snapshot else None
+        if snapshot and ids is None:
+            return dict(items=[], total=0, page=page, page_size=page_size, snapshot_expired=True)
+        if ids is None:
+            ids = [r['id'] for r in c.execute(
+                f'{prefix}SELECT app.id FROM {table} WHERE {clause} ORDER BY {order}', params)]
+            token = catalog_paging.remember(key, ids)
+        else:
+            token = snapshot
+        total = len(ids)
+        selected = ids[offset:offset + page_size]
+        # Hidden listings disappear immediately without shifting subsequent offsets.
+        by_id = {r['id']: r for r in c.execute(
+            f"SELECT * FROM app WHERE status='published' AND id IN ({','.join('?' for _ in selected)})",
+            selected)} if selected else {}
+        rows = [by_id[id] for id in selected if id in by_id]
+    else:
+        total = c.execute(f"SELECT COUNT(*) AS n FROM app WHERE {clause}", params).fetchone()["n"]
+        rows = c.execute(
+            f"{prefix}SELECT app.* FROM {table} WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",
+            params + [page_size, offset]).fetchall()
     related = _app_related(rows)
     return {
         "items": [_row_to_app(r, related=related) for r in rows],
         "total": total,
         "page": page,
         "page_size": page_size,
+        "snapshot": token,
     }
 
 

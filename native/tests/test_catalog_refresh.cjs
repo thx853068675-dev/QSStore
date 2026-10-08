@@ -8,11 +8,9 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
-const paging = {};
-vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
-  '../entry/src/main/ets/data/CatalogPaging.ets'), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
-}).outputText, { exports: paging });
+const { loadEts } = require('./load_ets.cjs');
+const sortLogic = loadEts('data/DiscoverSort');
+const paging = loadEts('data/CatalogPaging', { './DiscoverSort': sortLogic });
 // Page methods have two-space indentation; the next member closes the slice.
 function method(name) {
   // 方法可能是 private / public / static，也可能没有修饰符
@@ -30,7 +28,7 @@ const code = ts.transpileModule(`class Index {
   static STARRED_MIN_STARS = 100;
   ${['catalogHasMore', 'loadMoreApps', 'prefetchCatalog', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
     'latestAssets', 'installedAssets', 'assetForBundle', 'refreshCatalogInstallState', 'runCatalogStateRefreshes', 'readCatalogInstallState', 'cancelResumeMaintenance', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion', 'commitCatalogVersions',
-    'displayApps', 'featuredTier', 'featuredColors', 'openDiscoverySearch', 'selectDiscoveryCategory', 'resetCatalogFilter', 'applySearch']
+    'displayApps', 'featuredTier', 'featuredColors', 'openDiscoverySearch', 'selectDiscoveryCategory', 'resetCatalogFilter', 'selectDiscoverySort', 'applySearch']
     .map(method).join('\n')}
 }; globalThis.Page = Index;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
 function deferred() {
@@ -52,6 +50,55 @@ const page = (ids, total = ids.length) => ({ items: ids.map(id => {
   const row = typeof id === 'object' ? id : { id };
   return { stars: 0, iconRev: 'rev-1', iconUrl: '/api/v1/apps/' + row.id + '/icon', ...row };
 }), total, rawItems: [] });
+
+test('rapid sort reversals retain cards, query/category and icons, debounce to one request and remember direction', async () => {
+  const clock = filterClock(), f = fixture(clock), ui = f.ui;
+  ui.apps = page([1]).items; const previous = ui.apps;
+  ui.appIcons = [{id:1,rev:'rev-1'}]; const icons = ui.appIcons;
+  ui.activeQuery = 'music'; ui.activeCategory = '影音'; ui.categoriesExpanded = true;
+  let top = 0; ui.backToDiscoverTop = () => top++;
+  ui.selectDiscoverySort('downloads');
+  ui.selectDiscoverySort('downloads', true);
+  ui.selectDiscoverySort('downloads', true);
+  ui.selectDiscoverySort('downloads', true);
+  assert.equal(ui.apps, previous); assert.equal(ui.appIcons, icons);
+  assert.equal(ui.catalogLoading, true); assert.equal(top, 0);
+  clock.flush(); assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].sort, 'downloads'); assert.equal(f.requests[0].direction, 'asc');
+  assert.equal(f.requests[0].query, 'music'); assert.equal(f.requests[0].category, '影音');
+  assert.equal(f.requests[0].stablePages, true);
+  f.requests[0].resolve({...page([2]),snapshot:'ordered'}); await tick();
+  assert.equal(ui.apps[0].id, 2); assert.equal(ui.catalogSnapshot, 'ordered'); assert.equal(top, 1);
+  assert.equal(ui.categoriesExpanded, true);
+  ui.selectDiscoverySort('stars'); ui.selectDiscoverySort('downloads');
+  assert.equal(ui.discoverDirection, 'asc');
+  clock.flush(); f.requests[1].resolve(page([2])); await tick();
+});
+
+test('sort response or rejection superseded during debounce cannot overwrite the latest mode', async () => {
+  for (const reject of [false,true]) {
+    const clock = filterClock(), f = fixture(clock), ui = f.ui;
+    ui.apps = page([1]).items; const old = ui.loadApps();
+    ui.selectDiscoverySort('new');
+    if (reject) f.requests[0].reject(Error('old error')); else f.requests[0].resolve(page([99]));
+    await old; assert.equal(ui.apps[0].id, 1); assert.equal(ui.catalogError, '');
+    assert.equal(ui.catalogLoading, true);
+    clock.flush(); f.requests[1].resolve({...page([2]),snapshot:'new-order'}); await tick();
+    assert.equal(ui.apps[0].id, 2); assert.equal(ui.catalogLoading, false);
+  }
+});
+
+test('pagination carries the snapshot and expiry replaces the list instead of mixing orders', async () => {
+  const f = fixture(), ui = f.ui;
+  const first = ui.loadApps(); f.requests[0].resolve({...page([3,2],60),snapshot:'old'}); await first;
+  const more = ui.loadApps(false); assert.equal(f.requests[1].snapshot, 'old');
+  f.requests[1].resolve({...page([],60),snapshotExpired:true}); await tick();
+  assert.equal(f.requests[2].number, 1); assert.equal(f.requests[2].snapshot, '');
+  assert.equal(f.requests[2].forceRefresh, true, 'an evicted snapshot cannot be restored from a stale HTTP cache');
+  f.requests[2].resolve({...page([1,3],60),snapshot:'fresh'}); await more;
+  assert.deepEqual(Array.from(ui.apps,row=>row.id),[1,3]); assert.equal(ui.catalogSnapshot,'fresh');
+  assert.equal(ui.catalogPage,1); assert.equal(ui.catalogLoading,false);
+});
 function fixture(clock) {
   const requests = [], icons = [], saved = [], savedIcons = [], releases = [];
   // 声明必须在使用之前：f 的字面量会引用它（TDZ）
@@ -97,11 +144,13 @@ function fixture(clock) {
   f2.deviceUnparsable = false;
   f2.deviceVersions = {};
   f2.knownBundles = [];
-  const sandbox = { ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, ForegroundIdle: { wait: async () => {}, cancel() {}, defer: (_key, fn) => setTimeout(fn, 0) }, VersionCacheEntry: class {}, InstalledBundleState: class { versionCode = -1; versionName = ''; }, setTimeout: clock?.setTimeout ?? setTimeout, clearTimeout: clock?.clearTimeout ?? clearTimeout, console, Curve: { EaseOut: 'ease-out' },
+  const sortDirections = new Map();
+  const sandbox = { ...sortLogic, DiscoverSortPreferences: { directionFor: key => sortDirections.get(key) || 'desc',
+    save: async (_, key, direction) => { sortDirections.set(key, direction); } }, AppStorage: { setOrCreate() {} }, ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, ForegroundIdle: { wait: async () => {}, cancel() {}, defer: (_key, fn) => setTimeout(fn, 0) }, VersionCacheEntry: class {}, InstalledBundleState: class { versionCode = -1; versionName = ''; }, setTimeout: clock?.setTimeout ?? setTimeout, clearTimeout: clock?.clearTimeout ?? clearTimeout, console, Curve: { EaseOut: 'ease-out' },
     InstallReconnect: { clear() {}, deactivate() {} }, InstallConfirmation: { deactivate() {} }, InstallCoordinator: { conditionReady() {} }, InstallStage: { WAITING_DEVICE: 'waiting-device' },
     StoreClient: class {
-      listApps(number, size, sort, query, category, forceRefresh) {
-        const d = deferred(); requests.push({ ...d, number, query, sort, category, forceRefresh }); return d.promise;
+      listApps(number, size, sort, query, category, forceRefresh, direction, snapshot, stablePages) {
+        const d = deferred(); requests.push({ ...d, number, query, sort, category, forceRefresh, direction, snapshot, stablePages }); return d.promise;
       }
       appIconBytes(app) { icons.push(app.id); return f.icon(app); }
       /** 服务端批量重采：记录客户端点名了哪几个应用。 */
@@ -125,11 +174,11 @@ function fixture(clock) {
   vm.runInNewContext(code, sandbox);
   sandbox.Page.REFRESH_MIN_VISIBLE_MS = 20;
   const ui = new sandbox.Page();
-  Object.assign(ui, { resumeMaintenancePending: false, catalogStatePending: false, catalogStateRescan: false, catalogToken: 0, catalogFilterTimer: -1, activeQuery: '', activeCategory: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
+  Object.assign(ui, { homeVisibility: { visible: true }, managementRowsTimer: -1, resumeMaintenancePending: false, catalogStatePending: false, catalogStateRescan: false, discoverSort: 'discover', discoverDirection: 'desc', catalogSnapshot: '', catalogToken: 0, catalogFilterTimer: -1, activeQuery: '', activeCategory: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
     catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false, catalogMoreError: '',
     catalogRefreshing: false, catalogRefreshBusy: false, catalogError: '',
     getUIContext: () => ({ animateTo: (_options, change) => change() }),
-    installedDisplay: new Map(), installedVersions: new Map(), installedJobs: [], catalogProbeBusy: false, catalogProbeNames: [], catalogProbePending: [], updateCatalogReady: false, updateInstallScanPrompt() {}, refreshCatalogInstallState() {},
+    installedDisplay: new Map(), installedVersions: new Map(), installedJobs: [], catalogProbeBusy: false, catalogProbeNames: [], catalogProbePending: [], updateCatalogReady: false, updateInstallScanPrompt() {}, backToDiscoverTop() {}, refreshCatalogInstallState() {},
     updateApps() { return this.apps; }, syncDetectedInstalled() {}, reconcileDetectedJobs: async () => {}, loadUpdateCatalog() {}, checkInstalledUpdates() {},
     refreshCatalogInstallState() {} });
   Object.assign(f, f2);

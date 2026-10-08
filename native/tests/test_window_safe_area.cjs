@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+const { Palette } = require('./load_ets.cjs').loadEts('theme/Palette');
 
 function fixture() {
   const storage = new Map(), handlers = new Map(), state = {
@@ -31,7 +32,10 @@ function fixture() {
       // Restoring system navigation can restore its default opaque background.
       if(enabled)state.bars={navigationBarColor:'#FFFFFFFF'};
     },
-    setWindowBackgroundColor: color => { state.backgroundWrites++; state.backgroundColor = color; },
+    setWindowBackgroundColor: color => {
+      assert.equal(state.loaded, true, 'SDK requires background changes after loadContent');
+      state.backgroundWrites++; state.backgroundColor = color;
+    },
     setWindowSystemBarProperties: async bars => { state.events.push('bars'); state.bars = bars; },
     setWindowLayoutFullScreen: async enabled => {
       state.fullscreen = enabled;
@@ -55,7 +59,10 @@ function fixture() {
       BackgroundInstallTask: { configure: () => {}, onForeground: () => {} }
     } : name === '../jobs/WirelessDebugLifecycle' ? {
       WirelessDebugLifecycle: { configure() {}, onForeground() {}, onBackground() {} }
-    } : name === '../data/AppearancePreferences' ? { AppearancePreferences: { async load() {} } }
+    } : name === '../theme/ResumeFramePacing' ? { ResumeFramePacing: { start() {}, stop() {} } }
+      : name === '../theme/Palette' ? { Palette }
+      : name === '../data/AppearancePreferences' ? { AppearancePreferences: { async load() {} } }
+      : name === '../data/DiscoverSortPreferences' ? { DiscoverSortPreferences: { async load() {} } }
       : name === '../data/ManagementPreferences' ? { ManagementPreferences: { load: () => state.managementLoad() } }
       : name === '../jobs/ForegroundIdle' ? { ForegroundIdle: { onForeground() {}, onBackground() {} } } : name === '../jobs/ExternalInstallOpen' ? { ExternalInstallOpen: { receive: () => false, configure: () => state.events.push('file-open-context'), openPending() {}, suspendRouting() {} } } : name === '@kit.AbilityKit' ? {
       UIAbility: class {}, ConfigurationConstant: { ColorMode: { COLOR_MODE_DARK: 1 } }
@@ -108,7 +115,7 @@ test('edge-to-edge startup reads real insets before UI content without obtaining
   assert.equal(f.storage.get('statusBarInset'), 48);
   assert.equal(f.state.bars.statusBarColor, '#00000000');
   assert.equal(f.state.bars.navigationBarColor, '#00000000');
-  assert.equal(f.state.backgroundColor, '#00000000');
+  assert.equal(f.state.backgroundColor, Palette.forMode(false).bg);
   const transition = f.state.events.indexOf('fullscreen-complete');
   const load = f.state.events.indexOf('load');
   assert.ok(f.state.events.slice(transition + 1, load).includes('bars'));
@@ -172,6 +179,7 @@ test('theme changes keep the status bar transparent while switching text contras
   f.ability.onConfigurationUpdate({ colorMode: 1 });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.storage.get('darkMode'), true);
+  assert.equal(f.state.backgroundColor, Palette.forMode(true).bg);
   assert.equal(f.state.bars.statusBarColor, '#00000000');
   assert.equal(f.state.bars.navigationBarColor, '#00000000');
   assert.notEqual(f.state.bars.statusBarContentColor, lightText);

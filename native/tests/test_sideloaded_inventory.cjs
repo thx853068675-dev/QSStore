@@ -1,3 +1,6 @@
+const { loadEts } = require('./load_ets.cjs');
+const { CatalogLookup } = loadEts('data/CatalogLookup');
+const { InstallJob } = loadEts('jobs/InstallJob');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -91,13 +94,13 @@ function method(name) {
   assert(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
 }
 function pageFixture(registry) {
-  const box = { InstallStage: { INSTALLED: 'installed' }, ReleaseChannelRegistry: { apply: app => app },
+  const box = { CatalogLookup, InstallJob, InstallStage: { INSTALLED: 'installed' }, ReleaseChannelRegistry: { apply: app => app },
     InstalledSigningExpiry: load('jobs/InstalledSigningExpiry', {}).InstalledSigningExpiry,
     InstalledAppRegistry: registry ?? { version: () => -1, observedAt: () => 0, versionName: () => '', displayName: () => '', installationTime: () => 0 } };
   box.AppDisplayName = load('data/AppDisplayName', {
     '../jobs/InstalledAppRegistry': { InstalledAppRegistry: box.InstalledAppRegistry }
   }).AppDisplayName;
-  const members = ['allInstalledJobs', 'recentInstalledJobs', 'currentInstalledView', 'displayInstalledVersion',
+  const members = ['catalogLookup', 'allInstalledJobs', 'recentInstalledJobs', 'currentInstalledView', 'displayInstalledVersion',
     'managementInstalledJobs', 'renewalDeadline', 'updateApps', 'installedAssets', 'latestAssets', 'catalogForJob', 'jobTitle'];
   vm.runInNewContext(ts.transpileModule(`class Page { ${members.map(method).join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }

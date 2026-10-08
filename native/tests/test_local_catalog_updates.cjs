@@ -1,3 +1,6 @@
+const { loadEts } = require('./load_ets.cjs');
+const { CatalogLookup } = loadEts('data/CatalogLookup');
+const { InstallJob } = loadEts('jobs/InstallJob');
 // Production update matching and pagination, without a device or network.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -7,7 +10,7 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
-const names = ['displayInstalledVersion', 'installedAssets', 'latestAssets', 'assetForBundle', 'updateApps', 'catalogApp', 'catalogForJob', 'renewalAppId', 'openJobDetails', 'loadUpdateCatalog', 'syncDiscoveryCategories',
+const names = ['catalogLookup', 'displayInstalledVersion', 'installedAssets', 'latestAssets', 'assetForBundle', 'updateApps', 'catalogApp', 'catalogForJob', 'renewalAppId', 'openJobDetails', 'loadUpdateCatalog', 'syncDiscoveryCategories',
   'catalogBundleName', 'catalogInstallable', 'installedVersionOf', 'installedBundleOf', 'installedJobFor', 'updateForApp',
   'installFromCatalog', 'checkInstalledUpdates', 'updateFor', 'allInstalledJobs', 'currentInstalledView',
   'recentInstalledJobs', 'startUpdate', 'updatableInstalledJobs', 'updateAllInstalled', 'managementInstalledJobs', 'versionLabel', 'installedActionLabel', 'performInstalledAction'];
@@ -35,7 +38,7 @@ function fixture() {
     f.enqueues.push(args); f.lastJob = { id: 'online', appId: args[0], stage: 'QUEUED' };
     return f.lastJob;
   } };
-  const sandbox = { Index: { TAB_MINE: 3 }, InstalledInspection:{selection:(job,title,appId)=>({...job,title,appId})}, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {},
+  const sandbox = { CatalogLookup, InstallJob, Index: { TAB_MINE: 3 }, InstalledInspection:{selection:(job,title,appId)=>({...job,title,appId})}, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {},
     StoreClient: class { listApps(...args) { f.requests.push(args); return f.fetch(...args); } },
     InstallStage: { QUEUED: 'QUEUED', DOWNLOADING: 'DOWNLOADING', WAITING_NETWORK: 'WAITING_NETWORK',
       INSTALLED: 'INSTALLED' },

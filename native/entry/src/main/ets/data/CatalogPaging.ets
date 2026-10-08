@@ -1,14 +1,14 @@
 import { CatalogApp } from './CatalogApp';
+import { DiscoverSort } from './DiscoverSort';
 
-/** Filter only a verified complete catalog; keep the server's Discover ordering. */
-export function filterCatalogCategory(catalog: CatalogApp[], category: string): CatalogApp[] {
+/** Filter and order only a verified complete catalog. */
+export function filterCatalogCategory(catalog: CatalogApp[], category: string,
+  sort: string = 'discover', direction: string = 'desc'): CatalogApp[] {
   return catalog.filter((app: CatalogApp) => app.category.trim() === category.trim())
-    .sort((a: CatalogApp, b: CatalogApp) => Number(b.stars > 100) - Number(a.stars > 100) ||
-      (a.stars > 100 && b.stars > 100 ? b.stars - a.stars : 0) ||
-      (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '') || b.id - a.id);
+    .sort((a: CatalogApp, b: CatalogApp) => DiscoverSort.compare(a, b, sort, direction));
 }
 
-/** Rank a new page without moving any card the user has already scrolled past. */
+/** Append the server-ordered page without moving cards already displayed. */
 export function appendCatalogPage(previous: CatalogApp[], incoming: CatalogApp[]): CatalogApp[] {
   const known = new Set<number>(previous.map((app: CatalogApp) => app.id));
   const fresh = incoming.filter((app: CatalogApp) => {
@@ -16,9 +16,8 @@ export function appendCatalogPage(previous: CatalogApp[], incoming: CatalogApp[]
     known.add(app.id);
     return true;
   });
-  const featured = fresh.filter((app: CatalogApp) => app.stars > 100)
-    .sort((a: CatalogApp, b: CatalogApp) => b.stars - a.stars || a.id - b.id);
-  return previous.concat(featured, fresh.filter((app: CatalogApp) => app.stars <= 100));
+  // Preserve the server's order for every sort mode; only deduplicate appended IDs.
+  return previous.concat(fresh);
 }
 
 /** The list includes a heading and footer; starting a little early is intentional. */

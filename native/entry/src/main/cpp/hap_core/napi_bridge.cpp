@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+bool qingqi_set_resume_pacing(bool enabled) noexcept;
+
 extern "C" int qingqi_sign_hap(const char* input, const char* output,
                                 const char* private_key, const char* certificates,
                                 const char* profile, char* error_buffer,
@@ -841,8 +843,20 @@ napi_value HdcInstallProgress(napi_env env, napi_callback_info info) {
   return value;
 }
 
+napi_value ResumeFramePacing(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value arg = nullptr;
+  bool enabled = false;
+  bool valid = napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr) == napi_ok &&
+    argc == 1 && napi_get_value_bool(env, arg, &enabled) == napi_ok;
+  napi_value result = nullptr;
+  napi_get_boolean(env, valid && qingqi_set_resume_pacing(enabled), &result);
+  return result;
+}
+
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
+    {"setResumeFramePacing", nullptr, ResumeFramePacing, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listProfileEntries", nullptr, ListProfiles, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"listPackageEntries", nullptr, ListPackages, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"readArchiveFile", nullptr, ReadArchiveFile, nullptr, nullptr, nullptr, napi_default, nullptr},

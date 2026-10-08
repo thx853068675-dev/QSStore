@@ -82,14 +82,18 @@ export class InstallTaskState {
 
   /** 启动时恢复快照，慢查询不能覆盖期间的进度、阶段或删除。 */
   static seed(jobs: InstallJob[]): void {
+    let changed = false;
     for (const job of jobs) {
       if (!InstallTaskState.tasks.has(job.id) && !InstallTaskState.removed.has(job.id)) {
         InstallTaskState.tasks.set(job.id, InstallTaskState.make(job));
         InstallTaskState.orderDirty = true;
         InstallTaskState.jobsRevision++;
+        changed = true;
       }
     }
-    InstallTaskState.emit();
+    // Re-reading the journal on return must not repaint every installed card.
+    // Live progress and stage clocks still publish through their own paths.
+    if (changed) InstallTaskState.emit();
   }
 
   private static make(job: InstallJob, cloneJob: boolean = true): InstallTaskSnapshot {

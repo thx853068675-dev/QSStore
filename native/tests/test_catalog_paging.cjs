@@ -1,28 +1,21 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const ts = require(process.env.QINGQI_TYPESCRIPT ||
-  '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
-const exported = {};
-vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
-  '../entry/src/main/ets/data/CatalogPaging.ets'), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
-}).outputText, { exports: exported });
+const { loadEts } = require('./load_ets.cjs');
+const sort = loadEts('data/DiscoverSort');
+const exported = loadEts('data/CatalogPaging', { './DiscoverSort': sort });
 const { appendCatalogPage, filterCatalogCategory, shouldPrefetchCatalog } = exported;
 const ids = rows => Array.from(rows, row => row.id);
 
-test('a later high-star page never moves cards already displayed or duplicates a moving page boundary', () => {
+test('pagination preserves the server ordering and does not duplicate moving boundaries', () => {
   const first = appendCatalogPage([], [
     { id: 1, stars: 5 }, { id: 2, stars: 200 }, { id: 3, stars: 150 }
   ]);
-  assert.deepEqual(ids(first), [2, 3, 1]);
+  assert.deepEqual(ids(first), [1, 2, 3]);
   const second = appendCatalogPage(first, [
     { id: 1, stars: 5 }, { id: 4, stars: 100 }, { id: 5, stars: 10000 }, { id: 5, stars: 10000 }
   ]);
-  assert.deepEqual(ids(second), [2, 3, 1, 5, 4]);
-  assert.deepEqual(ids(first), [2, 3, 1]);
+  assert.deepEqual(ids(second), [1, 2, 3, 4, 5]);
+  assert.deepEqual(ids(first), [1, 2, 3]);
   assert.equal(second[0], first[0]);
 });
 

@@ -25,7 +25,7 @@ test('return animation and immediate scrolling defer coalesced automatic work, t
   const f = fixture(), seen = []; f.idle.onForeground();
   f.idle.defer('scan', () => seen.push('old')); f.idle.defer('scan', () => seen.push('latest'));
   f.idle.defer('projection', () => seen.push('rows'));
-  f.advance(790); f.idle.interaction(); f.advance(170); assert.deepEqual(seen, []);
+  f.advance(790); f.idle.interaction(); f.advance(440); assert.deepEqual(seen, []);
   f.advance(10); assert.deepEqual(seen, ['latest']);
   f.advance(16); assert.deepEqual(seen, ['latest', 'rows']);
 });

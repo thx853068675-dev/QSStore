@@ -7,6 +7,9 @@ import { ExternalInstallOpen } from '../jobs/ExternalInstallOpen';
 import { ForegroundIdle } from '../jobs/ForegroundIdle';
 import { AppearancePreferences } from '../data/AppearancePreferences';
 import { ManagementPreferences } from '../data/ManagementPreferences';
+import { DiscoverSortPreferences } from '../data/DiscoverSortPreferences';
+import { Palette } from '../theme/Palette';
+import { ResumeFramePacing } from '../theme/ResumeFramePacing';
 
 // 背景交给页面连续绘制，系统栏仅按主题切换文字颜色。
 const BARS_LIGHT: window.SystemBarProperties = {
@@ -25,6 +28,7 @@ const BARS_DARK: window.SystemBarProperties = {
 export default class EntryAbility extends UIAbility {
   private mainWindow?: window.Window;
   private backgroundWindow?: window.Window;
+  private backgroundColor: string = '';
   private contentReady: boolean = false;
   private appearanceTail: Promise<void> = Promise.resolve();
   private onAppearanceChanged = (): void => { this.applyAppearance(); };
@@ -81,13 +85,16 @@ export default class EntryAbility extends UIAbility {
     const mainWindow = this.mainWindow;
     if (!mainWindow) return Promise.resolve();
     try {
-      // 重复设置窗口背景会触发原生渲染节点更新；同一窗口仅初始化一次。
-      if (this.backgroundWindow !== mainWindow) {
-        mainWindow.setWindowBackgroundColor('#00000000');
+      // Match the opaque page backing; system bars remain transparent above it.
+      // Reuse the backing on warm return rather than changing its render node.
+      const background = Palette.forMode(dark).bg;
+      if (this.contentReady && (this.backgroundWindow !== mainWindow || this.backgroundColor !== background)) {
+        mainWindow.setWindowBackgroundColor(background);
         this.backgroundWindow = mainWindow;
+        this.backgroundColor = background;
       }
     } catch (error) {
-      console.warn('Unable to clear window background: ' + JSON.stringify(error));
+      console.warn('Unable to apply window background: ' + JSON.stringify(error));
     }
     // Read the actual window state. Warm returns do not rewrite unchanged bars
     // during the desktop's scale animation; reset defaults still get restored.
@@ -127,7 +134,7 @@ export default class EntryAbility extends UIAbility {
     mainWindow.setWindowLayoutFullScreen(true).catch((error: Error) => {
       console.warn('Unable to enable full-screen layout: ' + JSON.stringify(error));
     }).then(() => Promise.all([
-      AppearancePreferences.load(this.context), ManagementPreferences.load(this.context)
+      AppearancePreferences.load(this.context), ManagementPreferences.load(this.context), DiscoverSortPreferences.load(this.context)
     ])).then(() => this.applyAppearance()).then(() => {
       if (this.mainWindow !== mainWindow) return;
       this.syncStatusBarInset();
@@ -136,10 +143,12 @@ export default class EntryAbility extends UIAbility {
           console.warn('Unable to load home page: ' + JSON.stringify(error));
           return;
         }
+        if (this.mainWindow !== mainWindow) return;
+        this.contentReady = true;
+        ResumeFramePacing.start();
         // 页面加载后再同步，覆盖组件初始化和系统主题切换的窗口默认值。
         this.applyAppearance();
         this.syncStatusBarInset();
-        this.contentReady = true;
         ExternalInstallOpen.configure(mainWindow.getUIContext());
         ExternalInstallOpen.openPending();
       });
@@ -147,10 +156,12 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageDestroy(): void {
+    ResumeFramePacing.stop();
     ExternalInstallOpen.suspendRouting();
     this.mainWindow?.off('avoidAreaChange', this.onAvoidAreaChange);
     this.mainWindow = undefined;
     this.backgroundWindow = undefined;
+    this.backgroundColor = '';
     this.contentReady = false;
   }
 
@@ -161,6 +172,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    if (this.contentReady) ResumeFramePacing.start();
     ForegroundIdle.onForeground();
     BackgroundInstallTask.onForeground();
     WirelessDebugLifecycle.onForeground();
@@ -170,6 +182,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onBackground(): void {
+    ResumeFramePacing.stop();
     ForegroundIdle.onBackground();
     WirelessDebugLifecycle.onBackground();
   }

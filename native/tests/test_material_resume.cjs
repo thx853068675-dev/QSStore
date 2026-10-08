@@ -18,8 +18,8 @@ function fixture(component){
  if(component==='DiscoverHeader')methods.push('mainCategoryWidth','onToolbarModeChanged','searchControlWidth','categoryControlWidth',
   'refreshCategorySlices','sliceFor','onCategoriesChanged');
  vm.runInNewContext(ts.transpileModule('class Page{'+methods.map(method).join('\n')+'};globalThis.Page=Page;',{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
- f.ui=Object.assign(new box.Page(),{active:true,routeTransitioning:false,disposed:false,popupGeneration:0,popupReady:false,
-  categories:[],categorySlices:new Map(),searchWidth:300,categoryOffset:0,
+ f.ui=Object.assign(new box.Page(),{homeVisibility:{visible:true},active:true,immersiveSupported:true,routeTransitioning:false,disposed:false,popupGeneration:0,popupReady:false,
+  categories:[],categorySlices:new Map(),searchWidth:386,categoryOffset:0,
   categoryScroller:{scrollTo(options){f.scrollOffset=options.xOffset;}},
   categoriesExpanded:false,categoriesOpen:false,toolbarMotionGeneration:0,toolbarProgress:0,
   onMotionStateChanged:moving=>f.motion.push(moving),
@@ -47,7 +47,7 @@ test('one frame progress keeps search width and category reveal within the same 
  const f=fixture('DiscoverHeader');
  for(const progress of [0,.1,.5,.9,1]){
   f.ui.toolbarProgress=progress;
-  assert(Math.abs(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+10-f.ui.searchWidth)<.0001);
+  assert(Math.abs(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+48+20-f.ui.searchWidth)<.0001);
   assert.equal(f.ui.mainCategoryWidth(),44+20*progress);
  }
 });
@@ -76,9 +76,9 @@ for(const component of ['DiscoverHeader','DiscoverTopAction']){
 test('visibility geometry retains full control dimensions and skips position work for hidden categories',()=>{
  const f=fixture('DiscoverHeader');f.ui.categories=['办公','工具','安全隐私'];f.ui.toolbarProgress=1;
  f.ui.refreshCategorySlices();const safety=f.ui.sliceFor('安全隐私');
- assert.equal(safety.visibleWidth,24);assert.equal(safety.viewportOffset,222);
+ assert.equal(safety.visibleWidth,52);assert.equal(safety.viewportOffset,222);
  f.ui.categoryOffset=40;f.ui.refreshCategorySlices();
- assert.equal(safety.visibleWidth,64);assert.equal(safety.viewportOffset,182);
+ assert.equal(safety.visibleWidth,88);assert.equal(safety.viewportOffset,182);
  f.ui.categoryOffset=450;f.ui.refreshCategorySlices();
  assert.equal(safety.visibleWidth,0);const hiddenOffset=safety.viewportOffset;
  f.ui.categoryOffset=500;f.ui.refreshCategorySlices();assert.equal(safety.viewportOffset,hiddenOffset);
@@ -95,4 +95,27 @@ test('opening and closing a category viewport keeps its edge materials alive beh
  }
  f.ui.categoryOffset=900;f.ui.refreshCategorySlices();
  assert(!f.ui.sliceFor('其他').materialVisible);
+});
+
+test('API 24/25 inline search and categories never wait for a popup paint on lifecycle changes',()=>{
+ const f=fixture('DiscoverHeader');f.ui.immersiveSupported=false;f.ui.aboutToAppear();
+ assert(f.ui.popupReady);assert.equal(f.frames.length,0);
+ for(const visible of [false,true,false,true]){
+  f.ui.homeVisibility.visible=visible;f.refresh();
+  assert(f.ui.popupReady);assert.equal(f.frames.length,0);
+ }
+ f.ui.active=false;f.ui.routeTransitioning=true;f.refresh();
+ assert.equal(f.frames.length,0,'route and control enabled state still gate the inline buttons directly');
+});
+
+test('search, category and fixed sorting capsule fit compact phones throughout the morph',()=>{
+ const f=fixture('DiscoverHeader');
+ for(const width of [240,280,320,406,560]){
+  f.ui.searchWidth=width;
+  for(const progress of [0,.25,.5,.75,1]){
+   f.ui.toolbarProgress=progress;
+   assert.equal(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+48+20,width);
+   assert(f.ui.searchControlWidth()>=44);assert(f.ui.categoryControlWidth()>=44);
+  }
+ }
 });

@@ -1,18 +1,21 @@
 import { afterPaint } from '../theme/AfterPaint';
+import { CatalogLookup } from '../data/CatalogLookup';
 import { InstalledInspection } from '../data/InstalledInspection';
 import { repositoryUrl } from '../data/RepositoryAddress';
 import { InstalledSigningExpiry } from '../jobs/InstalledSigningExpiry';
 import { DiscoverHeader, DiscoverMotion, DiscoverRefreshIndicator } from '../components/DiscoverHeader';
 import { DiscoverTopOverlay } from '../components/DiscoverTopAction';
 import { RepositoryStats } from '../components/RepositoryStats';
-import { CatalogAppTitle } from '../components/CatalogAppTitle';
+import { HomeAppTitle, HomeIconButton, HomeCertificatePrompt } from '../components/HomeControls';
+import { HomeVisibility } from '../theme/HomeVisibility';
 import { ListDataSource } from '../data/ListDataSource';
 import { RenewalDialog } from '../components/RenewalDialog';
 import { LocalProfileDialog } from '../components/LocalProfileDialog';
 import { appendCatalogPage, filterCatalogCategory, shouldPrefetchCatalog } from '../data/CatalogPaging';
+import { DiscoverSort, DiscoverSortKey, SortDirection } from '../data/DiscoverSort';
+import { DiscoverSortPreferences } from '../data/DiscoverSortPreferences';
 import { ReleaseChannelRegistry } from '../data/ReleaseChannelRegistry';
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
-import { InstallCertificatePrompt } from '../components/InstallCertificatePrompt';
 import { CatalogInstallIdentity } from '../jobs/CatalogInstallIdentity';
 import { ClassifiedFailure } from '../data/ServiceFailure';
 import { AccountService } from '../data/AccountService';
@@ -209,6 +212,10 @@ struct Index {
   private catalogFilterTimer: number = -1;
   /** Pin the complete category snapshot through pagination; never mix it with remote pages. */
   private catalogLocalRows?: CatalogApp[];
+  private catalogSnapshot: string = '';
+  private catalogSortResetTop: boolean = false;
+  @State private discoverSort: DiscoverSortKey = DiscoverSortPreferences.current().key;
+  @State private discoverDirection: SortDirection = DiscoverSortPreferences.current().direction;
   /** 已提交给服务端的关键词（与输入框可能不同：改词后按搜索才生效）。 */
   @State private activeQuery: string = '';
   @State private activeCategory: string = '';
@@ -222,7 +229,8 @@ struct Index {
   @StorageProp('wirelessLinkRevision') @Watch('onWirelessLinkChanged') private wirelessLinkRevision: number = 0;
   @StorageProp('wirelessDebugRestoring') @Watch('onWirelessLinkChanged') private wirelessDebugRestoring: boolean = false;
   @StorageProp('signingIdentityRevision') @Watch('onSigningIdentityChanged') private signingIdentityRevision: number = 0;
-  @State private pageVisible: boolean = true;
+  private pageVisible: boolean = true;
+  @State private homeVisibility: HomeVisibility = new HomeVisibility();
   @State private shellReady: boolean = false;
   @State private discoveryReady: boolean = false;
   @State private discoverChromeReady: boolean = false;
@@ -236,6 +244,9 @@ struct Index {
   private resumeMaintenancePending: boolean = false;
   private catalogProjectionSource?: CatalogApp[];
   private catalogProjectionChannel: number = -1;
+  private catalogLookupCache?: CatalogLookup;
+  private updatesLookupSource?: UpdateTarget[];
+  private updatesByBundle: Map<string, UpdateTarget> = new Map();
   private catalogStateFlight: Promise<void> | undefined = undefined;
   private catalogStatePending: boolean = false;
   private catalogStateRescan: boolean = false;
@@ -281,6 +292,9 @@ struct Index {
   private managementIconFlights: Map<string, Promise<void>> = new Map();
   private managementIconBatchFlight?: Promise<void>;
   private managementIconPending: boolean = false;
+  private managementIconInputs?: Array<Object | undefined>;
+  private managementIconSelection: CatalogApp[] = [];
+  private managementIconById: Map<number, CatalogApp> = new Map();
   /** 本轮首屏加载到的图标字节，攒起来一次性写缓存。 */
   private catalogIconFlights: Map<string, Promise<CachedIcon | undefined>> = new Map();
   /** 本地 HAP 的包内图标，按任务 ID 缓存。 */
@@ -376,6 +390,7 @@ struct Index {
   @State private onlineInstalledCount: number = 0;
   @State private offlineInstalledCount: number = 0;
   private managementRowsTimer: number = -1;
+  private managementRowsPending: boolean = false;
   @State private updateCatalogBusy: boolean = false;
   @State private updateCatalogError: string = '';
   @State private deviceConnected: boolean = false;
@@ -503,7 +518,7 @@ struct Index {
     afterPaint(this.getUIContext(), () => { this.shellReady = true; });
     if (deviceInfo.sdkApiVersion >= 26) {
       this.navigationContrast = new NavigationContrastSampler(this.getUIContext(),
-        () => this.rootHeaderVisible(this.currentTab) &&
+        () => this.pageVisible && this.rootHeaderVisible(this.currentTab) &&
           !AppStorage.get<boolean>('routeTransitioning'),
         (colors: NavigationForeground[]) => { this.navigationForeground = colors; },
         () => this.navigationBackdrop(), StoreLayout.navigationBottomMargin);
@@ -539,6 +554,8 @@ struct Index {
    */
   onPageShow(): void {
     this.pageVisible = true;
+    this.homeVisibility.visible = true;
+    AppStorage.setOrCreate<boolean>('homePageVisible', true);
     this.navigationContrast?.request(500);
     // Home/background returns keep the same component and gesture observer.
     // Renew ownership after an actual page transition, outside the first paint.
@@ -558,12 +575,12 @@ struct Index {
     ForegroundIdle.defer('index-resume', () => {
       this.resumeMaintenancePending = false;
       if (!this.pageVisible) return;
+      if (this.deviceInventoryViewPending) this.publishDeviceInventory();
       this.observeReconnect();
       this.observeInstallTasks();
       this.drainInstallQueue();
       this.syncViewedCatalog();
-      this.syncDiscoverRows();
-      this.syncManagementRows();
+      if (this.managementRowsPending) this.syncManagementRows();
       this.refreshCatalogInstallState();
       if (this.currentTab === Index.TAB_MANAGE) {
         this.scanDeviceInstalled(); this.syncManagementIcons(); this.loadSigningExpiries();
@@ -627,6 +644,8 @@ struct Index {
     this.configSourceGeneration++;
     this.expiryReadToken++;
     this.pageVisible = false;
+    this.homeVisibility.visible = false;
+    AppStorage.setOrCreate<boolean>('homePageVisible', false);
     this.navigationContrast?.cancel();
     this.cancelResumeMaintenance();
     this.completeRefreshConnection(false);
@@ -1181,15 +1200,15 @@ struct Index {
       !this.catalogLoading && !this.catalogMoreBusy && !this.discoverHydrating;
   }
 
-  private async loadApps(reset: boolean = true, rescanInstalled: boolean = false): Promise<void> {
+  private async loadApps(reset: boolean = true, rescanInstalled: boolean = false, forceCatalog: boolean = false): Promise<void> {
     if (reset) {
       if (this.catalogFilterTimer !== -1) clearTimeout(this.catalogFilterTimer);
       this.catalogFilterTimer = -1;
       this.catalogLoading = true;
       this.catalogError = '';
-      this.catalogLocalRows = !rescanInstalled && this.updateCatalogReady &&
+      this.catalogLocalRows = !rescanInstalled && !forceCatalog && this.updateCatalogReady &&
         this.activeQuery.length === 0 && this.activeCategory.length > 0 ?
-        filterCatalogCategory(this.updateCatalog, this.activeCategory) : undefined;
+        filterCatalogCategory(this.updateCatalog, this.activeCategory, this.discoverSort, this.discoverDirection) : undefined;
     } else if (!this.catalogHasMore()) {
       return;
     }
@@ -1200,20 +1219,29 @@ struct Index {
     const token = ++this.catalogToken;
     const query = this.activeQuery;
     const category = this.activeCategory;
+    const sort = this.discoverSort;
+    const direction = this.discoverDirection;
     const nextPage = reset ? 1 : this.catalogPage + 1;
     try {
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
       const requestStartedAt = Date.now();
       const local = this.catalogLocalRows;
       const page = local === undefined ? await client.listApps(nextPage, Index.CATALOG_PAGE_SIZE,
-        'discover', query, category, rescanInstalled) : new ListPage<CatalogApp>();
+        sort, query, category, rescanInstalled || forceCatalog, direction, reset ? '' : this.catalogSnapshot, true) : new ListPage<CatalogApp>();
+      if (page.snapshotExpired && token === this.catalogToken) {
+        // Never append a fresh ordering to an expired snapshot's old pages.
+        this.catalogSortResetTop = true;
+        await this.loadApps(true, rescanInstalled, true);
+        return;
+      }
       if (local !== undefined) {
         page.items = local.slice((nextPage - 1) * Index.CATALOG_PAGE_SIZE, nextPage * Index.CATALOG_PAGE_SIZE);
         page.total = local.length; page.page = nextPage; page.pageSize = Index.CATALOG_PAGE_SIZE;
       }
       await ReleaseChannelRegistry.restore(getContext(this) as common.UIAbilityContext);
       console.info('Catalog read: page=' + nextPage + ' elapsedMs=' + (Date.now() - requestStartedAt));
-      if (token !== this.catalogToken || query !== this.activeQuery || category !== this.activeCategory) return;
+      if (token !== this.catalogToken || query !== this.activeQuery || category !== this.activeCategory ||
+        sort !== this.discoverSort || direction !== this.discoverDirection) return;
       // 先加载的页在后，追加时按 id 去重，避免上架/删除后翻页出现重复项。
       const previous: CatalogApp[] = reset ? [] : this.apps;
       const appended = appendCatalogPage(previous, page.items);
@@ -1231,6 +1259,8 @@ struct Index {
       const cacheablePage = reset && query.length === 0 && category.length === 0;
       this.catalogPage = nextPage;
       this.catalogTotal = page.total;
+      this.catalogSnapshot = page.snapshot ?? '';
+      if (reset && this.catalogSortResetTop) { this.catalogSortResetTop = false; this.backToDiscoverTop(); }
       this.catalogError = '';
       // 目录变了就重算「装没装」，卡片按钮跟着更新
       const channels = ReleaseChannelRegistry.refreshTargets(getContext(this) as common.UIAbilityContext,
@@ -1240,13 +1270,14 @@ struct Index {
       // 只缓存干净的第一页：缓存与分页混在一起会得到半新半旧的列表
       if (cacheablePage) {
         const context = getContext(this) as common.UIAbilityContext;
-        CatalogCache.save(context, page.items, page.rawItems);
+        CatalogCache.save(context, page.items, page.rawItems, sort, direction);
       }
       this.loadCatalogIcons(client, reset ? this.apps : fresh, query);
       // 主动下拉等待本轮真实识别完成；启动、搜索和翻页继续异步识别。
       if (rescanInstalled) await recognition;
     } catch (error) {
-      if (token !== this.catalogToken || query !== this.activeQuery || category !== this.activeCategory) return;
+      if (token !== this.catalogToken || query !== this.activeQuery || category !== this.activeCategory ||
+        sort !== this.discoverSort || direction !== this.discoverDirection) return;
       if (reset) this.catalogError = errorText(error);
       else this.catalogMoreError = errorText(error);
     } finally {
@@ -1433,11 +1464,14 @@ struct Index {
    */
   private async loadCatalogFromCache(): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
+    const sort = this.discoverSort;
+    const direction = this.discoverDirection;
     await ReleaseChannelRegistry.restore(context);
-    const cached = await CatalogCache.load(context);
+    const cached = await CatalogCache.load(context, sort, direction);
     if (cached.length === 0) return;
     // 期间已经拿到新数据就不要用旧数据覆盖
-    if (this.apps.length > 0 || this.activeQuery.length > 0 || this.activeCategory.length > 0) return;
+    if (this.apps.length > 0 || this.activeQuery.length > 0 || this.activeCategory.length > 0 ||
+      sort !== this.discoverSort || direction !== this.discoverDirection) return;
     this.apps = appendCatalogPage([], cached);
     this.catalogTotal = Math.max(this.catalogTotal, cached.length);
     this.refreshCatalogInstallState();
@@ -1469,13 +1503,21 @@ struct Index {
   }
 
   private managementIconApps(): CatalogApp[] {
+    const inputs: Array<Object | undefined> = [this.installedJobs, this.storeInstalled, this.deviceInstalled,
+      this.pendingJobs, this.myApps, this.installedDisplay, this.catalogLookup()];
+    if (this.managementIconInputs?.every((input: Object | undefined, index: number) => input === inputs[index])) {
+      return this.managementIconSelection;
+    }
     const selected = new Map<number, CatalogApp>();
     for (const job of this.allInstalledJobs().concat(this.pendingJobs)) {
       const app = this.catalogForJob(job) ?? (job.appId > 0 ? this.catalogApp(job.appId) : undefined);
       if (app !== undefined) selected.set(app.id, app);
     }
     for (const app of this.myApps) selected.set(app.id, app);
-    return Array.from(selected.values());
+    this.managementIconInputs = inputs;
+    this.managementIconById = selected;
+    this.managementIconSelection = Array.from(selected.values());
+    return this.managementIconSelection;
   }
 
   private managedIconFor(app: CatalogApp): image.PixelMap | undefined {
@@ -1486,7 +1528,9 @@ struct Index {
   }
 
   private isCurrentManagementIcon(app: CatalogApp): boolean {
-    return this.managementIconApps().some((row: CatalogApp) => row.id === app.id && row.iconRev === app.iconRev);
+    this.managementIconApps();
+    const current = this.managementIconById.get(app.id);
+    return current !== undefined && current.iconRev === app.iconRev;
   }
 
   private async loadManagementIcon(client: StoreClient, app: CatalogApp): Promise<void> {
@@ -1510,6 +1554,7 @@ struct Index {
         const source = image.createImageSource(bytes);
         try {
           const pixels = await source.createPixelMap({ desiredSize: { width: 192, height: 192 } });
+          await ForegroundIdle.wait();
           if (!this.isCurrentManagementIcon(app)) { await pixels.release(); return; }
           const icon = new AppIcon(); icon.id = app.id; icon.rev = app.iconRev; icon.pixels = pixels;
           this.managementIcons = this.managementIcons.filter((old: AppIcon) => old.id !== app.id).concat([icon]);
@@ -1593,6 +1638,7 @@ struct Index {
       const source = image.createImageSource(bytes);
       try {
         const pixels = await source.createPixelMap({ desiredSize: { width: 192, height: 192 } });
+        await ForegroundIdle.wait();
         const icon = new LocalIcon();
         icon.jobId = job.id;
         icon.pixels = pixels;
@@ -2092,8 +2138,12 @@ struct Index {
   onPageHide(): void {
     this.headerRestoreGeneration++;
     this.pageVisible = false;
+    this.homeVisibility.visible = false;
+    AppStorage.setOrCreate<boolean>('homePageVisible', false);
     this.navigationContrast?.cancel();
     this.cancelResumeMaintenance();
+    if (this.managementRowsTimer !== -1) clearTimeout(this.managementRowsTimer);
+    this.managementRowsTimer = -1;
     // 路由缓存中的首页不跟随下载进度重绘；执行与队列仍由 Coordinator 持有。
     if (this.installSubscription >= 0) InstallTaskState.unsubscribe(this.installSubscription);
     this.installSubscription = -1;
@@ -2258,7 +2308,7 @@ struct Index {
   }
 
   private syncDeviceInstalled(): void {
-    this.deviceInstalled = InstalledAppRegistry.sideloadedApps().map((app: InstalledDeviceApp) => {
+    const next = InstalledAppRegistry.sideloadedApps().map((app: InstalledDeviceApp) => {
       const job = new InstallJob();
       job.id = 'device-' + app.bundleName; job.bundleName = app.bundleName;
       job.assetName = app.displayName; job.sourceUrl = 'device';
@@ -2267,6 +2317,11 @@ struct Index {
       job.stage = InstallStage.INSTALLED;
       return job;
     });
+    if (next.length !== this.deviceInstalled.length || next.some((job: InstallJob, index: number) => {
+      const old = this.deviceInstalled[index];
+      return job.id !== old.id || job.assetName !== old.assetName || job.versionCode !== old.versionCode ||
+        job.versionName !== old.versionName || job.moduleName !== old.moduleName || job.mainAbility !== old.mainAbility;
+    })) this.deviceInstalled = next;
     this.syncDeviceIcons();
   }
 
@@ -2279,8 +2334,9 @@ struct Index {
       if (job.mainAbility.length === 0 || this.deviceIconRequested.has(key)) continue;
       this.deviceIconRequested.add(key);
       LocalBundles.installedIcon(getContext(this) as common.UIAbilityContext, job.bundleName,
-        job.mainAbility).then((pixels: image.PixelMap | undefined) => {
+        job.mainAbility).then(async (pixels: image.PixelMap | undefined) => {
         if (pixels === undefined) return;
+        await ForegroundIdle.wait();
         const icon = new LocalIcon(); icon.jobId = job.id; icon.pixels = pixels;
         this.localIcons = this.localIcons.filter((row: LocalIcon) => row.jobId !== job.id).concat([icon]);
       });
@@ -2288,6 +2344,27 @@ struct Index {
   }
 
   /** 自动扫描只在管理页且已有链路时运行；手动核对可尝试保存端口，失败保留缓存。 */
+  private deviceInventoryViewPending: boolean = false;
+
+  private publishDeviceInventory(): void {
+    this.deviceInventoryViewPending = false;
+    const names = this.allInstalledJobs().map((job: InstallJob) => job.bundleName);
+    const display = new Map(this.installedDisplay);
+    for (const name of names.concat(InstalledAppRegistry.sideloadedApps().map((app: InstalledDeviceApp) => app.bundleName))) {
+      const version = InstalledAppRegistry.version(name);
+      if (version < 0) continue;
+      const row = new VersionCacheEntry(); row.version = version;
+      row.versionName = InstalledAppRegistry.versionName(name, version);
+      row.at = InstalledAppRegistry.observedAt(name);
+      display.set(name, row);
+    }
+    this.commitCatalogVersions(display, this.installedVersions);
+    this.syncDeviceInstalled();
+    this.loadSigningExpiries();
+    this.syncLocalIcons();
+    this.refreshCatalogInstallState();
+  }
+
   private scanDeviceInstalled(force: boolean = false): Promise<void> {
     if (this.deviceInventoryFlight !== undefined) return this.deviceInventoryFlight;
     if (!force && (!HdcDeviceBridge.deviceLinked() ||
@@ -2295,21 +2372,14 @@ struct Index {
       this.installTasks.some((task: InstallTaskSnapshot) => task.running))) return Promise.resolve();
     const context = getContext(this) as common.UIAbilityContext;
     const names = this.allInstalledJobs().map((job: InstallJob) => job.bundleName);
-    this.deviceInventoryFlight = new HdcDeviceBridge(context).sideloadedApps(names).then(() => {
+    this.deviceInventoryFlight = new HdcDeviceBridge(context).sideloadedApps(names).then(async () => {
       this.deviceInventoryAt = Date.now();
-      const display = new Map(this.installedDisplay);
-      for (const name of names.concat(InstalledAppRegistry.sideloadedApps().map((app: InstalledDeviceApp) => app.bundleName))) {
-        const version = InstalledAppRegistry.version(name);
-        if (version < 0) continue;
-        const row = new VersionCacheEntry(); row.version = version;
-        row.versionName = InstalledAppRegistry.versionName(name, version); row.at = Date.now();
-        display.set(name, row);
-      }
-      this.installedDisplay = display;
-      this.syncDeviceInstalled();
-      this.loadSigningExpiries();
-      this.syncLocalIcons();
-      this.refreshCatalogInstallState();
+      // A query begun before Home can complete during the window opening.
+      // Keep its registry evidence; publish only after foreground interaction.
+      this.deviceInventoryViewPending = true;
+      await ForegroundIdle.wait();
+      if (!this.pageVisible) return;
+      if (this.deviceInventoryViewPending) this.publishDeviceInventory();
       if (force) this.syncMessage = '已核对本机侧载应用';
     }).catch((error: Object) => {
       if (force) this.syncMessage = '未能完成核对：' + errorText(error) + '，保留已知应用';
@@ -2326,7 +2396,9 @@ struct Index {
       InstalledAppRegistry.versionName(job.bundleName, version);
     if (version === job.versionCode && (versionName.length === 0 ||
       versionName === job.versionName)) return job;
-    const view = JSON.parse(JSON.stringify(job)) as InstallJob;
+    // A display projection changes only these two scalar fields. Stage history
+    // and signing material stay read-only; copying them per card is unnecessary.
+    const view = InstallJob.displayCopy(job);
     view.versionCode = version;
     view.versionName = versionName.length > 0 ? versionName :
       (version === job.versionCode ? job.versionName : '');
@@ -2464,14 +2536,15 @@ struct Index {
   }
 
   /** Invalidate old responses immediately; rapid category taps publish only the final selection. */
-  private resetCatalogFilter(delayMs: number): void {
+  private resetCatalogFilter(delayMs: number, keepRows: boolean = false): void {
     if (this.catalogFilterTimer !== -1) clearTimeout(this.catalogFilterTimer);
     this.catalogFilterTimer = -1;
     this.catalogToken++;
     this.catalogLocalRows = undefined;
+    this.catalogSnapshot = '';
     this.catalogError = ''; this.catalogMoreError = '';
     this.catalogLoading = true; this.catalogMoreBusy = false;
-    this.apps = []; this.catalogPage = 0; this.catalogTotal = 0;
+    if (!keepRows) { this.apps = []; this.catalogPage = 0; this.catalogTotal = 0; }
     if (delayMs === 0) { this.loadApps(); return; }
     this.catalogFilterTimer = setTimeout(() => {
       this.catalogFilterTimer = -1;
@@ -2481,6 +2554,19 @@ struct Index {
 
   private toggleDiscoveryCategories(): void {
     this.categoriesExpanded = !this.categoriesExpanded;
+  }
+
+  private selectDiscoverySort(key: string, reverse: boolean = false): void {
+    const sort = DiscoverSort.key(key);
+    const direction: SortDirection = reverse ? (this.discoverDirection === 'desc' ? 'asc' : 'desc') :
+      DiscoverSortPreferences.directionFor(sort);
+    if (sort === this.discoverSort && direction === this.discoverDirection) return;
+    this.discoverSort = sort;
+    this.discoverDirection = direction;
+    DiscoverSortPreferences.save(getContext(this) as common.UIAbilityContext, sort, direction).catch(() => {});
+    this.catalogSortResetTop = true;
+    // Coalesce rapid arrow/menu taps. Retain cards and decoded icons until the latest result is ready.
+    this.resetCatalogFilter(180, true);
   }
 
   private openDiscoverySearch(): void {
@@ -2902,17 +2988,21 @@ struct Index {
 
   /** 完整目录可用后，不再让搜索结果或第一页决定管理页的更新来源。 */
   private updateApps(): CatalogApp[] {
-    return (this.updateCatalogReady ? this.updateCatalog : this.apps)
-      .map((app: CatalogApp) => ReleaseChannelRegistry.apply(app));
+    return this.catalogLookup().rows;
+  }
+
+  private catalogLookup(): CatalogLookup {
+    const source = this.updateCatalogReady ? this.updateCatalog : this.apps;
+    if (this.catalogLookupCache?.matches(source, this.apps, this.updateCatalogReady, this.releaseChannelRevision)) {
+      return this.catalogLookupCache;
+    }
+    this.catalogLookupCache = new CatalogLookup(source, this.apps, this.updateCatalogReady,
+      this.releaseChannelRevision, (app: CatalogApp) => ReleaseChannelRegistry.apply(app));
+    return this.catalogLookupCache;
   }
 
   private catalogApp(appId: number): CatalogApp | undefined {
-    const management = (this.updateCatalogReady ? this.updateCatalog : this.apps)
-      .find((app: CatalogApp) => app.id === appId);
-    const visible = this.apps.find((app: CatalogApp) => app.id === appId);
-    const app = management === undefined ? visible : visible === undefined ? management :
-      ((visible.latestAsset?.versionCode ?? 0) > (management.latestAsset?.versionCode ?? 0) ? visible : management);
-    return app === undefined ? undefined : ReleaseChannelRegistry.apply(app);
+    return this.catalogLookup().app(appId);
   }
 
   private installedAssets(app: CatalogApp): HapAsset[] {
@@ -2934,18 +3024,7 @@ struct Index {
 
   /** 已有线上来源保持来源；纯本地安装仅在包名唯一匹配时自动关联。 */
   private catalogForJob(job: InstallJob): CatalogApp | undefined {
-    if (job.bundleName.length === 0) return undefined;
-    const matches = this.updateApps().filter((app: CatalogApp) =>
-      this.installedAssets(app).some((asset: HapAsset) => asset.bundleName === job.bundleName));
-    if (job.appId > 0) {
-      const exact = matches.find((app: CatalogApp) => app.id === job.appId);
-      if (exact !== undefined) return exact;
-      // 来源已记录，但异步采集尚未补齐目录身份：仍属于商店安装，不能归到离线侧载。
-      return this.updateApps().find((app: CatalogApp) => app.id === job.appId &&
-        this.installedAssets(app).every((asset: HapAsset) => asset.bundleName.length === 0));
-    }
-    // 首屏只有部分目录，不能据此认定同包名来源唯一。
-    return this.updateCatalogReady && matches.length === 1 ? matches[0] : undefined;
+    return this.catalogLookup().source(job.appId, job.bundleName);
   }
 
   private featuredTier(stars: number): number {
@@ -3074,7 +3153,8 @@ struct Index {
   }
 
   /** 本机版本落后于目录最新版本时给「更新」。 */
-  private updateForApp(appId: number, bundleName: string = '', preferredName: string = ''): UpdateTarget | undefined {
+  private updateForApp(appId: number, bundleName: string = '', preferredName: string = '',
+    recordedVersion: number = -1): UpdateTarget | undefined {
     const app = this.catalogApp(appId);
     if (app === undefined) return undefined;
     const asset = bundleName.length > 0 ? this.assetForBundle(app, bundleName, preferredName) : app.latestAsset;
@@ -3083,7 +3163,7 @@ struct Index {
     // A live device version already answers this question. Rendering each card
     // must not merge/sort/clone the complete installed inventory just to discard it.
     const installed = LocalBundles.isKnown(deviceVersion) ? deviceVersion :
-      (this.allInstalledJobs().find((job: InstallJob) => job.bundleName === asset.bundleName)?.versionCode ??
+      (recordedVersion > 0 ? recordedVersion : this.allInstalledJobs().find((job: InstallJob) => job.bundleName === asset.bundleName)?.versionCode ??
         (bundleName.length === 0 ? this.installedVersionOf(appId) : -1));
     if (installed <= 0 || asset.versionCode <= installed) return undefined;
     const target = new UpdateTarget();
@@ -3107,17 +3187,25 @@ struct Index {
    */
   private checkInstalledUpdates(): void {
     const found: UpdateTarget[] = [];
+    const seen = new Set<string>();
     for (const job of this.allInstalledJobs()) {
       const app = this.catalogForJob(job);
       if (app === undefined) continue;
-      const target = this.updateForApp(app.id, job.bundleName, job.assetName);
-      if (target !== undefined && !found.some((item: UpdateTarget) => item.bundleName === target.bundleName)) found.push(target);
+      const target = this.updateForApp(app.id, job.bundleName, job.assetName, job.versionCode);
+      if (target !== undefined && !seen.has(target.bundleName)) {
+        seen.add(target.bundleName); found.push(target);
+      }
     }
-    this.updates = found;
+    if (JSON.stringify(found) !== JSON.stringify(this.updates)) this.updates = found;
   }
 
   private updateFor(bundleName: string): UpdateTarget | undefined {
-    return this.updates.find((item: UpdateTarget) => item.bundleName === bundleName);
+    if (this.updatesLookupSource !== this.updates) {
+      this.updatesByBundle = new Map<string, UpdateTarget>();
+      for (const item of this.updates) this.updatesByBundle.set(item.bundleName, item);
+      this.updatesLookupSource = this.updates;
+    }
+    return this.updatesByBundle.get(bundleName);
   }
 
   private installedActionLabel(job: InstallJob): string {
@@ -3172,6 +3260,8 @@ struct Index {
       estimates.set(job.bundleName, InstalledSigningExpiry.estimate(job.bundleName, job.versionCode, materials,
         job.installedUpdateTime || job.stageHistory.find((mark) => mark.stage === InstallStage.INSTALLED)?.at || job.updatedAt));
     }
+    await ForegroundIdle.wait();
+    if (token !== this.expiryReadToken || !this.pageVisible || this.currentTab !== Index.TAB_MANAGE) return;
     if (JSON.stringify(Array.from(next.entries())) !== JSON.stringify(Array.from(this.signingExpiries.entries()))) {
       this.signingExpiries = next;
     }
@@ -3294,6 +3384,12 @@ struct Index {
       const target = this.updateFor(job.bundleName);
       return target !== undefined && !this.taskPending(target.appId, job.bundleName);
     });
+  }
+
+  /** The toolbar needs existence, not a freshly merged copy of every installed app. */
+  private hasInstalledUpdates(): boolean {
+    return this.updates.some((target: UpdateTarget) => this.uninstallingBundle !== target.bundleName &&
+      !this.taskPending(target.appId, target.bundleName));
   }
 
   private async updateAllInstalled(): Promise<void> {
@@ -3533,9 +3629,12 @@ struct Index {
   }
 
   private syncManagementRows(): void {
-    if (this.managementRowsTimer !== -1) return;
+    this.managementRowsPending = true;
+    if (!this.pageVisible || this.managementRowsTimer !== -1) return;
     this.managementRowsTimer = setTimeout(() => {
       this.managementRowsTimer = -1;
+      if (!this.pageVisible) return;
+      this.managementRowsPending = false;
       this.queueRows.update(this.managementQueueJobs());
       this.onlineInstalledRows.update(this.managementInstalledJobs(false));
       this.offlineInstalledRows.update(this.managementInstalledJobs(true));
@@ -3696,7 +3795,7 @@ struct Index {
     Row({ space: 8 }) {
       SymbolGlyph($r('sys.symbol.magnifyingglass')).fontSize(17)
         .fontColor([this.colors().textSecondary])
-      TextInput({ placeholder: '搜索应用名或仓库', text: this.searchText })
+      TextInput({ placeholder: '搜索应用', text: this.searchText })
         .layoutWeight(1).height(44).fontSize(14)
         .fontColor(this.colors().text).placeholderColor(this.colors().textSecondary)
         .backgroundColor('#00000000').caretColor(this.colors().accent)
@@ -3759,12 +3858,15 @@ struct Index {
       if (this.discoverChromeReady) {
       DiscoverRefreshIndicator({ motion: this.discoverMotion, darkMode: this.darkMode, refreshing: this.catalogRefreshing,
         statusInset: this.statusBarInset, titleHeight: this.discoverTitleHeight })
-      DiscoverHeader({ motion: this.discoverMotion, darkMode: this.darkMode,
+      DiscoverHeader({ motion: this.discoverMotion, homeVisibility: this.homeVisibility, darkMode: this.darkMode,
+        sortKey: this.discoverSort, sortDirection: this.discoverDirection, sortLoading: this.catalogLoading,
+        onSort: (key: string) => this.selectDiscoverySort(key),
+        onReverseSort: () => this.selectDiscoverySort(this.discoverSort, true),
         categories: this.discoveryCategories, selectedCategory: this.activeCategory, categoriesExpanded: this.categoriesExpanded,
         onToggleCategories: () => this.toggleDiscoveryCategories(),
         onOpenSearch: () => this.openDiscoverySearch(),
         onCategory: (category: string) => this.selectDiscoveryCategory(category),
-        active: this.pageVisible && this.currentTab === Index.TAB_DISCOVER && this.signedIn &&
+        active: this.currentTab === Index.TAB_DISCOVER && this.signedIn &&
           !this.showRenewal && !this.showAppConfig && !this.showSubmit && !this.showReconnect && !this.showCertificatePrompt && !this.showCertSheet &&
           !this.showCardActions && !this.showLocalProfiles,
         statusInset: this.statusBarInset, inset: this.pageInset(), titleHeight: this.discoverTitleHeight,
@@ -3775,8 +3877,8 @@ struct Index {
             this.discoverTitleHeight = height;
           }
         }, searchContent: (): void => this.discoverSearchInput() })
-      DiscoverTopOverlay({ motion: this.discoverMotion, darkMode: this.darkMode, inset: this.pageInset(),
-        active: this.pageVisible && this.currentTab === Index.TAB_DISCOVER, epoch: this.topActionEpoch,
+      DiscoverTopOverlay({ motion: this.discoverMotion, homeVisibility: this.homeVisibility, darkMode: this.darkMode, inset: this.pageInset(),
+        active: this.currentTab === Index.TAB_DISCOVER, epoch: this.topActionEpoch,
         action: () => this.backToDiscoverTop() })
       }
     }.width('100%').height('100%').backgroundColor(this.colors().bg).id('navigation-content-0')
@@ -3802,7 +3904,7 @@ struct Index {
                   .padding({ bottom: 8 })
               }.width('100%').padding({ left: this.pageInset(), right: this.pageInset() })
             }
-            if (this.catalogLoading && !this.catalogRefreshing) {
+            if (this.catalogLoading && !this.catalogRefreshing && this.apps.length === 0) {
               ListItem() {
                 Row() { LoadingProgress().width(30).height(30).color(this.colors().accent) }
                   .width('100%').justifyContent(FlexAlign.Center).padding({ top: 36 })
@@ -3849,9 +3951,9 @@ struct Index {
                           .onClick(() => this.openDetail(app.id))
                       }
                       Column({ space: 5 }) {
-                        CatalogAppTitle({ title: AppDisplayName.forCatalog(app), version: this.latestVersionTag(app),
+                        HomeAppTitle({ title: AppDisplayName.forCatalog(app), version: this.latestVersionTag(app),
                           color: '#FFFFFF', versionColor: this.featuredColors(app.stars)[0][0],
-                          versionBackground: '#FFFFFF', active: this.pageVisible && this.currentTab === 0 })
+                          versionBackground: '#FFFFFF', active: this.currentTab === 0 })
                         Text(app.summary).fontSize(12)
                           .fontColor('#E5ECFF').maxLines(1)
                         Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center,
@@ -3895,9 +3997,9 @@ struct Index {
                             .onClick(() => this.openDetail(app.id))
                         }
                         Column({ space: 5 }) {
-                          CatalogAppTitle({ title: AppDisplayName.forCatalog(app), version: this.latestVersionTag(app),
+                          HomeAppTitle({ title: AppDisplayName.forCatalog(app), version: this.latestVersionTag(app),
                             color: this.colors().text, versionColor: this.colors().surface,
-                            versionBackground: this.colors().text, active: this.pageVisible && this.currentTab === 0 })
+                            versionBackground: this.colors().text, active: this.currentTab === 0 })
                           Text(app.summary).fontSize(12).fontColor(this.colors().textSecondary).maxLines(1)
                           Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center,
                             space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(5) } }) {
@@ -3916,8 +4018,6 @@ struct Index {
                   }
                 }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + this.pageInset() * 2 })
                   .align(Alignment.Top).padding({ left: this.pageInset(), right: this.pageInset() })
-                  // Reuse mounted card pixels during the desktop's window-scale animation and scrolling.
-                  .renderGroup(true)
               }
             }, (app: CatalogApp) => this.discoverRows.key(app))
             // 接近页尾预取；固定高度的尾项避免加载状态切换改变滚动范围。
@@ -3962,9 +4062,9 @@ struct Index {
         .pullToRefresh(this.discoverCanRefresh)
         .onOffsetChange((offset: number) => this.discoverMotion.pull(offset))
         .onRefreshing(() => this.pullRefreshCatalog())
-    // Cache only the catalog. Title blur and floating material stay outside
-    // this layer and cannot invalidate it during the desktop's window scaling.
-    }.width('100%').height('100%').backgroundColor(this.colors().bg).renderGroup(true)
+    // Window composition already caches this surface during its scale animation.
+    // Extra list/card offscreen layers are rebuilt together on foreground return.
+    }.width('100%').height('100%').backgroundColor(this.colors().bg)
   }
 
   @Builder
@@ -4018,7 +4118,7 @@ struct Index {
     Row() {
       Text('管理').fontSize(30).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
       Blank().layoutWeight(1)
-      StoreImmersiveIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '刷新管理列表',
+      HomeIconButton({ homeVisibility: this.homeVisibility, symbol: $r('sys.symbol.arrow_clockwise'), label: '刷新管理列表',
         controlId: 'management-refresh', visible: this.rootHeaderVisible(Index.TAB_MANAGE),
         loading: this.managementRefreshing || this.syncBusy || this.myAppsRefreshing || this.updateCatalogBusy,
         action: () => this.refreshManagement(), backAction: () => { this.onBackPress(); } })
@@ -4026,7 +4126,7 @@ struct Index {
   }
 
   private rootHeaderVisible(tab: number): boolean {
-    return this.pageVisible && this.currentTab === tab && !this.showSubmit && !this.showAppConfig &&
+    return this.currentTab === tab && !this.showSubmit && !this.showAppConfig &&
       !this.showRenewal && !this.showReconnect && !this.showCertSheet && !this.showLocalProfiles &&
       !this.showCertificatePrompt && !this.showCardActions;
   }
@@ -4131,9 +4231,9 @@ struct Index {
                 .width(46).height(46).backgroundColor(this.colors().accentSoft).borderRadius(13)
             }
             Column({ space: 4 }) {
-              CatalogAppTitle({ title: this.jobTitle(job), version: this.managementVersion(job),
+              HomeAppTitle({ title: this.jobTitle(job), version: this.managementVersion(job),
                 color: this.colors().text, versionColor: this.colors().surface,
-                versionBackground: this.colors().text, active: this.pageVisible && this.currentTab === Index.TAB_MANAGE })
+                versionBackground: this.colors().text, active: this.currentTab === Index.TAB_MANAGE })
               Row({ space: 5 }) {
                 Text(this.renewalLabel(job)).fontSize(10)
                   .fontColor(this.renewalDueSoon(job) ? this.colors().danger : this.colors().textTertiary)
@@ -4219,9 +4319,9 @@ struct Index {
                       .backgroundColor(this.colors().accentSoft).borderRadius(12)
                   }
                   Column({ space: 5 }) {
-                    CatalogAppTitle({ title: this.jobTitle(job), version: this.managementVersion(job),
+                    HomeAppTitle({ title: this.jobTitle(job), version: this.managementVersion(job),
                       color: this.colors().text, versionColor: this.colors().surface,
-                      versionBackground: this.colors().text, active: this.pageVisible && this.currentTab === Index.TAB_MANAGE })
+                      versionBackground: this.colors().text, active: this.currentTab === Index.TAB_MANAGE })
                     if (job.stage === InstallStage.QUEUED) {
                       Text(this.taskJobLabel(job)).fontSize(10)
                         .fontColor(this.colors().textSecondary).maxLines(1)
@@ -4334,7 +4434,7 @@ struct Index {
                 .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
                 .borderRadius(StoreLayout.cardActionRadius)
                 .responseRegion({ x: 0, y: -6, width: '100%', height: 44 })
-                .enabled(!this.bulkUpdating && this.updatableInstalledJobs().length > 0)
+                .enabled(!this.bulkUpdating && this.hasInstalledUpdates())
                 .id('installed-update-all').onClick(() => this.updateAllInstalled())
             }.width('100%').justifyContent(FlexAlign.SpaceBetween).alignItems(VerticalAlign.Center)
           }
@@ -4811,7 +4911,7 @@ struct Index {
     Row() {
       Text('我的').fontSize(30).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
       Blank().layoutWeight(1)
-      StoreImmersiveIconButton({ symbol: $r('sys.symbol.gearshape'), label: '设置', controlId: 'mine-settings',
+      HomeIconButton({ homeVisibility: this.homeVisibility, symbol: $r('sys.symbol.gearshape'), label: '设置', controlId: 'mine-settings',
         visible: this.rootHeaderVisible(Index.TAB_MINE),
         action: () => StorePageMotion.pushUrl({ url: 'pages/Settings' }), backAction: () => { this.onBackPress(); } })
     }.width('100%').height('100%').padding({ left: this.pageInset(), right: this.pageInset() })
@@ -4984,7 +5084,8 @@ struct Index {
           .id('bottom-tab-3').labelStyle({ selectedColor: this.navigationColor(3, true), unselectedColor: this.navigationColor(3, false) }))
     }
     .id('bottom-navigation-root')
-    // Discover caches its catalog content and each card separately.
+    // Let the window compositor retain the page; forced list/card render groups
+    // rebuild together on foreground return and stall the opening animation.
     // The moving embedded toolbar material must never enter the Tabs composition cache.
     .onAppear(() => {
       afterPaint(this.getUIContext(), () => { this.discoveryReady = true; });
@@ -5073,7 +5174,7 @@ struct Index {
     } else if (!this.signedIn) {
       this.loginGate()
     }
-    InstallCertificatePrompt({ active: this.pageVisible, showing: this.showCertificatePrompt,
+    HomeCertificatePrompt({ homeVisibility: this.homeVisibility, showing: this.showCertificatePrompt,
       dismissRequest: this.certificatePromptDismiss })
     }.width('100%').height('100%').backgroundColor(this.colors().bg)
       .onSizeChange((_old: SizeOptions, size: SizeOptions) => { this.viewportWidth = Number(size.width); })

@@ -1,5 +1,7 @@
 import { DiscoverCategorySlice } from './DiscoverCategorySlice';
+import { DiscoverSortControl } from './DiscoverSortControl';
 import { afterPaint } from '../theme/AfterPaint';
+import { HomeVisibility } from '../theme/HomeVisibility';
 import { AnimatorOptions, AnimatorResult, PathShape, uiMaterial } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { Palette } from '../theme/Palette';
@@ -161,6 +163,7 @@ struct DiscoverGlassButton {
 export struct DiscoverHeader {
   @StorageProp('routeTransitioning') @Watch('refreshPopup') private routeTransitioning:boolean=false;
   @ObjectLink motion: DiscoverMotion;
+  @ObjectLink @Watch('refreshPopup') homeVisibility: HomeVisibility;
   @Prop darkMode: boolean = false;
   @Prop statusInset: number = 0;
   @Prop inset: number = 20;
@@ -168,6 +171,11 @@ export struct DiscoverHeader {
   @Prop @Watch('refreshPopup') active: boolean = true;
   @Prop @Watch('onCategoriesChanged') categories: string[] = [];
   @Prop selectedCategory: string = '';
+  @Prop sortKey: string = 'discover';
+  @Prop sortDirection: string = 'desc';
+  @Prop sortLoading: boolean = false;
+  onSort: (key: string) => void = () => {};
+  onReverseSort: () => void = () => {};
   @Prop @Watch('onToolbarModeChanged') categoriesExpanded: boolean = false;
   @State private categoriesOpen: boolean = false;
   @State private toolbarProgress: number = 0;
@@ -243,20 +251,22 @@ export struct DiscoverHeader {
   }
 
   private searchControlWidth(): number {
-    const fullWidth = Math.max(120, this.searchWidth - 54);
+    const fullWidth = Math.max(44, this.searchWidth - 112);
     return fullWidth + (44 - fullWidth) * this.toolbarProgress;
   }
 
   private categoryControlWidth(): number {
-    return 44 + (Math.max(120, this.searchWidth - 54) - 44) * this.toolbarProgress;
+    return 44 + (Math.max(44, this.searchWidth - 112) - 44) * this.toolbarProgress;
   }
 
   private refreshPopup(): void {
+    // API 24/25 render inline controls; they have no native popup to remount on return.
+    if (!this.immersiveSupported) { this.popupReady = true; return; }
     const generation = ++this.popupGeneration;
-    if (!this.active || this.routeTransitioning) { this.popupReady = false; return; }
+    if (!this.active || !this.homeVisibility.visible || this.routeTransitioning) { this.popupReady = false; return; }
     if (this.popupReady) return;
     afterPaint(this.getUIContext(), () => {
-      if (this.disposed || generation !== this.popupGeneration || !this.active || this.routeTransitioning) return;
+      if (this.disposed || generation !== this.popupGeneration || !this.active || !this.homeVisibility.visible || this.routeTransitioning) return;
       this.popupReady = true;
     });
   }
@@ -333,6 +343,9 @@ export struct DiscoverHeader {
           this.getUIContext().vp2px(this.categoryControlWidth()),
           this.getUIContext().vp2px(DiscoverToolbarMotion.controlHeight),
           this.getUIContext().vp2px(DiscoverToolbarMotion.feedbackInset))))
+      DiscoverSortControl({ active: this.active && this.popupReady, foreground: this.homeVisibility.visible,
+        darkMode: this.darkMode, sortKey: this.sortKey, sortDirection: this.sortDirection,
+        loading: this.sortLoading, onSort: this.onSort, onReverse: this.onReverseSort })
     }.width('100%').height(DiscoverToolbarMotion.paintHeight)
   }
 
@@ -356,7 +369,7 @@ export struct DiscoverHeader {
     for (const label of [''].concat(this.categories)) {
       const width = label === '' ? this.mainCategoryWidth() : Math.max(64, label.length * 14 + 32);
       this.sliceFor(label).clipTo(left, width, this.categoryOffset, this.categoryControlWidth(),
-        Math.max(120, this.searchWidth - 54));
+        Math.max(44, this.searchWidth - 112));
       left += width + 10;
     }
   }

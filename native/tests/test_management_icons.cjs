@@ -23,6 +23,7 @@ function fixture(count = 1) {
     requests: [], released: [], active: 0, peak: 0, decodes: 0, saves: [] };
   f.fetch = async a => bytes(a.id);
   const box = { AppIcon: class {}, CachedIcon: class {}, getContext: () => ({}),
+    ForegroundIdle: { wait: () => f.displayGate || Promise.resolve() },
     StoreClient: class { async appIconBytes(a) {
       f.requests.push(a.id); f.peak = Math.max(f.peak, ++f.active);
       try { return await f.fetch(a); } finally { f.active--; }
@@ -46,6 +47,7 @@ function fixture(count = 1) {
   vm.runInNewContext(code, box);
   f.ui = Object.assign(new box.Page(), { apps: [], appIcons: [], managementIcons: [], localIcons: [],
     myApps: [], pendingJobs: [], managementIconFlights: new Map(), activeQuery: 'unrelated-search',
+    catalogLookup: () => { const key = JSON.stringify(f.catalog); if (f.lookupKey !== key) { f.lookupKey = key; f.lookup = {}; } return f.lookup; },
     allInstalledJobs: () => f.catalog.map(a => ({ id: 'job-' + a.id, appId: a.id, bundleName: 'com.example.app' + a.id })),
     catalogForJob: job => f.catalog.find(a => a.id === job.appId), catalogApp: id => f.catalog.find(a => a.id === id) });
   return f;
@@ -65,6 +67,17 @@ test('a cold Management start restores matching cached icons without API request
   await f.ui.loadManagementIcons();
   assert.equal(f.ui.managementIcons.length, 2); assert.equal(f.requests.length, 0);
   assert.equal(f.ui.apps.length, 0);
+});
+
+test('a decoded icon waits for interaction to end and rechecks its revision before publication', async () => {
+  const f = fixture(); let release;
+  f.displayGate = new Promise(resolve => release = resolve);
+  const work = f.ui.loadManagementIcons(); await tick();
+  assert.equal(f.decodes, 1); assert.equal(f.ui.managementIcons.length, 0);
+  f.catalog[0] = { ...app(1), iconRev: 'r2' };
+  release(); await work;
+  assert.equal(f.ui.managementIcons.length, 0);
+  assert(f.released.includes('pixels'));
 });
 test('overlapping loads share requests and limit network/decode work to four workers', async () => {
   const f = fixture(12); let release;

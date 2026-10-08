@@ -18,7 +18,8 @@ export class ForegroundIdle {
     ForegroundIdle.timer = -1;
   }
 
-  static interaction(quietMs: number = 180): void {
+  // Short pauses between consecutive flings are still interaction. Reserve maintenance for a settled screen.
+  static interaction(quietMs: number = 450): void {
     ForegroundIdle.quietUntil = Math.max(ForegroundIdle.quietUntil, Date.now() + quietMs);
     ForegroundIdle.arm();
   }

@@ -1,3 +1,4 @@
+const { CatalogLookup } = require('./load_ets.cjs').loadEts('data/CatalogLookup');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -7,7 +8,7 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
-const methods = ['drainInstallQueue', 'installFromCatalog', 'catalogApp', 'startUpdate', 'assetForBundle', 'latestAssets'].map(name => {
+const methods = ['catalogLookup', 'drainInstallQueue', 'installFromCatalog', 'catalogApp', 'startUpdate', 'assetForBundle', 'latestAssets'].map(name => {
   const start = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
   assert.notEqual(start, -1, name);
   return source.slice(start, source.indexOf('\n  }', start) + 4);
@@ -60,7 +61,7 @@ test('multiple Discover clicks enqueue immediately; execution belongs to process
     starts.push(job.appId); if (job.appId === 1) await gate;
     job.stage = 'INSTALLED'; return job;
   });
-  const box = { ReleaseChannelRegistry: { apply: app => app }, InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' }, InstallCoordinator: owner, getContext: () => ({}), errorText: String,
+  const box = { CatalogLookup, ReleaseChannelRegistry: { apply: app => app }, InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' }, InstallCoordinator: owner, getContext: () => ({}), errorText: String,
     LocalBundles: { isSelfBundle: () => false }, JobStore: { open: async () => store } };
   vm.runInNewContext(code, box);
   const ui = new box.Page();
@@ -95,7 +96,7 @@ test('Management updates the secondary bundle even when the primary package is c
     url: 'https://example.com/helper.hap', versionCode: 9 };
   primary.latestAssets = [primary.latestAsset, helper];
   const enqueued = [];
-  const box = { ReleaseChannelRegistry: { apply: app => app }, InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' }, LocalBundles: { isSelfBundle: () => false, installedVersion: () => 8 },
+  const box = { CatalogLookup, ReleaseChannelRegistry: { apply: app => app }, InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' }, LocalBundles: { isSelfBundle: () => false, installedVersion: () => 8 },
     JobStore: { open: async () => ({ enqueue: async (...args) => enqueued.push(args) }) },
     getContext: () => ({}), errorText: String };
   vm.runInNewContext(code, box);
@@ -114,7 +115,7 @@ test('Management updates the secondary bundle even when the primary package is c
 test('Discover explicit reinstall requeues a completed journal at the tail instead of stalling', async () => {
   const chosen = app(1), job = { id: 'completed', stage: 'INSTALLED', stageHistory: [{ at: 1 }] };
   let saved = false;
-  const box = { ReleaseChannelRegistry: { apply: app => app }, InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' },
+  const box = { CatalogLookup, ReleaseChannelRegistry: { apply: app => app }, InstallStage: { QUEUED: 'QUEUED', INSTALLED: 'INSTALLED' },
     LocalBundles: { isSelfBundle: () => false }, getContext: () => ({}), errorText: String,
     JobStore: { open: async () => ({ enqueue: async () => job, save: async () => { saved = true; } }) } };
   vm.runInNewContext(code, box);

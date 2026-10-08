@@ -74,3 +74,27 @@ test('the page cover pauses title motion before navigation, then resumes the fro
   f.ui.routeTransitioning = false; f.ui.updateActivity(); f.tick();
   assert.equal(f.animations[1].duration, 1250);
 });
+
+test('backgrounding home pauses only its name animation and invalidates old completion callbacks', () => {
+  const f = fixture();
+  Object.assign(f.ui, { pauseWhenHomeHidden: true, homePageVisible: true });
+  f.ui.restart(); f.tick(); const old = f.animations[0];
+  f.elapse(625); f.ui.homePageVisible = false; f.ui.updateActivity();
+  assert.equal(f.ui.titleOffset, -20); assert.equal(f.timers.size, 0);
+  old.onFinish(); assert.equal(f.timers.size, 0);
+  f.ui.advance(f.ui.epoch, true); assert.equal(f.animations.length, 1);
+  f.ui.homePageVisible = true; f.ui.updateActivity(); f.tick();
+  assert.equal(f.animations[1].duration, 1250);
+});
+
+test('a static title needs no visual write on home lifecycle changes and detail titles remain independent', () => {
+  const f = fixture(); Object.assign(f.ui, { pauseWhenHomeHidden: true, homePageVisible: true, textWidth: 190 });
+  let writes = 0;
+  Object.defineProperty(f.ui, 'titleOffset', { get: () => 0, set: () => { writes++; } });
+  for (const visible of [false, true, false, true]) {
+    f.ui.homePageVisible = visible; f.ui.updateActivity();
+  }
+  assert.equal(writes, 0); assert.equal(f.timers.size, 0);
+  const detail = fixture(); Object.assign(detail.ui, { pauseWhenHomeHidden: false, homePageVisible: false });
+  detail.ui.restart(); detail.tick(); assert.equal(detail.ui.titleOffset, -60);
+});

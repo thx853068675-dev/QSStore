@@ -1,3 +1,6 @@
+const { loadEts } = require('./load_ets.cjs');
+const { CatalogLookup } = loadEts('data/CatalogLookup');
+const { InstallJob } = loadEts('jobs/InstallJob');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -93,12 +96,12 @@ test('older boolean-only preferences recover the preview channel and read its ta
 });
 test('Discovery and Management calculate the same preview update entirely from observed memory', async () => {
   const f = fixture(), source = fs.readFileSync(path.join(root, 'pages/Index.ets'), 'utf8');
-  const names = ['displayInstalledVersion', 'installedAssets', 'latestAssets', 'assetForBundle', 'updateApps', 'catalogApp',
+  const names = ['catalogLookup', 'displayInstalledVersion', 'installedAssets', 'latestAssets', 'assetForBundle', 'updateApps', 'catalogApp',
     'catalogForJob', 'allInstalledJobs', 'recentInstalledJobs', 'currentInstalledView', 'installedVersionOf', 'updateForApp',
     'checkInstalledUpdates', 'updateFor'];
   const methods = names.map(name => { const start = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
     assert.ok(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4); });
-  const box = { ReleaseChannelRegistry: f.registry, UpdateTarget: class {},
+  const box = { CatalogLookup, InstallJob, ReleaseChannelRegistry: f.registry, UpdateTarget: class {},
     InstalledAppRegistry: { observedAt: () => 0, version: () => -1, versionName: () => '' }, InstallStage: { INSTALLED: 'INSTALLED' },
     LocalBundles: { isKnown: v => v >= 0, installedVersion() { throw Error('render invoked synchronous system query'); } } };
   vm.runInNewContext(ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThis.Page = Page;`, {
@@ -107,6 +110,7 @@ test('Discovery and Management calculate the same preview update entirely from o
     installedDisplay: new Map([['com.example.app', { version: 2, versionName: '2' }]]), installedVersions: new Map([[7, 2]]),
     storeInstalled: [], installedJobs: [{ id: 'done', appId: 7, bundleName: 'com.example.app', assetName: 'app.hap',
       stage: 'INSTALLED', versionCode: 2, versionName: '2' }], updates: [] });
+  Object.defineProperty(ui, 'releaseChannelRevision', { get: () => f.revision });
   ui.checkInstalledUpdates(); assert.equal(ui.updates.length, 0);
   await f.registry.select({}, 7, true, [f.release()]); ui.checkInstalledUpdates();
   assert.equal(ui.updateForApp(7).versionCode, 3); assert.equal(ui.updateFor('com.example.app').versionCode, 3);

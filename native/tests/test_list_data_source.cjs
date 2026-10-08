@@ -79,7 +79,7 @@ test('Management coalesces related mutations and updates both groups, queue and 
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, { exports, setTimeout: fn => { timers.push(fn); return timers.length; } });
   const ui = new exports.Page();
-  Object.assign(ui, { managementRowsTimer: -1, queueRows: f.data,
+  Object.assign(ui, { pageVisible: true, managementRowsTimer: -1, queueRows: f.data,
     onlineInstalledRows: fixture().data, offlineInstalledRows: fixture().data, publishedRows: fixture().data,
     queued: [], online: [], offline: [], myApps: [],
     managementQueueJobs() { return this.queued; },

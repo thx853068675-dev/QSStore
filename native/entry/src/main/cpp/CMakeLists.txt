@@ -26,6 +26,7 @@ add_library(hap_core SHARED
   hap_core/zip_reader.cpp
   hap_core/install_archive.cpp
   hap_core/signing_block.cpp
+  hap_core/resume_pacing.cpp
   hap_core/napi_bridge.cpp)
 add_dependencies(hap_core qingqi_rust_signer)
 target_compile_features(hap_core PRIVATE cxx_std_17)
@@ -36,4 +37,4 @@ set_target_properties(hap_core PROPERTIES
 # NAPI registers through its constructor. Static Rust/archive symbols are
 # implementation details, so they must not keep unused dependency code alive.
 target_link_options(hap_core PRIVATE -Wl,--gc-sections -Wl,--exclude-libs,ALL)
-target_link_libraries(hap_core PRIVATE "${QINGQI_RUST_LIB}" libace_napi.z.so z archive_static)
+target_link_libraries(hap_core PRIVATE "${QINGQI_RUST_LIB}" libace_napi.z.so libnative_display_soloist.so z archive_static)

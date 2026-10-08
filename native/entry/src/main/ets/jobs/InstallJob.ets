@@ -80,6 +80,52 @@ export class InstallJob {
   lastError: string = '';
   updatedAt: number = 0;
 
+  /** Display-only copy; shared arrays are read-only, execution always uses the journal. */
+  static displayCopy(job: InstallJob): InstallJob {
+    const copy = new InstallJob();
+    copy.id = job.id;
+    copy.appId = job.appId;
+    copy.assetName = job.assetName;
+    copy.sourceUrl = job.sourceUrl;
+    copy.mirrorUrls = job.mirrorUrls;
+    copy.expectedSha256 = job.expectedSha256;
+    copy.catalogBundleName = job.catalogBundleName;
+    copy.catalogVersionCode = job.catalogVersionCode;
+    copy.bundleName = job.bundleName;
+    copy.versionCode = job.versionCode;
+    copy.moduleName = job.moduleName;
+    copy.mainAbility = job.mainAbility;
+    copy.versionName = job.versionName;
+    copy.stage = job.stage;
+    copy.stageHistory = job.stageHistory;
+    copy.cachePath = job.cachePath;
+    copy.signedPath = job.signedPath;
+    copy.profilePath = job.profilePath;
+    copy.deviceUdid = job.deviceUdid;
+    copy.profileSha256 = job.profileSha256;
+    copy.signedProfileSha256 = job.signedProfileSha256;
+    copy.signingCertId = job.signingCertId;
+    copy.reinstallRequired = job.reinstallRequired;
+    copy.renewalRequestedAt = job.renewalRequestedAt;
+    copy.renewalPreparedAt = job.renewalPreparedAt;
+    copy.renewalPreviousExpiry = job.renewalPreviousExpiry;
+    copy.renewalExpiresAt = job.renewalExpiresAt;
+    copy.renewalInstallBaseline = job.renewalInstallBaseline;
+    copy.authorizationExpiresAt = job.authorizationExpiresAt;
+    copy.installedUpdateTime = job.installedUpdateTime;
+    copy.installedFingerprint = job.installedFingerprint;
+    copy.allowDataLoss = job.allowDataLoss;
+    copy.approvedInstalledVersion = job.approvedInstalledVersion;
+    copy.approvedInstalledFingerprint = job.approvedInstalledFingerprint;
+    copy.approvedInstalledAppIdentifier = job.approvedInstalledAppIdentifier;
+    copy.transferTaskId = job.transferTaskId;
+    copy.stagedTicket = job.stagedTicket;
+    copy.attempt = job.attempt;
+    copy.lastError = job.lastError;
+    copy.updatedAt = job.updatedAt;
+    return copy;
+  }
+
   static create(id: string, appId: number, assetName: string, sourceUrl: string,
     expectedSha256: string): InstallJob {
     const job = new InstallJob();

@@ -12,7 +12,8 @@ function sourceMethods(file, names, globals = {}) {
     assert.notEqual(start, -1, name);
     return source.slice(start, source.indexOf('\n  }', start) + 4);
   });
-  const box = { ForegroundIdle: { cancel() {} }, displayVersion: load('data/DisplayVersion').displayVersion, ...globals };
+  const box = { AppStorage: { setOrCreate() {} }, ForegroundIdle: { cancel() {} },
+    displayVersion: load('data/DisplayVersion').displayVersion, ...globals };
   vm.runInNewContext(ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
@@ -32,7 +33,7 @@ function fixture() {
     const page = sourceMethods(file, ['animateOverlay', 'observeReconnect', 'onPageHide'].concat(file === 'Index' ? ['cancelResumeMaintenance'] : []), {
       clearTimeout, InstallReconnect, InstallConfirmation, Curve: { EaseOut: 'ease-out' }
     });
-    Object.assign(page, { reconnectSubscription: -1, confirmationSubscription: -1, resumeJobId: '', reconnectJobId: '',
+    Object.assign(page, { homeVisibility: { visible: true }, managementRowsTimer: -1, reconnectSubscription: -1, confirmationSubscription: -1, resumeJobId: '', reconnectJobId: '',
       resumeMaintenancePending: false, reconnectMessage: '', showReconnect: false,
       getUIContext: () => ({ animateTo: (_options, change) => change() }) });
     return page;

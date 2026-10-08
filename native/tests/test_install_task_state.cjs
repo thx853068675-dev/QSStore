@@ -138,6 +138,19 @@ test('slow seed and removal cannot resurrect obsolete records or reset byte prog
   await f.store.forget(f.job.id); f.state.seed([stale]);
   assert.equal(f.state.snapshot().length, 0);
 });
+
+test('journal rechecks do not broadcast unchanged histories, while new rows and live progress still publish', () => {
+  const f = fixture(); let events = 0;
+  f.state.subscribe(() => events++); assert.equal(events, 1);
+  f.state.seed([f.job]); assert.equal(events, 2);
+  for (let i = 0; i < 100; i++) f.state.seed([JSON.parse(JSON.stringify(f.job))]);
+  assert.equal(events, 2);
+  f.job.stage = f.InstallStage.DOWNLOADING; f.state.publish(f.job);
+  assert.equal(events, 3);
+  f.state.downloadProgress(f.job.id, 50, 100); assert.equal(events, 4);
+  f.state.seed([f.job]); assert.equal(events, 4);
+  assert.equal(f.state.snapshot()[0].percent, 50);
+});
 test('running newer update wins over an older installed task, also when matched by bundle', async () => {
   const f = fixture(); const old = JSON.parse(JSON.stringify(f.job));
   old.id = 'old'; old.stage = f.InstallStage.INSTALLED; old.updatedAt = Date.now() + 1000;

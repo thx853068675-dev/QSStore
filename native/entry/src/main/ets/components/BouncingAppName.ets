@@ -2,6 +2,9 @@
 @Component
 export struct BouncingAppName {
   @StorageProp('routeTransitioning') @Watch('updateActivity') private routeTransitioning:boolean=false;
+  // Read lifecycle only in animation callbacks, so static titles keep their mounted pixels.
+  @StorageProp('homePageVisible') @Watch('updateActivity') private homePageVisible:boolean=true;
+  @Prop pauseWhenHomeHidden:boolean=false;
   @Prop @Watch('restart') title:string='';
   @Prop @Watch('restart') fontSize:number=17;
   @Prop @Watch('restart') viewportWidth:number=0;
@@ -37,7 +40,7 @@ export struct BouncingAppName {
       this.moving=false;
     }
     this.nextToEnd=true;
-    if(this.routeTransitioning||!this.active||!this.visible||this.viewportWidth<=0||this.textWidth-this.viewportWidth<=1)return;
+    if(this.routeTransitioning||(this.pauseWhenHomeHidden&&!this.homePageVisible)||!this.active||!this.visible||this.viewportWidth<=0||this.textWidth-this.viewportWidth<=1)return;
     const token=this.epoch;
     this.timer=setTimeout(()=>{this.timer=-1;this.advance(token,true);},1100);
   }
@@ -52,13 +55,13 @@ export struct BouncingAppName {
       this.getUIContext().animateTo({duration:0},()=>{this.titleOffset=offset;});
       this.moving=false;
     }
-    if(this.routeTransitioning||!this.active||!this.visible||this.viewportWidth<=0||this.textWidth-this.viewportWidth<=1)return;
+    if(this.routeTransitioning||(this.pauseWhenHomeHidden&&!this.homePageVisible)||!this.active||!this.visible||this.viewportWidth<=0||this.textWidth-this.viewportWidth<=1)return;
     const token=this.epoch;
     this.timer=setTimeout(()=>{this.timer=-1;this.advance(token,this.nextToEnd);},1100);
   }
 
   private advance(token:number,toEnd:boolean):void {
-    if(this.disposed||this.routeTransitioning||!this.active||!this.visible||token!==this.epoch)return;
+    if(this.disposed||this.routeTransitioning||(this.pauseWhenHomeHidden&&!this.homePageVisible)||!this.active||!this.visible||token!==this.epoch)return;
     const distance=Math.max(0,this.textWidth-this.viewportWidth);
     if(distance<=1)return;
     this.moving=true;
@@ -68,7 +71,7 @@ export struct BouncingAppName {
     this.motionDuration=Math.max(240,Math.round(Math.abs(this.motionTo-this.motionFrom)/32*1000));
     this.getUIContext().animateTo({duration:this.motionDuration,curve:Curve.Linear,
       onFinish:()=>{
-        if(this.disposed||this.routeTransitioning||!this.active||!this.visible||token!==this.epoch)return;
+        if(this.disposed||this.routeTransitioning||(this.pauseWhenHomeHidden&&!this.homePageVisible)||!this.active||!this.visible||token!==this.epoch)return;
         this.moving=false;
         this.nextToEnd=!toEnd;
         this.timer=setTimeout(()=>{this.timer=-1;this.advance(token,!toEnd);},1100);

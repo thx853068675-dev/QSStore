@@ -14,7 +14,9 @@ function fixture() {
   const timers = new Map(); let nextTimer = 0;
   f.flushResume = () => { for (const [id, fn] of timers) { timers.delete(id); fn(); } };
   f.timers = timers;
-  const box = { afterPaint: (_ui, callback) => f.frames.push(callback),
+  const storage = new Map(); f.storage = storage;
+  const box = { AppStorage: { setOrCreate: (key, value) => storage.set(key, value) },
+    afterPaint: (_ui, callback) => f.frames.push(callback),
     StorePageMotion: { routeRevision: () => f.routeRevision }, ForegroundIdle: { onForeground() {}, interaction() {},
     defer: (key, fn) => timers.set(key, fn), cancel: key => timers.delete(key) }, setTimeout: fn => { timers.set(++nextTimer, fn); return nextTimer; },
     clearTimeout: id => timers.delete(id), StoreClient: class {
@@ -26,7 +28,7 @@ function fixture() {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
   box.InstallConfirmation = { deactivate() {} }; box.InstallReconnect = { deactivate() {} };
-  const ui = new box.Page(); Object.assign(ui, { pageVisible: false, topActionEpoch: 3,
+  const ui = new box.Page(); Object.assign(ui, { homeVisibility: { visible: false }, pageVisible: false, topActionEpoch: 3,
     headerRouteRevision: 0, headerRestoreGeneration: 0, getUIContext: () => ({}), resumeMaintenancePending: false,
     currentTab: 0, signedIn: true, account: {}, myApps: [{ id: 1, category: '工具' }], syncManagementIcons() {},
     myAppsLoaded: true, myAppsBusy: false, myAppsRefreshing: false, myAppsMessage: '',
@@ -44,8 +46,10 @@ function fixture() {
 test('background returns reuse popup ownership while a real route return renews it after painting', () => {
   const f = fixture(), ui = f.ui; const apps = ui.apps, icons = ui.appIcons;
   ui.onPageShow(); assert.equal(ui.pageVisible, true); assert.equal(ui.topActionEpoch, 3);
+  assert.equal(f.storage.get('homePageVisible'), true);
   assert.equal(f.frames.length, 0);
-  ui.onPageHide(); ui.onPageShow(); assert.equal(ui.topActionEpoch, 3);
+  ui.onPageHide(); assert.equal(f.storage.get('homePageVisible'), false);
+  ui.onPageShow(); assert.equal(ui.topActionEpoch, 3);
   f.routeRevision++; ui.onPageHide(); ui.onPageShow();
   assert.equal(ui.topActionEpoch, 3, 'the first return paint must not rebuild the control');
   f.frames.shift()(); assert.equal(ui.topActionEpoch, 4);

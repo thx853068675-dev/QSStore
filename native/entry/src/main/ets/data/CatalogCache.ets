@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { util } from '@kit.ArkTS';
 import { CatalogApp } from './CatalogApp';
+import { DiscoverSort } from './DiscoverSort';
 
 const STORE_NAME = 'catalog-cache';
 
@@ -43,7 +44,8 @@ export class CatalogCache {
       const encoder = new util.TextEncoder();
       let bytes = 0;
       for (const key of Object.keys(values)) {
-        if (key !== KEY_CATALOG && key !== KEY_ICONS && !/^icon-[1-9][0-9]*$/.test(key)) continue;
+        if (key !== KEY_CATALOG && key !== KEY_ICONS && !/^icon-[1-9][0-9]*$/.test(key) &&
+          !/^catalog-(discover|stars|downloads|new)-(asc|desc)$/.test(key)) continue;
         if (typeof values[key] === 'string') bytes += encoder.encodeInto(values[key] as string).byteLength;
       }
       return bytes;
@@ -56,10 +58,12 @@ export class CatalogCache {
     await store.flush();
   }
 
-  static async load(context: common.UIAbilityContext): Promise<CatalogApp[]> {
+  static async load(context: common.UIAbilityContext, sort: string = 'discover', direction: string = 'desc'): Promise<CatalogApp[]> {
     try {
       const store = await CatalogCache.store(context);
-      const raw = await store.get(KEY_CATALOG, '') as string;
+      const key = KEY_CATALOG + '-' + DiscoverSort.cacheKey(sort, direction);
+      let raw = await store.get(key, '') as string;
+      if (raw.length === 0 && sort === 'discover' && direction === 'desc') raw = await store.get(KEY_CATALOG, '') as string;
       if (raw.length === 0 || raw.length > 1024 * 1024) return [];
       const parsed = JSON.parse(raw) as Array<Record<string, Object>>;
       if (!Array.isArray(parsed)) return [];
@@ -71,11 +75,12 @@ export class CatalogCache {
   }
 
   static async save(context: common.UIAbilityContext, apps: CatalogApp[],
-    rows: Array<Record<string, Object>>): Promise<void> {
-    if (rows.length === 0) return;
+    rows: Array<Record<string, Object>>, sort: string = 'discover', direction: string = 'desc'): Promise<void> {
     try {
       const store = await CatalogCache.store(context);
-      await store.put(KEY_CATALOG, JSON.stringify(rows));
+      // Four modes × two directions, one first page each; never mix sort scopes.
+      await store.put(KEY_CATALOG + '-' + DiscoverSort.cacheKey(sort, direction), JSON.stringify(rows));
+      await store.delete(KEY_CATALOG);
       await store.flush();
     } catch (_) {
       // 写缓存失败不影响本次展示

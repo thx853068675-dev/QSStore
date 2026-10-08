@@ -12,7 +12,7 @@ function load(name, mocks = {}) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, name + '.ets'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
-  }).outputText, { exports, require: name => mocks[name] || {} });
+  }).outputText, { exports, setTimeout, require: name => mocks[name] || {} });
   return exports;
 }
 function fixture(t, legacy) {

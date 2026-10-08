@@ -13,6 +13,7 @@ export struct CatalogAppTitle {
   @Prop versionColor: string = '#FFFFFF';
   @Prop versionBackground: string = '#17213A';
   @Prop active: boolean = true;
+  @Prop pauseWhenHomeHidden: boolean = false;
   @State private badgeText: string = '';
   @State private badgeWidth: number = 0;
   @State private titleWidth: number = 0;
@@ -44,7 +45,8 @@ export struct CatalogAppTitle {
     Flex({ direction: FlexDirection.Row, alignItems: ItemAlign.Center }) {
       if (this.titleLines === 1 && this.titleWidth > 0 && this.textWidth > 0) {
         BouncingAppName({ title: this.title, fontSize: this.titleSize, color: this.color,
-          viewportWidth: this.titleWidth, textWidth: this.textWidth, active: this.active }).flexShrink(1)
+          viewportWidth: this.titleWidth, textWidth: this.textWidth, active: this.active,
+          pauseWhenHomeHidden: this.pauseWhenHomeHidden }).flexShrink(1)
       } else {
         Text(this.title).fontSize(this.titleSize).fontWeight(FontWeight.Bold).fontColor(this.color)
           .maxLines(this.titleLines).textOverflow({ overflow: TextOverflow.Ellipsis }).flexShrink(1)

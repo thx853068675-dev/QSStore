@@ -1,4 +1,5 @@
 export interface PackageEntry { name: string; size: number; }
+export const setResumeFramePacing: (enabled: boolean) => boolean;
 export interface ImportedArchiveEntry { name: string; path: string; size: number; }
 export const extractInstallArchive: (path: string, outputPrefix: string, originalName: string) => Promise<ImportedArchiveEntry[]>;
 export const listProfileEntries: (path: string) => PackageEntry[];

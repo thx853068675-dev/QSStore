@@ -1,4 +1,5 @@
 import { afterPaint } from '../theme/AfterPaint';
+import { HomeVisibility } from '../theme/HomeVisibility';
 import { uiMaterial } from '@kit.ArkUI';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { motion } from '@kit.MultimodalAwarenessKit';
@@ -9,6 +10,7 @@ import { DiscoverMotion } from './DiscoverHeader';
 @Component
 export struct DiscoverTopOverlay {
   @ObjectLink motion: DiscoverMotion;
+  @ObjectLink homeVisibility: HomeVisibility;
   @Prop darkMode: boolean = false;
   @Prop inset: number = 24;
   @Prop active: boolean = true;
@@ -20,7 +22,7 @@ export struct DiscoverTopOverlay {
         // Keep the control mounted while hidden; only real route ownership changes replace it.
         ForEach([this.epoch], (_epoch: number) => {
           DiscoverTopAction({ darkMode: this.darkMode, inset: this.inset,
-            active: this.motion.showTop && this.active, action: this.action })
+            active: this.motion.showTop && this.active && this.homeVisibility.visible, action: this.action })
             .position({ left: 0, bottom: 116 }).hitTestBehavior(HitTestMode.None)
         }, (epoch: number) => String(epoch))
     }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)

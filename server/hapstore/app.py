@@ -29,6 +29,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import auth, collector, db, identity_vault, monitor, submissions
+from .categories import CATEGORIES, normalize_category
 
 API_VERSION = 1
 HOST = os.environ.get("HAPSTORE_HOST", "127.0.0.1")
@@ -148,9 +149,10 @@ def h_list_apps(q: dict[str, list[str]]) -> dict[str, Any]:
         featured = True
     elif featured_raw in ("0", "false"):
         featured = False
+    category = (q.get("category") or [""])[0].strip()
     return db.list_apps(
         q=(q.get("q") or [""])[0].strip(),
-        category=(q.get("category") or [""])[0].strip(),
+        category=normalize_category(category) or category,
         sort=(q.get("sort") or ["updated"])[0],
         direction=(q.get("direction") or [""])[0],
         pagination=(q.get("pagination") or [""])[0],
@@ -284,16 +286,7 @@ def h_app_release(app_id: str, tag: str, q: dict[str, list[str]]) -> dict[str, A
 # ── 上架 ────────────────────────────────────────────────────────
 
 
-SUBMIT_CATEGORIES = (
-    # 原有取值全部保留：线上已有记录的 category 必须仍能通过校验，
-    # 否则这些应用重新上架或改分类时会被 INVALID_CATEGORY 挡下。
-    "工具", "开发工具", "效率", "影音", "游戏", "教育", "生活", "系统工具", "其他",
-    # 更细的类型。名字尽量短，滑动选择器一屏放得下。
-    "社交通讯", "实用工具", "安全隐私", "阅读", "新闻资讯",
-    "摄影录像", "个性化", "出行导航", "购物", "财务",
-    "健康运动", "医疗健康", "美食菜谱", "居家生活", "育儿母婴",
-    "学习", "办公", "企业应用", "儿童", "无障碍", "政务民生",
-)
+SUBMIT_CATEGORIES = CATEGORIES
 
 
 def _repo_owner_state(repo: str, account_id: str) -> dict[str, Any]:
@@ -345,6 +338,8 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
         result["expires_in_seconds"] = max(0, cached["expires_at"] - int(time.time()))
         result["existing"] = _repo_owner_state(repo, identity[0])
         result["supports_multi_select"] = True
+        result["categories"] = SUBMIT_CATEGORIES
+        result["suggested_category"] = normalize_category(result.get("suggested_category")) or "工具"
         return result
 
     account_key = _ip_hash(identity[0])
@@ -355,7 +350,8 @@ def h_submit_prepare(body: dict[str, Any], ip: str,
 
     try:
         snapshot = submissions.prepared_snapshot(repo, GITHUB_TOKEN)
-        meta = snapshot["metadata"]
+        meta = dict(snapshot["metadata"])
+        meta["category"] = normalize_category(meta.get("category")) or "工具"
         releases = snapshot["releases"]
         candidate = next((r for r in releases if r["assets"]), None)
         if candidate is None:
@@ -412,6 +408,8 @@ def h_submit_status(body: dict[str, Any], identity: tuple[str, str]) -> dict[str
     result['inspection_status'] = draft['inspection_state']
     result['existing'] = _repo_owner_state(draft['repo'], identity[0])
     result["supports_multi_select"] = True
+    result["categories"] = SUBMIT_CATEGORIES
+    result["suggested_category"] = normalize_category(result.get("suggested_category")) or "工具"
     return result
 
 
@@ -428,8 +426,8 @@ def h_submit_confirm(body: dict[str, Any], identity: tuple[str, str]) -> dict[st
     choices = [next((a for a in draft['choices'] if a['name'] == name), None) for name in names]
     if any(choice is None for choice in choices):
         raise ApiError(400, 'INVALID_ASSET', '请选择检查列表中的安装包')
-    category = str(body.get("category") or "")
-    if category not in SUBMIT_CATEGORIES:
+    category = normalize_category(body.get("category"))
+    if not category:
         raise ApiError(400, "INVALID_CATEGORY", "请选择应用分类")
     # 先判归属再同步：别人的仓库直接拒绝，不必浪费一次 GitHub 采集
     _reject_foreign_repo(draft["repo"], identity[0])
@@ -521,8 +519,8 @@ def h_configure_my_app(app_id: str, body: dict[str, Any],
         raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
     if db.publisher_account_id(int(app_id)) != identity[0]:
         raise ApiError(403, "PUBLISHER_MISMATCH", "只能配置自己上架的应用")
-    category = body.get("category")
-    if not isinstance(category, str) or category not in SUBMIT_CATEGORIES:
+    category = normalize_category(body.get("category"))
+    if not category:
         raise ApiError(400, "INVALID_CATEGORY", "请选择有效的软件分类")
     token = body.get('source_draft_token', '')
     remove = body.get('remove_secondary', False)

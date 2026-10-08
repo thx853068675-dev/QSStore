@@ -435,66 +435,47 @@ def extract_hap_icon(path: str) -> tuple[str, bytes] | None:
 
 
 _CATEGORY_KEYWORDS = (
-    ("游戏", ("game", "gaming", "游戏")),
-    # 顺序即优先级：`classify_repo` 先命中先返回，所以更具体的类型排在更泛的
-    # 前面（「阅读」先于「工具」，「影音」先于「工具」）。每个词都在上架的
-    # SUBMIT_CATEGORIES 白名单里，命中后可以直接提交，不需要用户改。
-    ("社交通讯", ("chat", "messenger", "social", "mail", "email",
-                  "聊天", "社交", "通讯", "邮件", "短信")),
+    # Explicit utilities precede generic development/media terms. Suggestions
+    # never replace a category selected by the publisher or a reviewed override.
+    ("工具", ("browser", "installer", "download", "downloader", "vpn", "proxy",
+              "password", "security", "privacy", "firewall", "calculator",
+              "file transfer",
+              "浏览器", "安装器", "签装", "签名", "下载", "代理", "密码",
+              "加密", "隐私", "计算器", "文件传输")),
+    ("生活", ("smart home", "smarthome", "appliance", "accounting", "ledger",
+              "finance", "budget", "navigation", "transit", "shopping", "health",
+              "fitness", "recipe", "parenting", "kids", "lifestyle",
+              "家居", "家电", "米家", "记账", "账本", "财务", "导航", "购物",
+              "健康", "运动", "菜谱", "育儿", "儿童", "生活", "日常")),
+    ("效率", ("ai", "deepseek", "llm", "chatgpt", "productivity", "notes", "note",
+              "todo", "task", "calendar", "reminder", "gtd", "office", "document",
+              "spreadsheet", "slides", "pdf", "wps", "education", "dictionary",
+              "笔记", "待办", "日程", "提醒", "效率", "清单", "办公", "文档",
+              "表格", "幻灯片", "学习", "教育", "词典", "人工智能")),
+    ("阅读", ("reader", "reading", "ebook", "book", "audiobook", "audiobookshelf",
+              "novel", "comic", "comics", "rss", "pixiv", "gallery", "news",
+              "阅读", "电子书", "有声书", "小说", "漫画", "图集", "插画", "资讯", "新闻")),
+    ("社交", ("chat", "messenger", "social", "community", "forum", "v2ex",
+              "telegram", "weibo", "tieba", "mail", "email",
+              "聊天", "社交", "通讯", "社区", "论坛", "问答", "微博", "贴吧", "邮件")),
+    ("游戏", ("game", "games", "gaming", "minecraft", "emulator", "游戏", "模拟器")),
     ("影音", ("music", "audio", "video", "player", "media", "podcast", "radio",
-              "音乐", "音频", "视频", "播放", "影视", "播客", "电台")),
-    ("摄影录像", ("camera", "photo", "gallery", "picture", "scan",
-                  "相机", "摄影", "拍照", "相册", "图片", "扫描")),
-    ("阅读", ("reader", "reading", "ebook", "book", "novel", "comic", "rss",
-              "阅读", "电子书", "小说", "漫画")),
-    ("新闻资讯", ("news", "feed", "资讯", "新闻", "头条")),
-    ("开发工具", ("developer", "development", "ide", "sdk", "debug", "compiler",
-                  "git", "api", "编程", "开发", "调试", "编译")),
-    ("办公", ("office", "document", "spreadsheet", "slides", "pdf", "wps",
-              "办公", "文档", "表格", "演示", "幻灯片")),
-    ("学习", ("learn", "learning", "study", "course", "exam", "dictionary", "language",
-              "tutor", "quiz", "学习", "课程", "考试", "词典", "背单词", "题库")),
-    ("效率", ("productivity", "notes", "todo", "task", "calendar", "reminder", "gtd",
-              "笔记", "待办", "日程", "提醒", "效率", "清单")),
-    ("安全隐私", ("security", "vpn", "password", "encrypt", "privacy", "firewall",
-                  "安全", "加密", "密码", "隐私", "防护")),
-    ("系统工具", ("system", "launcher", "settings", "kernel", "terminal", "shell",
-                  "系统", "启动器", "设置", "终端")),
-    ("出行导航", ("navigation", "transit", "travel", "taxi", "flight", "地图",
-                  "导航", "公交", "出行", "旅行", "打车", "航班")),
-    ("购物", ("shopping", "shop", "ecommerce", "mall", "coupon", "购物", "商城", "优惠")),
-    ("财务", ("finance", "bank", "wallet", "payment", "accounting", "stock", "budget",
-              "财务", "记账", "银行", "钱包", "支付", "股票", "账本")),
-    ("医疗健康", ("medical", "doctor", "hospital", "medicine", "clinic", "symptom",
-                  "医疗", "医生", "医院", "用药", "问诊", "症状")),
-    ("健康运动", ("fitness", "workout", "sport", "health", "sleep", "step",
-                  "健身", "运动", "锻炼", "睡眠", "步数", "跑步", "健康")),
-    ("美食菜谱", ("recipe", "cook", "food", "restaurant", "菜谱", "做饭", "美食", "餐厅")),
-    ("育儿母婴", ("baby", "parenting", "pregnancy", "育儿", "母婴", "宝宝", "孕期")),
-    ("儿童", ("kids", "children", "toy", "儿童", "少儿", "玩具")),
-    ("无障碍", ("accessibility", "blind", "无障碍", "读屏", "视障")),
-    ("政务民生", ("government", "citizen", "政务", "民生", "社保", "公积金")),
-    ("企业应用", ("enterprise", "erp", "crm", "oa", "企业", "商务", "考勤")),
-    ("个性化", ("theme", "wallpaper", "widget", "font", "主题", "壁纸",
-                "小组件", "图标包", "字体")),
-    ("居家生活", ("smart home", "smarthome", "appliance", "家居",
-                  "智能家居", "家电", "生活")),
-    ("实用工具", ("utility", "utilities", "toolbox", "calculator", "converter",
-                  "measure", "工具", "计算器", "换算", "测量")),
-    ("教育", ("education", "school", "university", "教育", "学校", "校园")),
-    ("工具", ("utility", "utilities", "tools", "工具")),
-    ("生活", ("life", "lifestyle", "daily", "生活", "日常")),
+              "音乐", "音频", "视频", "播放", "影视", "播客", "电台", "直播")),
+    ("开发", ("developer", "development", "ide", "sdk", "debug", "compiler",
+              "git", "api", "code", "terminal", "shell", "arkui",
+              "编程", "开发", "代码", "调试", "编译", "终端")),
 )
 
 
 def classify_repo(topics: list[str], description: str = "") -> str:
-    """Category heuristic from GitHub topics and description; otherwise 其他."""
+    """Suggest one of eight categories; ASCII keywords match whole tokens."""
     values = " ".join(str(topic).lower() for topic in topics)
     values += " " + description.lower()
     for category, words in _CATEGORY_KEYWORDS:
-        if any(word in values for word in words):
+        if any((re.search(r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])", values)
+                if word.isascii() else word in values) for word in words):
             return category
-    return "其他"
+    return "工具"
 
 
 def _unlink_quiet(path: str | None) -> None:

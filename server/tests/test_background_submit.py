@@ -91,6 +91,39 @@ class BackgroundSubmitTest(unittest.TestCase):
         self.assertIsNone(db.connect().execute("SELECT id FROM app WHERE id<>?",
                                               (app_id,)).fetchone())
 
+    def test_legacy_category_submission_and_configuration_are_canonicalized(self):
+        result = self.confirm(self.prepare(), category="实用工具")
+        app_id = result["app"]["id"]
+        self.assertEqual(result["app"]["category"], "工具")
+        changed = app.h_configure_my_app(str(app_id), {"category": "开发工具"},
+                                         ("uid", "Nickname"))
+        self.assertEqual(changed["app"]["category"], "开发")
+        db.connect().execute("UPDATE catalog_task SET status='running' WHERE app_id=?", (app_id,))
+        db.connect().commit()
+        applied = db.apply_catalog_snapshot("o/r", {"category": "影音"}, self.releases,
+                                            self.task(app_id)["generation"])
+        self.assertTrue(applied[2])
+        self.assertEqual(db.get_app(app_id)["category"], "开发")
+        with self.assertRaises(app.ApiError) as error:
+            app.h_configure_my_app(str(app_id), {"category": "unknown"}, ("uid", "Nickname"))
+        self.assertEqual(error.exception.code, "INVALID_CATEGORY")
+
+    def test_cached_and_polled_drafts_refresh_the_category_choices(self):
+        draft = self.prepare()
+        stored = json.loads(db.get_submit_draft(draft["draft_token"], "uid")["prepared_json"])
+        stored.update(categories=["办公", "其他"], suggested_category="办公")
+        db.connect().execute("UPDATE submit_draft SET prepared_json=? WHERE token=?",
+                             (json.dumps(stored), draft["draft_token"]))
+        db.connect().commit()
+        cached = self.prepare()
+        polled = app.h_submit_status({"draft_token": draft["draft_token"]}, ("uid", "Nickname"))
+        for response in (cached, polled):
+            self.assertEqual(response["categories"], app.SUBMIT_CATEGORIES)
+            self.assertEqual(response["suggested_category"], "效率")
+            self.assertEqual(response["draft_token"], draft["draft_token"])
+        self.assertEqual(self.fetch_meta.call_count, 1)
+        self.assertEqual(self.fetch_releases.call_count, 1)
+
     def test_worker_populates_name_icon_identity_and_only_selected_bundle_history(self):
         result = self.confirm(self.prepare())
         app_id = result["app"]["id"]

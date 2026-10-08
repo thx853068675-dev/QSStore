@@ -14,6 +14,7 @@ from PIL import Image
 
 from server.hapstore import submissions
 from server.hapstore import app, auth, collector, db, transfer
+from server.hapstore.categories import CATEGORIES, LEGACY_CATEGORY_ALIASES, normalize_category
 
 
 class StoreFeaturesTest(unittest.TestCase):
@@ -34,7 +35,7 @@ class StoreFeaturesTest(unittest.TestCase):
 
     def test_category_uses_topics_and_has_neutral_fallback(self):
         self.assertEqual(collector.classify_repo(["music-player", "harmonyos"]), "影音")
-        self.assertEqual(collector.classify_repo(["harmonyos"]), "其他")
+        self.assertEqual(collector.classify_repo(["harmonyos"]), "工具")
 
     def test_every_keyword_category_is_submittable(self):
         """关键词表产出的分类必须都在上架白名单里。
@@ -46,26 +47,46 @@ class StoreFeaturesTest(unittest.TestCase):
         for category, _ in collector._CATEGORY_KEYWORDS:
             self.assertIn(category, allowed)
 
-    def test_categories_have_no_duplicates_and_keep_legacy_values(self):
+    def test_categories_are_eight_canonical_names_and_accept_legacy_input(self):
         self.assertEqual(len(app.SUBMIT_CATEGORIES), len(set(app.SUBMIT_CATEGORIES)))
-        # 线上已有记录的取值必须仍然可提交，否则老应用改分类会被拒。
-        for legacy in ("工具", "开发工具", "效率", "影音", "游戏",
-                       "教育", "生活", "系统工具", "其他"):
-            self.assertIn(legacy, app.SUBMIT_CATEGORIES)
+        self.assertEqual(app.SUBMIT_CATEGORIES,
+                         ("影音", "阅读", "社交", "游戏", "工具", "效率", "开发", "生活"))
+        for old, canonical in LEGACY_CATEGORY_ALIASES.items():
+            self.assertEqual(normalize_category(old), canonical)
+            self.assertIn(canonical, CATEGORIES)
+        for invalid in (None, False, [], "unknown", ""):
+            self.assertEqual(normalize_category(invalid), "")
 
     def test_new_categories_are_reachable_by_heuristic(self):
         cases = {
-            "社交通讯": ["chat"],
-            "摄影录像": ["camera"],
-            "出行导航": ["navigation"],
-            "财务": ["accounting"],
-            "安全隐私": ["vpn"],
-            "儿童": ["kids"],
-            "办公": ["spreadsheet"],
-            "学习": ["dictionary"],
+            "社交": ["chat"],
+            "影音": ["music-player"],
+            "阅读": ["rss"],
+            "游戏": ["minecraft"],
+            "生活": ["accounting"],
+            "工具": ["vpn"],
+            "效率": ["spreadsheet"],
+            "开发": ["api-client"],
         }
         for expected, topics in cases.items():
             self.assertEqual(collector.classify_repo(topics), expected)
+
+    def test_category_avoids_english_substring_false_positives(self):
+        for description in ("A guide", "Digital clock", "Rapid image loading"):
+            self.assertEqual(collector.classify_repo([], description), "工具")
+        self.assertEqual(collector.classify_repo(["comic-reader", "audio-player"]), "阅读")
+        self.assertEqual(collector.classify_repo(["game-community"]), "社交")
+        self.assertEqual(collector.classify_repo(["ai-chat"]), "效率")
+        self.assertEqual(collector.classify_repo(["development-tools"]), "开发")
+        self.assertEqual(collector.classify_repo([], "代码编辑工具"), "开发")
+
+    def test_legacy_category_filter_matches_canonical_records(self):
+        db.upsert_app("o/social", display_name="Chat", category="社交", status="published")
+        db.upsert_app("o/tool", display_name="Tool", category="工具", status="published")
+        found = app.h_list_apps({"category": ["社交通讯"]})
+        self.assertEqual(found["total"], 1)
+        self.assertEqual(found["items"][0]["category"], "社交")
+        self.assertEqual(app.h_list_apps({"category": ["unknown"]})["total"], 0)
 
     # ── 版本列表必须跟着上游删 ──────────────────────────────────
     #

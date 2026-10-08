@@ -133,25 +133,22 @@ struct FeaturedCardStars {
       // 光晕先铺底，再绘制星点；渐变在画布内收敛，不留下圆形轮廓。
       const glow = this.ctx.createRadialGradient(w * 0.96, h * 0.12, 0,
         w * 0.96, h * 0.12, Math.max(w * 0.7, h * 1.8));
-      glow.addColorStop(0, this.tier === 3 ? 'rgba(255,225,170,0.16)' :
-        'rgba(223,209,255,0.12)');
-      glow.addColorStop(0.45, this.tier === 3 ? 'rgba(255,225,170,0.05)' :
-        'rgba(223,209,255,0.03)');
+      glow.addColorStop(0, this.tier === 3 ? 'rgba(255,225,170,0.20)' :
+        'rgba(223,209,255,0.16)');
+      glow.addColorStop(0.45, this.tier === 3 ? 'rgba(255,225,170,0.07)' :
+        'rgba(223,209,255,0.05)');
       glow.addColorStop(1, 'rgba(255,255,255,0)');
       this.ctx.fillStyle = glow;
       this.ctx.fillRect(0, 0, w, h);
     }
-    const count = this.tier === 3 ? 30 : this.tier === 2 ? 22 : 16;
+    const count = this.tier === 3 ? 48 : this.tier === 2 ? 34 : 24;
     const gold = this.tier >= 2;
     for (let i = 0; i < count; i++) {
       const x = (this.hash(this.appId, i * 4 + 1) % 10000) / 10000 * w;
       const y = (this.hash(this.appId, i * 4 + 2) % 10000) / 10000 * h;
-      const contentZone = x > 72 && x < w - 78 && y > 12 && y < h - 12;
-      if (contentZone && i % 4 !== 0) continue;
-      const radius = 0.35 + (this.hash(this.appId, i * 4 + 3) % 100) / 100 *
-        (this.tier === 3 ? 1.25 : 0.9);
-      const alpha = (contentZone ? 0.04 : 0.08) +
-        (this.hash(this.appId, i * 4 + 4) % 100) / 100 * 0.16;
+      const radius = 0.5 + (this.hash(this.appId, i * 4 + 3) % 100) / 100 *
+        (this.tier === 3 ? 2.7 : 2.0);
+      const alpha = 0.10 + (this.hash(this.appId, i * 4 + 4) % 100) / 100 * 0.30;
       this.ctx.beginPath();
       this.ctx.arc(x, y, radius, 0, Math.PI * 2);
       this.ctx.fillStyle = gold ? 'rgba(255,226,166,' + alpha.toFixed(2) + ')' :

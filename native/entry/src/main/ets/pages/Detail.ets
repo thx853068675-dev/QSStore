@@ -1,8 +1,9 @@
 import { repositoryUrl } from '../data/RepositoryAddress';
-import { displayVersion } from '../data/DisplayVersion';
+import { displayVersion, releaseDisplayVersion } from '../data/DisplayVersion';
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
 import { InstallCertificatePrompt } from '../components/InstallCertificatePrompt';
 import { CatalogInstallIdentity } from '../jobs/CatalogInstallIdentity';
+import { ReleaseUpdate } from '../jobs/ReleaseUpdate';
 import { InstallCoordinator } from '../jobs/InstallCoordinator';
 import { InstallReconnect } from '../jobs/InstallReconnect';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
@@ -391,19 +392,18 @@ struct Detail {
   /**
    * 选中版本是否比本机装的更新。
    *
-   * 比较用 versionCode，展示用 versionName —— 后者对人可读。
+   * 内部编号阻止降级；同编号的新版以发行版本和已确认的安装摘要判断。
    *
    * 无法核实本机版本时，有本应用的安装记录就用记录中的版本做展示判断；
    * 没有记录则保持未知，由按钮显示「安装/更新」。设备最终版本仍由安装链核实。
    */
   private updateAvailable(): boolean {
-    if (this.installedUnknown) {
-      const recorded = this.installedForApp();
-      return recorded !== undefined && recorded.versionCode > 0 &&
-        this.selectedAsset.versionCode > recorded.versionCode;
-    }
-    if (this.installedVersion <= 0 && this.installedForApp() === undefined) return false;
-    return this.selectedAsset.versionCode > this.installedVersion;
+    const recorded = this.installedForApp();
+    const installed = this.installedUnknown ? recorded?.versionCode ?? -1 : this.installedVersion;
+    const bundle = this.selectedAsset.bundleName || recorded?.bundleName || '';
+    return ReleaseUpdate.available(this.selectedAsset, installed,
+      InstalledAppRegistry.versionName(bundle, installed) || recorded?.versionName || '',
+      this.installedJobs, InstalledAppRegistry.signingIdentity(bundle)?.updateTime ?? 0, bundle);
   }
 
   private selectedDowngrade(): boolean {
@@ -412,8 +412,13 @@ struct Detail {
       release.assets.some((asset: HapAsset) => asset.bundleName === this.selectedAsset.bundleName))
       ?.assets.find((asset: HapAsset) => asset.bundleName === this.selectedAsset.bundleName);
     // 已装构建高于当前频道最新包时应打开应用；手动选择更旧历史包才提示降级。
-    return this.selectedAsset.versionCode > 0 && installed > this.selectedAsset.versionCode &&
-      (latest?.versionCode ?? 0) > this.selectedAsset.versionCode;
+    return latest !== undefined && (this.selectedAsset.url !== latest.url ||
+      this.selectedAsset.versionCode !== latest.versionCode || this.selectedAsset.releaseTag !== latest.releaseTag) &&
+      ReleaseUpdate.older(this.selectedAsset, installed,
+        InstalledAppRegistry.versionName(this.selectedAsset.bundleName, installed), this.installedJobs,
+        InstalledAppRegistry.signingIdentity(this.selectedAsset.bundleName)?.updateTime ?? 0) &&
+      (latest.versionCode > this.selectedAsset.versionCode ||
+        (ReleaseUpdate.compare(ReleaseUpdate.version(latest), ReleaseUpdate.version(this.selectedAsset)) ?? 0) > 0);
   }
 
   private installButtonEnabled(): boolean {
@@ -422,11 +427,12 @@ struct Detail {
     return !this.releaseLoading && this.selectedAsset.name.length > 0 && !this.selectedDowngrade();
   }
 
-  /** 展示实际版本名；缺失时先用 Release 标签，再退回构建号。 */
+  /** 与发现页及版本记录一致展示所选发行版本，设备校验保留包内版本。 */
   private selectedVersionLabel(): string {
-    if (this.selectedAsset.versionName.length > 0) return this.selectedAsset.versionName;
-    const tag = this.currentRelease()?.tag ?? '';
-    if (tag.length > 0) return tag.replace(/^v(?=\d)/i, '');
+    const release = this.currentRelease();
+    const version = releaseDisplayVersion(release?.name ?? '', release?.tag ?? '',
+      this.selectedAsset.versionName, this.app.displayName);
+    if (version.length > 0) return version;
     return this.selectedAsset.versionCode > 0 ? String(this.selectedAsset.versionCode) : '待确认';
   }
 
@@ -555,7 +561,8 @@ struct Detail {
     const release = this.currentRelease();
     if (release === undefined) return '选择版本';
     return (release.prerelease ? '预览版 · ' : '') +
-      displayVersion(release.name.length > 0 ? release.name : release.tag, this.app.displayName) +
+      (releaseDisplayVersion(release.name, release.tag, '', this.app.displayName) ||
+        displayVersion(release.name.length > 0 ? release.name : release.tag, this.app.displayName)) +
       (this.app.secondaryRepo.trim() ? ' · ' + release.sourceLabel() : '') +
       (release.publishedAt.length >= 10 ? '  ·  ' + release.publishedAt.substring(0, 10) : '');
   }
@@ -563,7 +570,8 @@ struct Detail {
   private releaseOptions(): SelectOption[] {
     const options = this.releases.map((release: ReleaseInfo) => {
       const label = (release.prerelease ? '预览版 · ' : '') +
-        displayVersion(release.name.length > 0 ? release.name : release.tag, this.app.displayName) +
+        (releaseDisplayVersion(release.name, release.tag, '', this.app.displayName) ||
+          displayVersion(release.name.length > 0 ? release.name : release.tag, this.app.displayName)) +
         (this.app.secondaryRepo.trim() ? ' · ' + release.sourceLabel() : '') +
         (release.publishedAt.length >= 10 ? '  ·  ' + release.publishedAt.substring(0, 10) : '');
       return { value: label } as SelectOption;
@@ -918,9 +926,13 @@ struct Detail {
       const context = getContext(this) as common.UIAbilityContext;
       const store = await JobStore.open(context);
       const job = await store.enqueue(this.app.id, asset.name, asset.url,
-        asset.sha256, asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode);
+        asset.sha256, asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode,
+        asset.releaseTag, asset.releaseName,
+        (this.installedUnknown ? this.installedForApp()?.versionCode : this.installedVersion) === asset.versionCode);
       if (job.stage === InstallStage.INSTALLED) {
         job.stage = InstallStage.QUEUED; job.stageHistory = []; job.lastError = '';
+        job.reinstallRequired = (this.installedUnknown ? this.installedForApp()?.versionCode : this.installedVersion) === asset.versionCode;
+        job.replacementInstallBaseline = 0;
         await store.save(job);
       }
       if (job.stage === InstallStage.QUEUED) {

@@ -21,7 +21,7 @@ function fixture(t, legacy) {
   const source = fs.readFileSync(path.join(root, 'JobStore.ets'), 'utf8');
   const schema = source.match(/const JOB_SCHEMA = `([\s\S]*?)`;/)[1];
   if (legacy) {
-    db.exec(schema.replace(/^  (renewal_|authorization_expires_at|installed_update_time|installed_fingerprint).*\n/gm, ''));
+    db.exec(schema.replace(/^  (renewal_|authorization_expires_at|installed_update_time|installed_fingerprint|release_tag|release_name|catalog_sha256|replacement_install_baseline).*\n/gm, ''));
     db.prepare(`INSERT INTO install_jobs
       (id, app_id, asset_name, source_url, expected_sha256, bundle_name, version_code,
        stage, cache_path, signed_path, transfer_task_id, attempt, last_error, updated_at)
@@ -82,6 +82,20 @@ for (const legacy of [true, false]) test('renewal journal persists all authoriza
   await store.approveDataLoss(restored.id,{versionCode:7,fingerprint:'A'.repeat(64),appIdentifier:'app'});
   const approved=await store.get(restored.id);assert.equal(approved.allowDataLoss,true);
   assert.equal(approved.approvedInstalledFingerprint,'A'.repeat(64));
+});
+
+for(const legacy of [true,false])test('online release identity, digest and same-code replacement intent survive SQLite restart; legacy='+legacy,async t=>{
+  const f=fixture(t,legacy),store=await f.JobStore.initialize(f.context);
+  const job=await store.enqueue(26,'app.hap','https://github.com/o/r/releases/download/1.2.6/app.hap',
+    'a'.repeat(64),[],'1.0.0','com.example.app',1000000,'1.2.6','LNGA v1.2.6',true);
+  assert.equal(job.reinstallRequired,true);assert.equal(job.expectedSha256,'','metadata digest is not download admission');
+  job.replacementInstallBaseline=1700000000000;await store.save(job);
+  const restored=await store.get(job.id),view=f.jobs.InstallJob.displayCopy(restored);
+  for(const key of ['releaseTag','releaseName','catalogSha256','replacementInstallBaseline','reinstallRequired']){
+    assert.equal(restored[key],job[key],key);assert.equal(view[key],job[key],key+' display');
+  }
+  await f.JobStore.initialize(f.context);
+  assert.equal((await store.get(job.id)).releaseTag,'1.2.6');
 });
 
 test('store renewal is atomic, deduplicated, durable, and safely reuses the original cached bytes', async t => {

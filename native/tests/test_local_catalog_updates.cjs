@@ -1,6 +1,8 @@
 const { loadEts } = require('./load_ets.cjs');
 const { CatalogLookup } = loadEts('data/CatalogLookup');
 const { InstallJob } = loadEts('jobs/InstallJob');
+const ReleaseUpdate = require('./release_update_fixture.cjs').releaseUpdate({ INSTALLED: 'INSTALLED' });
+const { releaseDisplayVersion } = loadEts('data/DisplayVersion');
 // Production update matching and pagination, without a device or network.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -38,14 +40,14 @@ function fixture() {
     f.enqueues.push(args); f.lastJob = { id: 'online', appId: args[0], stage: 'QUEUED' };
     return f.lastJob;
   } };
-  const sandbox = { CatalogLookup, InstallJob, Index: { TAB_MINE: 3 }, InstalledInspection:{selection:(job,title,appId)=>({...job,title,appId})}, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {},
+  const sandbox = { CatalogPackageVariant: loadEts('data/CatalogPackageVariant').CatalogPackageVariant, CatalogLookup, InstallJob, ReleaseUpdate, releaseDisplayVersion, Index: { TAB_MINE: 3 }, InstalledInspection:{selection:(job,title,appId)=>({...job,title,appId})}, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {},
     StoreClient: class { listApps(...args) { f.requests.push(args); return f.fetch(...args); } },
     InstallStage: { QUEUED: 'QUEUED', DOWNLOADING: 'DOWNLOADING', WAITING_NETWORK: 'WAITING_NETWORK',
       INSTALLED: 'INSTALLED' },
     UpdateTarget: class {}, LocalBundles: { isSelfBundle: () => false, isKnown: v => v !== -1,
       installedVersion: () => f.actual, liveInstalledVersion: () => f.actual,
       installedVersionName: () => f.versionName ?? '' },
-    InstalledAppRegistry: { observedAt: () => 0, version: () => f.actual, versionName: () => f.observedName ?? '' },
+    InstalledAppRegistry: { signingIdentity: () => f.signingIdentity, observedAt: () => 0, version: () => f.actual, versionName: () => f.observedName ?? '' },
     StorePageMotion: { pushUrl: value => f.routes.push(value) }, getContext: () => ({}),
     errorText: e => e.message, JobStore: { open: async () => store },
     JobScheduler: { runDownload: async (_, __, job) => f.downloads.push(job) }
@@ -218,6 +220,41 @@ test('Discover enqueues the current update target, not the stale card closure', 
   assert.equal(f.enqueues[0][2], 'https://example.com/app.hap');
   assert.equal(f.downloads.length, 1); assert.equal(f.continued.appId, 7);
   assert.equal(ui.enqueuingAppIds.length, 0);
+});
+
+test('Harmony X filename-changing multi-package releases give Discover and Management the same update', () => {
+  const f=fixture(),ui=f.ui,latest=app(23,'com.haohaoai0.harmonx',16);
+  latest.updatedAt='200';latest.latestAsset.name='HarmonyX-v2.4.2-unsigned.hap';
+  latest.latestAsset.versionName='2.4.2';latest.latestAsset.releaseTag='v2.4.2';
+  const archive={...latest.latestAsset,name:'HarmonyX-v2.4.2-unsigned.app.zip / entry-default.hap'};
+  latest.latestAssets=[latest.latestAsset,archive];
+  const old={...local(),appId:23,bundleName:latest.latestAsset.bundleName,
+    assetName:'HarmonyX-v2.4.0-unsigned.hap',versionCode:14,versionName:'2.4.0'};
+  ui.installedJobs=[old];f.actual=14;f.versionName='2.4.0';
+  ui.apps=[latest];ui.updateCatalog=[{...latest,updatedAt:'100',latestAsset:{...latest.latestAsset,versionCode:14}}];
+  ui.updateCatalogReady=true;ui.checkInstalledUpdates();
+  assert.equal(ui.updateForApp(23).assetName,latest.latestAsset.name);
+  assert.equal(ui.updateFor(old.bundleName).assetName,latest.latestAsset.name);
+  assert.equal(ui.installedActionLabel(old),'更新');
+  f.actual=16;f.versionName='2.4.2';ui.checkInstalledUpdates();
+  assert.equal(ui.updateForApp(23),undefined);assert.equal(ui.installedActionLabel(old),'打开');
+});
+
+test('same-code LNGA release updates are shared and enqueue a durable explicit replacement intent',async()=>{
+  const f=fixture(),ui=f.ui,latest=app(26,'com.example.app',1000000);
+  latest.latestAsset.versionName='1.0.0';latest.latestAsset.releaseTag='1.2.6';
+  latest.latestAsset.sha256='b'.repeat(64);
+  const old={...local(),appId:26,assetName:'app.hap',versionCode:1000000,versionName:'1.0.0',
+    releaseTag:'1.2.5',expectedSha256:'a'.repeat(64),stageHistory:[{stage:'INSTALLED',at:100}]};
+  f.actual=1000000;f.versionName='1.0.0';ui.installedJobs=[old];ui.apps=[latest];
+  ui.checkInstalledUpdates();assert.equal(ui.installedActionLabel(old),'更新');
+  assert.equal(ui.updateForApp(26).assetSha256,latest.latestAsset.sha256);
+  await ui.installFromCatalog(latest);
+  assert.equal(f.enqueues[0][8],'1.2.6');assert.equal(f.enqueues[0][10],true);
+  ui.installedJobs=[{...old,releaseTag:'1.2.6',expectedSha256:'b'.repeat(64),
+    stageHistory:[{stage:'INSTALLED',at:200}]}];ui.checkInstalledUpdates();
+  assert.equal(ui.installedActionLabel(ui.installedJobs[0]),'打开');
+  assert.equal(ui.updateForApp(26),undefined);assert.equal(ui.versionLabel(ui.installedJobs[0]),'1.2.6');
 });
 test('a stale Discover update click cannot reinstall a version already installed', async () => {
   const f = fixture(), { ui } = f;

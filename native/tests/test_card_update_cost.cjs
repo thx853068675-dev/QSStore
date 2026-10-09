@@ -3,10 +3,10 @@ const ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.a
 const s=fs.readFileSync(__dirname+'/../entry/src/main/ets/pages/Index.ets','utf8'),a=s.indexOf('  private updateForApp(');
 const method=s.slice(a,s.indexOf('\n  }',a)+4);
 function fixture(version){
- const box={LocalBundles:{isKnown:v=>v>=0},UpdateTarget:class{}};
+ const box={ReleaseUpdate:require('./release_update_fixture.cjs').releaseUpdate(),InstalledAppRegistry:{versionName:()=>'',signingIdentity:()=>undefined},LocalBundles:{isKnown:v=>v>=0},UpdateTarget:class{}};
  vm.runInNewContext(ts.transpileModule('class Page{'+method+'};globalThis.Page=Page;',{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
  const asset={bundleName:'one',versionCode:2,name:'app.hap',url:'https://source/app.hap',versionName:'2'},f={merges:0};
- f.ui=Object.assign(new box.Page(),{catalogApp:()=>({latestAsset:asset}),assetForBundle:()=>asset,
+ f.ui=Object.assign(new box.Page(),{installedJobs:[],catalogApp:()=>({latestAsset:asset}),assetForBundle:()=>asset,
   displayInstalledVersion:()=>version,allInstalledJobs:()=>{f.merges++;return [{bundleName:'one',versionCode:1}];},installedVersionOf:()=>-1});return f;
 }
 test('known device versions skip complete inventory merging for every card getter, including absent/current/newer versions',()=>{

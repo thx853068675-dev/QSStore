@@ -30,6 +30,7 @@ function fixture(disk = new Map()) {
     return exports;
   }
   f.registry = load('ReleaseChannelRegistry').ReleaseChannelRegistry;
+  f.catalog = row => load('CatalogApp').CatalogApp.fromJson(row);
   f.app = (id = 7) => load('CatalogApp').CatalogApp.fromJson({ id, display_name: 'App',
     latest: { name: 'Stable' }, latest_asset: { name: 'app.hap', url: 'https://example.com/stable.hap',
       bundle_name: 'com.example.app', version_code: 2, version_name: '2', sha256: 'a'.repeat(64) } });
@@ -40,6 +41,59 @@ function fixture(disk = new Map()) {
   return f;
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+test('Discover uses the LNGA release version from a server or cached row without changing signing metadata', () => {
+  const f = fixture();
+  const { releaseDisplayVersion } = loadEts('data/DisplayVersion');
+  const row = { id: 26, display_name: 'LNGA', latest: { name: 'v1.2.5', tag: '1.2.6' },
+    latest_asset: { name: 'entry-default-unsigned.hap',
+      url: 'https://github.com/apap6628114/lnga_harmony/releases/download/1.2.6/entry-default-unsigned.hap',
+      bundle_name: 'com.example.nga_oh', version_code: 1000000, version_name: '1.0.0' } };
+  const source = fs.readFileSync(path.join(root, 'pages/Index.ets'), 'utf8');
+  const at = source.indexOf('  private latestVersionTag(');
+  const method = source.slice(at, source.indexOf('\n  }', at) + 4);
+  const box = { ReleaseChannelRegistry: f.registry, releaseDisplayVersion };
+  vm.runInNewContext(ts.transpileModule(`class Page { ${method} }; globalThis.Page = Page;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, box);
+  const ui = new box.Page();
+  for (const raw of [row, JSON.parse(JSON.stringify(row))]) {
+    const app = f.catalog(raw);
+    assert.equal(ui.latestVersionTag(app), 'v1.2.6');
+    assert.equal(app.latestAsset.versionName, '1.0.0');
+    assert.equal(app.latestAsset.versionCode, 1000000);
+  }
+});
+test('packages from an older release never inherit another bundle’s latest release name', () => {
+  const f = fixture(), { releaseDisplayVersion } = loadEts('data/DisplayVersion');
+  const make = (name, tag) => ({ name: name+'.hap', url: `https://github.com/o/r/releases/download/${tag}/${name}.hap`,
+    version_code: 1000000, version_name: '1.0.0', bundle_name: 'com.example.'+name });
+  const app = f.catalog({ id: 1, latest: { name: 'v1.2.6', tag: '1.2.6' },
+    latest_asset: make('main', '1.2.6'), latest_assets: [make('main','1.2.6'), make('helper','1.2.5')] });
+  assert.deepEqual(Array.from(app.latestAssets, a => releaseDisplayVersion(a.releaseName, a.releaseTag,
+    a.versionName)), ['1.2.6','1.2.5']);
+});
+test('preview release versions survive persistence and migrate earlier snapshots using their own attachment URLs', async () => {
+  const f = fixture(), { releaseDisplayVersion } = loadEts('data/DisplayVersion');
+  const release = f.release(3);
+  release.name = 'v1.2.6-beta.1'; release.tag = 'v1.2.6-beta.1';
+  release.assets[0].releaseName = release.name; release.assets[0].releaseTag = release.tag;
+  release.assets[0].versionName = '1.0.0';
+  release.assets[0].url = 'https://github.com/o/r/releases/download/v1.2.6-beta.1/app.hap';
+  await f.registry.select({}, 7, true, [release]);
+  for (const migrate of [false, true]) {
+    const disk = new Map(f.disk);
+    if (migrate) {
+      const saved = JSON.parse(disk.get('release-channel-targets:targets'));
+      for (const target of saved) for (const asset of target.assets) {
+        delete asset.releaseName; delete asset.releaseTag;
+      }
+      disk.set('release-channel-targets:targets', JSON.stringify(saved));
+    }
+    const restart = fixture(disk); await restart.registry.restore({});
+    const asset = restart.registry.apply(restart.app()).latestAsset;
+    assert.equal(releaseDisplayVersion(asset.releaseName, asset.releaseTag, asset.versionName), '1.2.6-beta.1');
+    assert.equal(asset.versionName, '1.0.0'); assert.equal(asset.versionCode, 3);
+  }
+});
 test('a mirror updating one bundle keeps the other primary preview package and all current variants', async () => {
   const f = fixture(), newest = f.release(4), primary = f.release(3), older = f.release(2);
   newest.sourceKind = 'secondary';
@@ -101,8 +155,8 @@ test('Discovery and Management calculate the same preview update entirely from o
     'checkInstalledUpdates', 'updateFor'];
   const methods = names.map(name => { const start = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
     assert.ok(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4); });
-  const box = { CatalogLookup, InstallJob, ReleaseChannelRegistry: f.registry, UpdateTarget: class {},
-    InstalledAppRegistry: { observedAt: () => 0, version: () => -1, versionName: () => '' }, InstallStage: { INSTALLED: 'INSTALLED' },
+  const box = { CatalogPackageVariant: loadEts('data/CatalogPackageVariant').CatalogPackageVariant, CatalogLookup, InstallJob, ReleaseUpdate: require('./release_update_fixture.cjs').releaseUpdate({ INSTALLED: 'INSTALLED' }), ReleaseChannelRegistry: f.registry, UpdateTarget: class {},
+    InstalledAppRegistry: { signingIdentity: () => undefined, observedAt: () => 0, version: () => -1, versionName: () => '' }, InstallStage: { INSTALLED: 'INSTALLED' },
     LocalBundles: { isKnown: v => v >= 0, installedVersion() { throw Error('render invoked synchronous system query'); } } };
   vm.runInNewContext(ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, box);

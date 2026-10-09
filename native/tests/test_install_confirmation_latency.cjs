@@ -66,6 +66,22 @@ test('same-version renewal stays resumable when replacement cannot be confirmed'
   assert.equal(f.job.reinstallRequired, true); assert.match(f.job.lastError, /尚未确认授权替换/);
 });
 
+test('same-code online updates submit once and wait for replacement proof instead of accepting the old installed number',async()=>{
+  const f=fixture(0);f.job.appId=26;f.job.reinstallRequired=true;
+  f.runtime.installedVersion=async()=>f.job.versionCode;
+  let checks=0;f.runtime.confirmReplacement=async()=>++checks===3;
+  await f.runner.run('job');
+  assert.equal(f.installs,1);assert.equal(f.job.stage,f.stages.INSTALLED);
+  assert.equal(checks,3);assert.equal(f.job.reinstallRequired,false);
+});
+test('same-code update without replacement evidence remains retryable and never becomes a completed release record',async()=>{
+  const f=fixture(0);f.job.appId=26;f.job.reinstallRequired=true;
+  f.runtime.installedVersion=async()=>f.job.versionCode;f.runtime.confirmReplacement=async()=>false;
+  await f.runner.run('job');
+  assert.equal(f.installs,1);assert.equal(f.job.stage,f.stages.RETRYABLE_ERROR);
+  assert.equal(f.job.reinstallRequired,true);
+});
+
 test('a transient post-install query failure retries only the result and finishes without resubmission', async () => {
   const f = fixture(0), original = f.runtime.installedVersion; let failures = 0;
   f.runtime.installedVersion = async () => {

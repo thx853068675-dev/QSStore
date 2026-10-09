@@ -49,6 +49,8 @@ function fixture() {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText;
   const sandbox = { InstallStage, LocalBundles: f.LocalBundles, getContext: () => ({}),
+    ReleaseUpdate: require('./release_update_fixture.cjs').releaseUpdate(),
+    InstalledAppRegistry: { versionName: () => '1.0.0' },
     JobScheduler: { isRunning: id => f.running.has(id) },
     JobStore: { open: async () => ({ listAll: async () => f.jobs,
       save: async job => f.saved.push(JSON.parse(JSON.stringify(job))) }) },
@@ -57,6 +59,7 @@ function fixture() {
       return f.remoteVersion;
     } } };
   vm.runInNewContext(code, sandbox); f.ui = new sandbox.Page();
+  f.ui.installedJobs = [];
   f.ui.loadJobs = async () => {};
   return f;
 }
@@ -94,6 +97,17 @@ test('reconciliation ignores a stale display version and confirms the actual ins
   await f.ui.reconcileInterruptedInstalls();
   assert.equal(f.probes, 1);
   assert.equal(f.saved[0].stage, InstallStage.INSTALLED);
+});
+
+test('restart does not falsely finish a legacy higher release sharing the old installed build number',async()=>{
+  const f=fixture(),pending=job();pending.appId=26;
+  pending.sourceUrl='https://github.com/o/r/releases/download/1.2.6/app.hap';pending.versionName='1.0.0';
+  const old=job(InstallStage.INSTALLED);old.appId=26;old.updatedAt=1000;
+  old.stageHistory=[{stage:InstallStage.INSTALLED,at:1000}];old.versionName='1.0.0';
+  old.sourceUrl='https://github.com/o/r/releases/download/1.2.5/app.hap';
+  f.jobs=[pending];f.ui.installedJobs=[old];await f.ui.reconcileInterruptedInstalls();
+  assert.equal(f.saved[0].reinstallRequired,true);
+  assert.equal(f.saved[0].stage,InstallStage.RETRYABLE_ERROR);
 });
 test('runtime confirms installed version locally and only uses HDC when the system cannot answer', async () => {
   const f = localBundles(); let probes = 0;

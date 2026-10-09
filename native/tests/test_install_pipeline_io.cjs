@@ -7,6 +7,7 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 
 function loadRuntime(mocks) {
+  mocks['./ReleaseUpdate']={ReleaseUpdate:require('./release_update_fixture.cjs').releaseUpdate()};
   mocks['../data/CertificateRejection']=rejectionExports;
   mocks['./InstallTaskState'] = { InstallTaskState: { installProgress: () => {} } };
   const file = path.join(__dirname, '../entry/src/main/ets/jobs/NativeJobRuntime.ets');
@@ -197,6 +198,46 @@ function renewalFixture({ sameCertificate = true, sameApp = false, alternateCert
     renewalPreviousExpiry: 0, renewalExpiresAt: 0, renewalInstallBaseline: 0, reinstallRequired: true });
   return { ...f, installed };
 }
+
+test('same-code online update persists its installation baseline and only a newer matching device identity can recover success',async()=>{
+  const installed={versionCode:7,fingerprint:'A'.repeat(64),appIdentifier:'installed-app-id',updateTime:1000};
+  const f=fixture(7,false,true,false,installed);
+  Object.assign(f.job,{id:'release-update',appId:26,reinstallRequired:true,replacementInstallBaseline:0});
+  await f.runtime.install(f.job);
+  assert.equal(f.calls.installs,1);assert.equal(f.job.replacementInstallBaseline,1000);
+  assert.ok(f.calls.saved.some(j=>j.replacementInstallBaseline===1000));
+  assert.equal(await f.runtime.confirmReplacement(f.job),false,'old same-code package is not success');
+  f.runtime.confirmedSubmission='';
+  installed.updateTime=2000;installed.fingerprint='B'.repeat(64);
+  assert.equal(await f.runtime.confirmReplacement(f.job),false,'unrelated external signature is not proof');
+  installed.fingerprint='A'.repeat(64);
+  const evidence=await f.runtime.inspectEvidence(f.job);
+  assert.equal(evidence.replacementConfirmed,true);assert.equal(f.job.installedUpdateTime,2000);
+  assert.equal(f.calls.hapHashes,0,'confirmed installed replacement needs no package re-download or hash');
+});
+
+test('a legacy same-code pending release task cannot recover as installed merely because the old package shares its build number',async()=>{
+  const f=fixture(7,false,true);
+  Object.assign(f.job,{id:'legacy-pending',appId:26,sourceUrl:'https://github.com/o/r/releases/download/1.2.6/app.hap',
+    stage:'retryable_error',versionName:'1.0.0',reinstallRequired:false});
+  f.calls.previousJobs=[{id:'old',appId:26,bundleName:f.job.bundleName,versionCode:7,
+    versionName:'1.0.0',sourceUrl:'https://github.com/o/r/releases/download/1.2.5/app.hap',
+    stage:'installed',updatedAt:1000}];
+  await f.runtime.inspectEvidence(f.job);
+  assert.equal(f.job.reinstallRequired,true);
+  assert.ok(f.calls.saved.some(j=>j.reinstallRequired));
+});
+
+test('same-code update recovers a lost checksum-error receipt without repeating the successful installation',async()=>{
+  const installed={versionCode:7,fingerprint:'A'.repeat(64),appIdentifier:'installed-app-id',updateTime:1000};
+  const f=fixture(7,false,true,false,installed);
+  Object.assign(f.job,{id:'release-update',appId:26,reinstallRequired:true,replacementInstallBaseline:0});
+  f.calls.installErrors=['APP module transfer checksum differs'];f.calls.applyBeforeInstallError=true;
+  await f.runtime.install(f.job);
+  assert.equal(f.calls.installs,1);assert.equal(f.job.installedUpdateTime,1001);
+  f.runtime.confirmedSubmission='';await f.runtime.install(f.job);
+  assert.equal(f.calls.installs,1,'restart reconciles the original persisted baseline');
+});
 test('an old valid Profile is never accepted as evidence of a new renewal', async () => {
   const f = renewalFixture();
   f.job.deviceUdid = 'a'.repeat(64); f.job.signedProfileSha256 = 'profile';

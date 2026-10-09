@@ -7,7 +7,7 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
   '../entry/src/main/ets/data/DisplayVersion.ets'), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
 }).outputText, { exports: exportsForTest });
-const { displayVersion } = exportsForTest;
+const { displayVersion, releaseDisplayVersion } = exportsForTest;
 
 test('known names tolerate spaces, hyphens, underscores and separator changes', () => {
   for (const value of ['My App  1.2.3', 'My-App-v1.2.3', 'My_App : v1.2.3', 'MY—APP 1.2.3'])
@@ -34,4 +34,23 @@ test('uncertain labels remain intact and extraction does not mutate original val
   assert.equal(displayVersion(raw,'MyApp'),'1.2.3-beta.2+build.9');
   assert.equal(raw,'MyApp-v1.2.3-beta.2+build.9');
   assert.equal(displayVersion('  '),'');
+});
+
+test('LNGA release 1.2.6 is displayed even when its HAP manifest remains 1.0.0', () => {
+  assert.equal(releaseDisplayVersion('v1.2.6', '1.2.6', '1.0.0', 'LNGA'), '1.2.6');
+  assert.equal(releaseDisplayVersion('修复发布', '1.2.6', '1.0.0', 'LNGA'), '1.2.6');
+  assert.equal(releaseDisplayVersion('正式版', 'HM', '1.0.0', 'LNGA'), '1.0.0');
+});
+
+test('release tags take precedence over conflicting titles and manifest versions', () => {
+  assert.equal(releaseDisplayVersion('LNGA v1.2.5', 'v1.2.6', '1.0.0', 'LNGA'), '1.2.6');
+  assert.equal(releaseDisplayVersion('v1.2.6', 'v1.2.7-beta.2', '1.0.0', 'LNGA'), '1.2.7-beta.2');
+  assert.equal(releaseDisplayVersion('LNGA v1.2.6', 'stable', '1.0.0', 'LNGA'), '1.2.6');
+});
+
+test('release labels preserve preview suffixes and fall back without inventing a version', () => {
+  assert.equal(releaseDisplayVersion('轻启 · 安装器-v0.4.56-pre', 'v0.4.56-pre', '0.4.56-pre',
+    '轻启·安装器'), '0.4.56-pre');
+  assert.equal(releaseDisplayVersion('', 'nightly', '2.1.3-beta.1'), '2.1.3-beta.1');
+  assert.equal(releaseDisplayVersion('nightly', 'main', ''), '');
 });

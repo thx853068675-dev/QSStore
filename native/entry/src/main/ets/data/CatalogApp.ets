@@ -68,6 +68,14 @@ export class CatalogApp {
     const assets = row['latest_assets'] as Record<string, Object>[] | undefined;
     app.latestAssets = assets ? assets.map((item: Record<string, Object>) => HapAsset.fromJson(item)) :
       (app.latestAsset !== undefined ? [app.latestAsset] : []);
+    const tag = latest ? String(latest['tag'] ?? '') : '';
+    // 多包目录可能包含其他发行记录的附件，只给地址对应的包附上当前发行版本。
+    for (const item of app.latestAssets.concat(app.latestAsset !== undefined ? [app.latestAsset] : [])) {
+      if (tag.length > 0 && HapAsset.tagFromUrl(item.url) === tag) {
+        item.releaseTag = tag;
+        item.releaseName = app.latestName;
+      }
+    }
     return app;
   }
 }

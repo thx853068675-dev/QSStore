@@ -94,7 +94,7 @@ function method(name) {
   assert(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
 }
 function pageFixture(registry) {
-  const box = { CatalogLookup, InstallJob, InstallStage: { INSTALLED: 'installed' }, ReleaseChannelRegistry: { apply: app => app },
+  const box = { CatalogLookup, InstallJob, ReleaseUpdate: require('./release_update_fixture.cjs').releaseUpdate(), InstallStage: { INSTALLED: 'installed' }, ReleaseChannelRegistry: { apply: app => app },
     InstalledSigningExpiry: load('jobs/InstalledSigningExpiry', {}).InstalledSigningExpiry,
     InstalledAppRegistry: registry ?? { version: () => -1, observedAt: () => 0, versionName: () => '', displayName: () => '', installationTime: () => 0 } };
   box.AppDisplayName = load('data/AppDisplayName', {

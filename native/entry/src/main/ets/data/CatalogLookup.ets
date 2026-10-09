@@ -15,7 +15,20 @@ export class CatalogLookup {
   constructor(primary: CatalogApp[], visible: CatalogApp[], complete: boolean, revision: number,
     project: (app: CatalogApp) => CatalogApp) {
     this.primary = primary; this.visible = visible; this.complete = complete; this.revision = revision;
-    this.rows = primary.map(project);
+    const sources = new Map<number, CatalogApp>();
+    for (const app of primary) sources.set(app.id, app);
+    for (const app of visible) {
+      const original = sources.get(app.id);
+      if (original === undefined) {
+        if (!complete) sources.set(app.id, app);
+        continue;
+      }
+      const at = Number(app.updatedAt), previousAt = Number(original.updatedAt);
+      if ((Number.isFinite(at) && at > (Number.isFinite(previousAt) ? previousAt : 0)) ||
+        ((!Number.isFinite(at) || !Number.isFinite(previousAt) || at === previousAt) &&
+          (app.latestAsset?.versionCode ?? 0) > (original.latestAsset?.versionCode ?? 0))) sources.set(app.id, app);
+    }
+    this.rows = Array.from(sources.values()).map(project);
     for (const app of this.rows) {
       this.byId.set(app.id, app);
       this.primaryById.set(app.id, app);
@@ -25,14 +38,6 @@ export class CatalogLookup {
         bundles.add(asset.bundleName);
         const matches = this.byBundle.get(asset.bundleName) ?? [];
         matches.push(app); this.byBundle.set(asset.bundleName, matches);
-      }
-    }
-    const primaryById = new Map<number, CatalogApp>();
-    for (const app of primary) primaryById.set(app.id, app);
-    for (const app of visible) {
-      const original = primaryById.get(app.id);
-      if (original === undefined || (app.latestAsset?.versionCode ?? 0) > (original.latestAsset?.versionCode ?? 0)) {
-        this.byId.set(app.id, project(app));
       }
     }
   }

@@ -64,6 +64,8 @@ export class ReleaseChannelRegistry {
               asset.bundleName = String(item['bundleName'] ?? '');
               asset.versionCode = Number(item['versionCode'] ?? 0);
               asset.versionName = String(item['versionName'] ?? '');
+              asset.releaseName = String(item['releaseName'] ?? '');
+              asset.releaseTag = String(item['releaseTag'] ?? '') || HapAsset.tagFromUrl(asset.url);
               const mirrors = item['mirrorUrls'] as string[] | undefined;
               asset.mirrorUrls = Array.isArray(mirrors) ? mirrors.filter((url: string) =>
                 typeof url === 'string' && /^https:\/\//.test(url)) : [];

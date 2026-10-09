@@ -6,7 +6,7 @@ export function recoveryStage(job: InstallJob, evidence: RecoveryEvidence): Inst
   if (job.stage === InstallStage.TERMINAL_ERROR) {
     return InstallStage.TERMINAL_ERROR;
   }
-  if (!job.reinstallRequired && job.bundleName.length > 0 && job.versionCode > 0 &&
+  if ((!job.reinstallRequired || evidence.replacementConfirmed) && job.bundleName.length > 0 && job.versionCode > 0 &&
     evidence.installedVersionCode === job.versionCode) {
     return InstallStage.INSTALLED;
   }

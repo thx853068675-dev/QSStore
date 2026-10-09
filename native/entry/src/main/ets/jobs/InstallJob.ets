@@ -34,6 +34,12 @@ export class InstallJob {
   /** 目录声明的身份，仅用于核对下载的 HAP；空值表示旧任务或本地导入。 */
   catalogBundleName: string = '';
   catalogVersionCode: number = 0;
+  releaseTag: string = '';
+  releaseName: string = '';
+  /** 目录摘要仅用于版本识别，不作为下载准入条件。 */
+  catalogSha256: string = '';
+  /** 相同内部编号覆盖前的设备安装时间，恢复时不能把旧包当成新包。 */
+  replacementInstallBaseline: number = 0;
   bundleName: string = '';
   versionCode: number = 0;
   moduleName: string = '';
@@ -91,6 +97,10 @@ export class InstallJob {
     copy.expectedSha256 = job.expectedSha256;
     copy.catalogBundleName = job.catalogBundleName;
     copy.catalogVersionCode = job.catalogVersionCode;
+    copy.releaseTag = job.releaseTag;
+    copy.releaseName = job.releaseName;
+    copy.catalogSha256 = job.catalogSha256;
+    copy.replacementInstallBaseline = job.replacementInstallBaseline;
     copy.bundleName = job.bundleName;
     copy.versionCode = job.versionCode;
     copy.moduleName = job.moduleName;
@@ -145,6 +155,7 @@ export class RecoveryEvidence {
   verifiedSignature: boolean = false;
   deviceConnected: boolean = false;
   installedVersionCode: number = 0;
+  replacementConfirmed: boolean = false;
 }
 
 export enum FailureKind {

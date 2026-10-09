@@ -67,11 +67,12 @@ test('multi-HAP and empty preview channels retain installed identity without inv
   assert.equal(lookup.source(1, primary.latestAsset.bundleName), projected);
 });
 
-test('visible newer metadata keeps the existing selection rule while channel revision rebuilds the lookup', () => {
+test('visible newer metadata is shared by every lookup while channel revision rebuilds the projection', () => {
   const primary = [app(1, 'com.one.app', 2)], visible = [app(1, 'com.one.app', 3)];
   const lookup = new CatalogLookup(primary, visible, true, 1, row => ({ ...row, preview: true }));
   assert.equal(lookup.app(1).latestAsset.versionCode, 3);
-  assert.equal(lookup.source(1, 'com.one.app').latestAsset.versionCode, 2);
+  assert.equal(lookup.source(1, 'com.one.app').latestAsset.versionCode, 3);
+  assert.equal(lookup.rows[0].latestAsset.versionCode, 3);
   assert(lookup.matches(primary, visible, true, 1));
   for (const args of [[primary.slice(), visible, true, 1], [primary, visible.slice(), true, 1],
     [primary, visible, false, 1], [primary, visible, true, 2]]) assert(!lookup.matches(...args));

@@ -19,6 +19,10 @@ const JOB_SCHEMA = `CREATE TABLE IF NOT EXISTS install_jobs (
   expected_sha256 TEXT NOT NULL,
   catalog_bundle_name TEXT NOT NULL DEFAULT '',
   catalog_version_code INTEGER NOT NULL DEFAULT 0,
+  release_tag TEXT NOT NULL DEFAULT '',
+  release_name TEXT NOT NULL DEFAULT '',
+  catalog_sha256 TEXT NOT NULL DEFAULT '',
+  replacement_install_baseline INTEGER NOT NULL DEFAULT 0,
   bundle_name TEXT NOT NULL,
   version_code INTEGER NOT NULL,
   version_name TEXT NOT NULL DEFAULT '',
@@ -151,13 +155,18 @@ export class JobStore implements DownloadJournal {
     }
     for (const name of ['renewal_requested_at', 'renewal_prepared_at',
       'renewal_previous_expiry', 'renewal_expires_at', 'renewal_install_baseline',
-      'authorization_expires_at', 'installed_update_time']) {
+      'authorization_expires_at', 'installed_update_time', 'replacement_install_baseline']) {
       if (!availableColumns.has(name)) {
         await db.executeSql('ALTER TABLE install_jobs ADD COLUMN ' + name + ' INTEGER NOT NULL DEFAULT 0');
       }
     }
     if (!availableColumns.has('installed_fingerprint')) {
       await db.executeSql("ALTER TABLE install_jobs ADD COLUMN installed_fingerprint TEXT NOT NULL DEFAULT ''");
+    }
+    for (const name of ['release_tag', 'release_name', 'catalog_sha256']) {
+      if (!availableColumns.has(name)) {
+        await db.executeSql('ALTER TABLE install_jobs ADD COLUMN ' + name + " TEXT NOT NULL DEFAULT ''");
+      }
     }
     if (!hasStagedTicket) {
       await db.executeSql("ALTER TABLE install_jobs ADD COLUMN staged_ticket TEXT NOT NULL DEFAULT ''");
@@ -260,8 +269,9 @@ export class JobStore implements DownloadJournal {
        approved_installed_fingerprint, approved_installed_app_identifier,
        attempt, last_error, updated_at, staged_ticket,
        renewal_requested_at, renewal_prepared_at, renewal_previous_expiry, renewal_expires_at, renewal_install_baseline,
-       authorization_expires_at, installed_update_time, installed_fingerprint)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       authorization_expires_at, installed_update_time, installed_fingerprint,
+       release_tag, release_name, catalog_sha256, replacement_install_baseline)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [job.id, job.appId, job.assetName, job.sourceUrl, JSON.stringify(job.mirrorUrls),
        job.expectedSha256, job.catalogBundleName, job.catalogVersionCode,
        job.bundleName, job.versionCode, job.versionName, JSON.stringify(job.stageHistory),
@@ -274,7 +284,8 @@ export class JobStore implements DownloadJournal {
        job.attempt, job.lastError, job.updatedAt, job.stagedTicket ?? '',
        job.renewalRequestedAt ?? 0, job.renewalPreparedAt ?? 0,
        job.renewalPreviousExpiry ?? 0, job.renewalExpiresAt ?? 0, job.renewalInstallBaseline ?? 0,
-       job.authorizationExpiresAt ?? 0, job.installedUpdateTime ?? 0, job.installedFingerprint ?? '']
+       job.authorizationExpiresAt ?? 0, job.installedUpdateTime ?? 0, job.installedFingerprint ?? '',
+       job.releaseTag ?? '', job.releaseName ?? '', job.catalogSha256 ?? '', job.replacementInstallBaseline ?? 0]
     );
     if (JobCancellation.isCancelled(job.id)) {
       await this.rememberCancelledFiles(job);
@@ -312,7 +323,8 @@ export class JobStore implements DownloadJournal {
   async enqueue(appId: number, assetName: string, sourceUrl: string,
     expectedSha256: string, mirrorUrls: string[] = [],
     versionName: string = '', catalogBundleName: string = '',
-    catalogVersionCode: number = 0): Promise<InstallJob> {
+    catalogVersionCode: number = 0, releaseTag: string = '', releaseName: string = '',
+    reinstallRequired: boolean = false): Promise<InstallJob> {
     if (appId <= 0 || assetName.length === 0 || sourceUrl.length === 0 ||
       !/^https:\/\//.test(sourceUrl)) {
       throw new Error('安装任务缺少 HTTPS 下载地址');
@@ -337,6 +349,10 @@ export class JobStore implements DownloadJournal {
         existing.mirrorUrls = candidates;
         await this.save(existing);
       }
+      if (isPending(existing.stage) && reinstallRequired && !existing.reinstallRequired) {
+        existing.reinstallRequired = true;
+        await this.save(existing);
+      }
       return existing;
     }
     const job = InstallJob.create(id, appId, assetName,
@@ -345,6 +361,8 @@ export class JobStore implements DownloadJournal {
     job.versionName = versionName;
     job.catalogBundleName = catalogBundleName;
     job.catalogVersionCode = catalogVersionCode;
+    job.releaseTag = releaseTag; job.releaseName = releaseName; job.catalogSha256 = catalogSha;
+    job.reinstallRequired = reinstallRequired;
     await this.save(job);
     return job;
   }
@@ -648,7 +666,8 @@ export class JobStore implements DownloadJournal {
         'signed_profile_sha256', 'signing_cert_id', 'reinstall_required', 'renewal_requested_at', 'renewal_prepared_at',
         'renewal_previous_expiry', 'renewal_expires_at', 'renewal_install_baseline', 'authorization_expires_at', 'installed_update_time',
         'installed_fingerprint', 'allow_data_loss', 'approved_installed_version', 'approved_installed_fingerprint', 'approved_installed_app_identifier',
-        'transfer_task_id', 'staged_ticket', 'attempt', 'last_error', 'updated_at'
+        'transfer_task_id', 'staged_ticket', 'attempt', 'last_error', 'updated_at',
+        'release_tag', 'release_name', 'catalog_sha256', 'replacement_install_baseline'
       ]) columns.set(name, result.getColumnIndex(name));
       let sliceStartedAt = Date.now();
       while (result.goToNextRow()) {
@@ -668,6 +687,10 @@ export class JobStore implements DownloadJournal {
         job.expectedSha256 = result.getString(columns.get('expected_sha256')!);
         job.catalogBundleName = result.getString(columns.get('catalog_bundle_name')!);
         job.catalogVersionCode = result.getLong(columns.get('catalog_version_code')!);
+        job.releaseTag = result.getString(columns.get('release_tag')!);
+        job.releaseName = result.getString(columns.get('release_name')!);
+        job.catalogSha256 = result.getString(columns.get('catalog_sha256')!);
+        job.replacementInstallBaseline = result.getLong(columns.get('replacement_install_baseline')!);
         job.bundleName = result.getString(columns.get('bundle_name')!);
         job.versionCode = result.getLong(columns.get('version_code')!);
         job.versionName = result.getString(columns.get('version_name')!);

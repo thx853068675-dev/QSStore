@@ -292,12 +292,14 @@ test('detected exact version finishes an old paused task without starting an ins
   const method = source.slice(start, source.indexOf('\n  }', start) + 4);
   const saved = [];
   const sandbox = { InstallStage, getContext: () => ({}), isPending: s => s !== InstallStage.INSTALLED,
+    ReleaseUpdate: require('./release_update_fixture.cjs').releaseUpdate(),
+    InstalledAppRegistry: { versionName: () => '' },
     JobScheduler: { isRunning: () => false },
     JobStore: { open: async () => ({ get: async () => row, save: async value => saved.push(value) }) } };
   vm.runInNewContext(ts.transpileModule(`class Page { ${method} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, sandbox);
-  const ui = new sandbox.Page(); ui.installTasks = [{ job: row, running: false }];
+  const ui = new sandbox.Page(); ui.installTasks = [{ job: row, running: false }]; ui.installedJobs = [];
   await ui.reconcileDetectedJobs(new Map([[bundle, 110002]])); assert.equal(saved.length, 0);
   await ui.reconcileDetectedJobs(new Map([[bundle, 110003]]));
   assert.equal(saved[0].stage, InstallStage.INSTALLED); assert.equal(saved[0].lastError, '');

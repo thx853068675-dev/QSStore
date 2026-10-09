@@ -46,7 +46,9 @@ function pageClass(name, methods, globals) {
   return new sandbox.Page();
 }
 function pages(f) {
-  const globals = { InstallTaskState: f.state, InstallStage: f.InstallStage,
+  const globals = { CatalogPackageVariant: f.load('data/CatalogPackageVariant').CatalogPackageVariant, InstallTaskState: f.state, InstallStage: f.InstallStage,
+    ReleaseUpdate: f.load('jobs/ReleaseUpdate').ReleaseUpdate,
+    InstalledAppRegistry: { versionName: () => '', signingIdentity: () => undefined },
     LocalInstallTimeline: f.load('jobs/LocalInstallTimeline').LocalInstallTimeline,
     setInterval: () => 1, clearInterval: () => {},
     isPending: f.load('jobs/RecoveryPlanner').isPending };

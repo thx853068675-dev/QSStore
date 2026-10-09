@@ -43,3 +43,15 @@ export function displayVersion(raw: string, appName: string = ''): string {
   if (build) result += '+' + build[1];
   return result;
 }
+
+/** 展示优先级：发行标签、发行标题、包内版本；内部编号仍用于签装和设备校验。 */
+export function releaseDisplayVersion(releaseName: string, releaseTag: string,
+  packageVersion: string, appName: string = ''): string {
+  for (const raw of [releaseTag, releaseName]) {
+    const version = displayVersion(raw, appName);
+    if (/^\d+(?:\.\d+){0,5}(?:-[a-zA-Z0-9]+(?:[.\-][a-zA-Z0-9]+)*)?(?:\+[a-zA-Z0-9]+(?:[.\-][a-zA-Z0-9]+)*)?$/.test(version)) {
+      return version;
+    }
+  }
+  return displayVersion(packageVersion, appName);
+}

@@ -13,7 +13,7 @@ function sourceMethods(file, names, globals = {}) {
     return source.slice(start, source.indexOf('\n  }', start) + 4);
   });
   const box = { AppStorage: { setOrCreate() {} }, ForegroundIdle: { cancel() {} },
-    displayVersion: load('data/DisplayVersion').displayVersion, ...globals };
+    ...load('data/DisplayVersion'), ...globals };
   vm.runInNewContext(ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
@@ -97,8 +97,9 @@ test('hero size follows the selected HAP, and unknown historical sizes do not us
   ui.selectedAsset.size = 0;
   assert.equal(ui.packageSizeLabel(), '安装包大小待确认');
 });
-test('hero version uses the actual version name or selected release before falling back to the build code', () => {
+test('hero version follows the selected release and retains the actual package version for installation', () => {
   const ui = sourceMethods('Detail', ['selectedVersionLabel', 'currentRelease']);
+  ui.app = { displayName: '轻启·安装器' };
   ui.selectedAsset = { versionName: '0.4.48', versionCode: 2026100102 };
   ui.releases = [{ tag: 'v0.4.48' }]; ui.selectedReleaseIndex = 0;
   assert.equal(ui.selectedVersionLabel(), '0.4.48');
@@ -106,4 +107,10 @@ test('hero version uses the actual version name or selected release before falli
   assert.equal(ui.selectedVersionLabel(), '0.4.48');
   ui.releases = []; ui.selectedAsset.versionCode = 0;
   assert.equal(ui.selectedVersionLabel(), '待确认');
+  ui.app.displayName = 'LNGA';
+  ui.releases = [{ name: 'v1.2.5', tag: '1.2.6' }];
+  ui.selectedAsset = { versionName: '1.0.0', versionCode: 1000000 };
+  assert.equal(ui.selectedVersionLabel(), '1.2.6');
+  assert.equal(ui.selectedAsset.versionName, '1.0.0');
+  assert.equal(ui.selectedAsset.versionCode, 1000000);
 });

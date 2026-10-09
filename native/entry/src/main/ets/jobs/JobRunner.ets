@@ -41,6 +41,7 @@ export interface JobRuntime {
   install(job: InstallJob): Promise<void>;
   installedVersion(bundleName: string): Promise<number>;
   confirmRenewal(job: InstallJob): Promise<boolean>;
+  confirmReplacement?(job: InstallJob): Promise<boolean>;
   rememberInstalledAuthorization?(job: InstallJob): Promise<void>;
 }
 
@@ -79,7 +80,10 @@ export class JobRunner {
       }
       const evidence = await this.runtime.inspectEvidence(job);
       job.stage = recoveryStage(job, evidence);
-      if (job.stage === InstallStage.INSTALLED) this.clearDataLossApproval(job);
+      if (job.stage === InstallStage.INSTALLED) {
+        this.clearDataLossApproval(job);
+        job.reinstallRequired = false;
+      }
       await this.store.save(job);
       if (job.stage === InstallStage.INSTALLED || job.stage === InstallStage.TERMINAL_ERROR) {
         return job;
@@ -124,7 +128,18 @@ export class JobRunner {
       }
       if (job.stage === InstallStage.INSTALLING) {
         // After a timeout, inspect the real installed version before retrying.
-        if (job.reinstallRequired || await this.runtime.installedVersion(job.bundleName) !== job.versionCode) {
+        let needsInstall = job.reinstallRequired;
+        if (!needsInstall) {
+          const current = await this.runtime.installedVersion(job.bundleName);
+          needsInstall = current !== job.versionCode;
+          if (!needsInstall && job.appId > 0 && !(job.catalogVersionCode > 0)) {
+            // 未预处理的在线包到这里才知道内部编号，用户提交的安装仍必须执行。
+            job.reinstallRequired = true;
+            await this.store.save(job);
+            needsInstall = true;
+          }
+        }
+        if (needsInstall) {
           JobCancellation.assertActive(job.id);
           await this.runtime.install(job);
         }
@@ -204,8 +219,11 @@ export class JobRunner {
         if (![FailureKind.TRANSIENT, FailureKind.NETWORK].includes(queryFailure.kind) ||
           ++queryFailures > 2 || Date.now() >= deadline) throw queryFailure;
       }
-      if (current === job.versionCode &&
-        (!(job.renewalRequestedAt > 0) || await this.runtime.confirmRenewal(job))) return true;
+      if (current === job.versionCode) {
+        const confirmed = job.renewalRequestedAt > 0 ? await this.runtime.confirmRenewal(job) :
+          (job.appId > 0 && job.reinstallRequired ? await this.runtime.confirmReplacement?.(job) ?? false : true);
+        if (confirmed) return true;
+      }
       if (Date.now() >= deadline) {
         if (queryFailure !== undefined) throw queryFailure;
         return false;

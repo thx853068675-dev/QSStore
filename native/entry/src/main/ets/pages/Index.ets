@@ -1,5 +1,6 @@
 import { afterPaint } from '../theme/AfterPaint';
 import { CatalogLookup } from '../data/CatalogLookup';
+import { CatalogPackageVariant } from '../data/CatalogPackageVariant';
 import { InstalledInspection } from '../data/InstalledInspection';
 import { repositoryUrl } from '../data/RepositoryAddress';
 import { InstalledSigningExpiry } from '../jobs/InstalledSigningExpiry';
@@ -15,8 +16,10 @@ import { appendCatalogPage, filterCatalogCategory, shouldPrefetchCatalog } from 
 import { DiscoverSort, DiscoverSortKey, SortDirection } from '../data/DiscoverSort';
 import { DiscoverSortPreferences } from '../data/DiscoverSortPreferences';
 import { ReleaseChannelRegistry } from '../data/ReleaseChannelRegistry';
+import { releaseDisplayVersion } from '../data/DisplayVersion';
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
 import { CatalogInstallIdentity } from '../jobs/CatalogInstallIdentity';
+import { ReleaseUpdate } from '../jobs/ReleaseUpdate';
 import { ClassifiedFailure } from '../data/ServiceFailure';
 import { AccountService } from '../data/AccountService';
 import { InstallCoordinator } from '../jobs/InstallCoordinator';
@@ -35,6 +38,7 @@ import { JobStore } from '../jobs/JobStore';
 import { LegacyInstalledMigration } from '../jobs/LegacyInstalledMigration';
 import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
 import { JobScheduler } from '../jobs/JobScheduler';
+import { NativeJobRuntime } from '../jobs/NativeJobRuntime';
 import { ForegroundIdle } from '../jobs/ForegroundIdle';
 import { isPending } from '../jobs/RecoveryPlanner';
 import { retryDelayMs } from '../jobs/RecoveryPlanner';
@@ -1706,9 +1710,14 @@ struct Index {
    */
   private versionLabel(job: InstallJob): string {
     if (job.stage === InstallStage.INSTALLED) {
-      const liveName = this.currentInstalledView(job).versionName;
+      const current = this.currentInstalledView(job);
+      const recorded = ReleaseUpdate.record(this.installedJobs, job.bundleName, current.versionCode,
+        InstalledAppRegistry.signingIdentity(job.bundleName)?.updateTime ?? 0);
+      const liveName = recorded === undefined ? current.versionName : releaseDisplayVersion(recorded.releaseName ?? '',
+        ReleaseUpdate.tag(recorded), current.versionName);
       if (liveName.length > 0) return liveName;
     }
+    if (job.releaseTag || job.releaseName) return releaseDisplayVersion(job.releaseName, job.releaseTag, job.versionName);
     if (job.versionName.length > 0) return job.versionName;
     // 旧记录（加 version_name 字段之前装的）没有版本名。直接显示 versionCode 会
     // 得到 2026092902 这种看着像日期的数字，所以依次退两步。
@@ -2043,11 +2052,13 @@ struct Index {
   }
 
   private latestVersionTag(app: CatalogApp): string {
-    if (ReleaseChannelRegistry.apply(app).channelUnavailable) return '暂无预览版';
-    const version = ReleaseChannelRegistry.apply(app).latestAsset?.versionName.trim() ?? '';
+    const selected = ReleaseChannelRegistry.apply(app);
+    if (selected.channelUnavailable) return '暂无预览版';
+    const asset = selected.latestAsset;
+    const version = releaseDisplayVersion(asset?.releaseName ?? '', asset?.releaseTag ?? '',
+      asset?.versionName ?? '', selected.displayName);
     if (version.length > 0) return /^v/i.test(version) ? version : 'v' + version;
-    // 缺少解析版本时才回退 Release 名称，不把 versionCode 当可读版本号。
-    return ReleaseChannelRegistry.apply(app).latestName.trim();
+    return selected.latestName.trim();
   }
 
   // Updating this installer stops its process before HDC can return success.
@@ -2071,7 +2082,13 @@ struct Index {
           const local = LocalBundles.liveInstalledVersion(job.bundleName);
           const installed = LocalBundles.isKnown(local) ? local : await bridge.installedVersion(job.bundleName);
           if (JobScheduler.isRunning(job.id)) continue;
-          if (!job.reinstallRequired && installed === job.versionCode) {
+          if (!job.reinstallRequired && job.appId > 0 && installed === job.versionCode &&
+            ReleaseUpdate.available(ReleaseUpdate.forJob(job), installed,
+              InstalledAppRegistry.versionName(job.bundleName, installed), this.installedJobs)) job.reinstallRequired = true;
+          const replacementConfirmed = job.appId > 0 && job.reinstallRequired && !(job.renewalRequestedAt > 0) &&
+            job.replacementInstallBaseline > 0 && await new NativeJobRuntime(context, store, undefined, bridge).confirmReplacement(job);
+          if ((!job.reinstallRequired || replacementConfirmed) && installed === job.versionCode) {
+            job.reinstallRequired = false;
             job.stage = InstallStage.INSTALLED;
             job.lastError = '';
             job.allowDataLoss = false;
@@ -2647,7 +2664,9 @@ struct Index {
     }
     const installedVersion = selected === undefined ? this.installedVersionOf(app.id) :
       LocalBundles.installedVersion(asset.bundleName);
-    if (installedVersion >= asset.versionCode && asset.versionCode > 0) {
+    if (installedVersion > 0 && asset.versionCode > 0 && !ReleaseUpdate.available(asset, installedVersion,
+      InstalledAppRegistry.versionName(asset.bundleName, installedVersion), this.installedJobs,
+      InstalledAppRegistry.signingIdentity(asset.bundleName)?.updateTime ?? 0)) {
       this.checkInstalledUpdates();
       return;
     }
@@ -2657,10 +2676,13 @@ struct Index {
       const context = getContext(this) as common.UIAbilityContext;
       const store = await JobStore.open(context);
       const job = await store.enqueue(app.id, asset.name, asset.url, asset.sha256,
-        asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode);
+        asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode,
+        asset.releaseTag, asset.releaseName, installedVersion > 0 && installedVersion === asset.versionCode);
       if (job.stage === InstallStage.INSTALLED) {
         // Explicit reinstall after an external uninstall must re-enter the FIFO.
         job.stage = InstallStage.QUEUED; job.stageHistory = []; job.lastError = '';
+        job.reinstallRequired = installedVersion > 0 && installedVersion === asset.versionCode;
+        job.replacementInstallBaseline = 0;
         await store.save(job);
       }
       this.drainInstallQueue();
@@ -2992,6 +3014,10 @@ struct Index {
       if (current === undefined || current.reinstallRequired ||
         JobScheduler.isRunning(current.id) || !isPending(current.stage)) continue;
       if (versions.get(current.bundleName) !== current.versionCode) continue;
+      if (ReleaseUpdate.available(ReleaseUpdate.forJob(current), current.versionCode,
+        InstalledAppRegistry.versionName(current.bundleName, current.versionCode), this.installedJobs)) {
+        current.reinstallRequired = true; await store.save(current); continue;
+      }
       current.stage = InstallStage.INSTALLED;
       current.lastError = '';
       current.allowDataLoss = false;
@@ -3032,10 +3058,7 @@ struct Index {
 
   private assetForBundle(app: CatalogApp, bundleName: string, preferredName: string = ''): HapAsset | undefined {
     const choices = this.latestAssets(app).filter((asset: HapAsset) => asset.bundleName === bundleName);
-    const exact = choices.find((asset: HapAsset) => asset.name === preferredName);
-    // Several variants may share a bundle name. A renamed file must not silently switch variants.
-    if (exact !== undefined) return exact;
-    return preferredName.length > 0 && choices.length > 1 ? undefined : choices[0];
+    return CatalogPackageVariant.choose(choices, preferredName, app.latestAsset);
   }
 
   /** 已有线上来源保持来源；纯本地安装仅在包名唯一匹配时自动关联。 */
@@ -3181,7 +3204,8 @@ struct Index {
     const installed = LocalBundles.isKnown(deviceVersion) ? deviceVersion :
       (recordedVersion > 0 ? recordedVersion : this.allInstalledJobs().find((job: InstallJob) => job.bundleName === asset.bundleName)?.versionCode ??
         (bundleName.length === 0 ? this.installedVersionOf(appId) : -1));
-    if (installed <= 0 || asset.versionCode <= installed) return undefined;
+    if (!ReleaseUpdate.available(asset, installed, InstalledAppRegistry.versionName(asset.bundleName, installed),
+      this.installedJobs, InstalledAppRegistry.signingIdentity(asset.bundleName)?.updateTime ?? 0)) return undefined;
     const target = new UpdateTarget();
     target.bundleName = asset.bundleName;
     target.appId = appId;
@@ -3604,13 +3628,13 @@ struct Index {
   }
 
   private recentInstalledJobs(): InstallJob[] {
-    const seen = new Set<string>();
-    return this.installedJobs.filter((job: InstallJob) => {
-      if (job.bundleName.length === 0) return true;
-      if (seen.has(job.bundleName)) return false;
-      seen.add(job.bundleName);
-      return true;
-    });
+    const newest = new Map<string, InstallJob>();
+    for (const job of this.installedJobs) {
+      const key = job.bundleName || job.id;
+      const previous = newest.get(key);
+      if (previous === undefined || ReleaseUpdate.completedAt(job) > ReleaseUpdate.completedAt(previous)) newest.set(key, job);
+    }
+    return Array.from(newest.values());
   }
 
   private managementInstalledJobs(localOnly: boolean = this.installedLocalOnly): InstallJob[] {

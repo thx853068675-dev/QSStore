@@ -5,9 +5,18 @@ export class HapAsset {
   size: number = 0;
   bundleName: string = '';
   versionCode: number = 0;
-  /** 展示用版本名，如 1.1.0。设备比对用 versionCode，界面显示用这个。 */
+  /** 包内版本名，如 1.1.0；设备比对使用 versionCode。 */
   versionName: string = '';
+  /** 所属发行记录，仅用于展示；不能替换包内 versionName/versionCode。 */
+  releaseName: string = '';
+  releaseTag: string = '';
   mirrorUrls: string[] = [];
+
+  static tagFromUrl(url: string): string {
+    const match = /\/releases\/download\/([^/]+)\//.exec(url);
+    if (match === null) return '';
+    try { return decodeURIComponent(match[1]); } catch (_) { return ''; }
+  }
 
   static fromJson(row: Record<string, Object>): HapAsset {
     const asset = new HapAsset();
@@ -18,6 +27,8 @@ export class HapAsset {
     asset.bundleName = String(row['bundle_name'] ?? '');
     asset.versionCode = Number(row['version_code'] ?? 0);
     asset.versionName = String(row['version_name'] ?? '');
+    asset.releaseName = String(row['release_name'] ?? '');
+    asset.releaseTag = String(row['release_tag'] ?? '') || HapAsset.tagFromUrl(asset.url);
     const mirrors = row['mirror_urls'] as string[] | undefined;
     asset.mirrorUrls = mirrors ?? [];
     return asset;
@@ -49,7 +60,12 @@ export class ReleaseInfo {
     release.sourceRepo = String(row['source_repo'] ?? '');
     const raw = row['assets'] as Array<Record<string, Object>> | undefined;
     release.assets = (raw ?? [])
-      .map((asset: Record<string, Object>) => HapAsset.fromJson(asset))
+      .map((row: Record<string, Object>) => {
+        const asset = HapAsset.fromJson(row);
+        asset.releaseName = release.name;
+        asset.releaseTag = release.tag;
+        return asset;
+      })
       .filter((asset: HapAsset) => /\.(hap|app)$/i.test(asset.name));
     return release;
   }

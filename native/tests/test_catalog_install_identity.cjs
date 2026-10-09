@@ -33,6 +33,8 @@ function fixture() {
     assert.ok(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
   });
   const box = { InstallJob, InstallStage, CatalogInstallIdentity, InstallTaskState,
+    ReleaseUpdate: load('jobs/ReleaseUpdate').ReleaseUpdate,
+    InstalledAppRegistry: { versionName: () => '', signingIdentity: () => undefined },
     LocalBundles: { installedVersion: () => f.actual, isKnown: v => v >= 0 },
     isPending: load('jobs/RecoveryPlanner').isPending };
   vm.runInNewContext(ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThis.Page = Page;`, {

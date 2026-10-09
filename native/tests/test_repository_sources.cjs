@@ -19,7 +19,7 @@ function page(file,names,globals={}) {
     const start=source.search(new RegExp('^  private (?:async )?'+name+'\\(', 'm'));
     assert.ok(start>=0,name);return source.slice(start,source.indexOf('\n  }',start)+4);
   });
-  const box={repositoryUrl:load('data/RepositoryAddress').repositoryUrl,displayVersion:load('data/DisplayVersion').displayVersion,...globals};vm.runInNewContext(ts.transpileModule('class Page { '+methods.join('\n')+' };globalThis.Page=Page;',{
+  const box={repositoryUrl:load('data/RepositoryAddress').repositoryUrl,...load('data/DisplayVersion'),...globals};vm.runInNewContext(ts.transpileModule('class Page { '+methods.join('\n')+' };globalThis.Page=Page;',{
     compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);return new box.Page();
 }
 const row=(repo,kind)=>release.ReleaseInfo.fromJson({tag:'v2',name:'2.0',source_repo:repo,source_kind:kind,
@@ -36,15 +36,15 @@ test('release history labels place the repository marker immediately after the v
   ui.app={secondaryRepo:'mirror/releases'};
   ui.releases=[row('mirror/releases','secondary'),row('dev/main','primary')];
   ui.selectedReleaseIndex=0;ui.releaseTotal=2;
-  assert.equal(ui.currentReleaseLabel(),'2.0 · 子仓  ·  2026-10-03');
-  assert.equal(ui.releaseOptions()[1].value,'2.0 · 主仓  ·  2026-10-03');
+  assert.equal(ui.currentReleaseLabel(),'2 · 子仓  ·  2026-10-03');
+  assert.equal(ui.releaseOptions()[1].value,'2 · 主仓  ·  2026-10-03');
 });
 test('a single repository has no source marker in the selected label or history options',()=>{
   const ui=page('Detail',['currentRelease','currentReleaseLabel','releaseOptions']);
   ui.app={secondaryRepo:''};ui.releases=[row('dev/main','primary')];
   ui.selectedReleaseIndex=0;ui.releaseTotal=1;
-  assert.equal(ui.currentReleaseLabel(),'2.0  ·  2026-10-03');
-  assert.equal(ui.releaseOptions()[0].value,'2.0  ·  2026-10-03');
+  assert.equal(ui.currentReleaseLabel(),'2  ·  2026-10-03');
+  assert.equal(ui.releaseOptions()[0].value,'2  ·  2026-10-03');
 });
 test('paged releases keep a primary and a mirror version with the same tag while dropping exact duplicates',async()=>{
   const primary=row('dev/main','primary'),secondary=row('mirror/releases','secondary');

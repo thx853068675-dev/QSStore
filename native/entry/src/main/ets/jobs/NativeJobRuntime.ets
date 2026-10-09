@@ -19,6 +19,7 @@ import { checkCatalogIdentity, inspectPackage, PackageInspectError, PackageIdent
 import { JobCancellation } from './JobCancellation';
 import { InstallTaskState } from './InstallTaskState';
 import { InstalledSigningExpiry } from './InstalledSigningExpiry';
+import { ReleaseUpdate } from './ReleaseUpdate';
 
 // A concrete adapter must query the device after reconnecting. Installed
 // version is the final proof; a successful HDC command alone is insufficient.
@@ -90,10 +91,22 @@ export class NativeJobRuntime implements JobRuntime {
     if (job.bundleName.length > 0 && job.versionCode > 0) {
       const local = LocalBundles.liveInstalledVersion(job.bundleName);
       if (local > 0) evidence.installedVersionCode = local;
+      if (job.appId > 0 && !job.reinstallRequired && job.stage !== InstallStage.INSTALLED && local === job.versionCode &&
+        ReleaseUpdate.available(ReleaseUpdate.forJob(job), local,
+          LocalBundles.installedVersionName(job.bundleName, local), await this.store.listAll())) {
+        // 旧客户端留下的同编号暂停任务也要实际覆盖，不能仅凭版本号补记成功。
+        job.reinstallRequired = true;
+        await this.store.save(job);
+      }
       if (local === job.versionCode && job.bundleName === 'com.tonghongxiang.quietstart' &&
         job.signedPath.length > 0 && fileIo.accessSync(job.signedPath)) {
         try { await verifyHap(job.signedPath); }
         catch (_) { job.reinstallRequired = true; }
+      }
+      if (local === job.versionCode && job.appId > 0 && job.reinstallRequired &&
+        !(job.renewalRequestedAt > 0) && job.replacementInstallBaseline > 0) {
+        try { evidence.replacementConfirmed = await this.confirmReplacement(job); } catch (_) {}
+        if (evidence.replacementConfirmed) return evidence;
       }
       if (local === job.versionCode && !job.reinstallRequired) return evidence;
     }
@@ -521,6 +534,19 @@ export class NativeJobRuntime implements JobRuntime {
     if (job.appId > 0 && await this.installedVersion(job.bundleName) > job.versionCode) {
       throw new JobFailure(FailureKind.INVALID_PACKAGE, '所选版本低于已安装版本，无法降级安装');
     }
+    if (job.appId > 0 && job.reinstallRequired && !(job.renewalRequestedAt > 0)) {
+      if (job.replacementInstallBaseline > 0 && await this.confirmReplacement(job)) return;
+      if (!(job.replacementInstallBaseline > 0)) {
+        let before: InstalledSigningIdentity | undefined;
+        try {
+          before = await this.device.installedSigningIdentity(job.bundleName);
+        } catch (_) { /* 安装成功回执仍可核对；没有基线时重启不能假定已完成。 */ }
+        if (before?.versionCode === job.versionCode && before.updateTime > 0) {
+          job.replacementInstallBaseline = before.updateTime;
+          await this.store.save(job);
+        }
+      }
+    }
     if ((job.stagedTicket ?? '').length > 0) {
       if (!await this.device.discardStaged(job.stagedTicket)) {
         throw new JobFailure(FailureKind.DEVICE, '请连接无线调试，清理上次传输后继续安装');
@@ -704,6 +730,7 @@ export class NativeJobRuntime implements JobRuntime {
     baseline: InstalledSigningIdentity | undefined, baselineKnown: boolean): Promise<boolean> {
     if (await this.installedVersion(job.bundleName) !== job.versionCode) return false;
     if (job.renewalRequestedAt > 0) return this.confirmRenewal(job);
+    if (job.appId > 0 && job.reinstallRequired) return this.confirmReplacement(job);
     if (!job.reinstallRequired) return true;
     if (!baselineKnown || !job.profilePath) return false;
     const installed = await this.device.installedSigningIdentity(job.bundleName);
@@ -740,6 +767,26 @@ export class NativeJobRuntime implements JobRuntime {
       job.renewalInstallBaseline > 0 && installed.updateTime > job.renewalInstallBaseline &&
       installed.fingerprint === await AgcProfile.signingFingerprint(job.profilePath);
     this.confirmedRenewalIdentity = confirmed ? installed : undefined;
+    return confirmed;
+  }
+
+  /** 同内部编号的新发行包，必须确认覆盖发生；旧版本号本身不是成功证据。 */
+  async confirmReplacement(job: InstallJob): Promise<boolean> {
+    let installed: InstalledSigningIdentity | undefined;
+    try { installed = await this.device.installedSigningIdentity(job.bundleName); }
+    catch (error) {
+      if (this.confirmedSubmission === job.id) return await this.installedVersion(job.bundleName) === job.versionCode;
+      throw new JobFailure(FailureKind.DEVICE, '相同编号更新结果尚未核实，请连接无线调试后继续：' + String(error));
+    }
+    if (installed === undefined || installed.updateTime <= 0 || !(job.replacementInstallBaseline > 0)) {
+      return this.confirmedSubmission === job.id && await this.installedVersion(job.bundleName) === job.versionCode;
+    }
+    const confirmed = installed.versionCode === job.versionCode && installed.updateTime > job.replacementInstallBaseline &&
+      (!job.profilePath || installed.fingerprint === await AgcProfile.signingFingerprint(job.profilePath));
+    if (confirmed) {
+      job.installedUpdateTime = installed.updateTime;
+      job.installedFingerprint = installed.fingerprint;
+    }
     return confirmed;
   }
 

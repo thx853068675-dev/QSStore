@@ -1,10 +1,5 @@
-"""Fail a release if protection is disabled, incomplete or leaks private maps.
-
-This checks the compiler's actual name mapping and ELF symbols, not just flags.
-Keep the mapping beside the local artifact for crash diagnosis, never in the HAP.
-"""
+"""Verify a normal, unobfuscated release without packaging source or private diagnostics."""
 import hashlib
-import json
 from pathlib import Path
 import struct
 import zipfile
@@ -40,37 +35,19 @@ def elf_symbols(data):
     return exports
 
 
-def verify_release(hap, entry):
-    hap, entry = Path(hap), Path(entry)
-    cache = json.loads((entry / 'obfuscation-namecache.json').read_text())
-    core = {}
-    for filename in CORE_FILES:
-        original = 'entry/src/main/ets/' + filename + '.ets'
-        mapping = cache.get(original, {})
-        renamed = mapping.get('obfName', '')
-        if not renamed or renamed == original:
-            raise ValueError('Release core is not obfuscated: ' + original)
-        methods = mapping.get('MemberMethodCache', {})
-        if not any(key.split(':')[0] != value for key, value in methods.items()):
-            raise ValueError('Release core methods are not obfuscated: ' + original)
-        core[filename] = renamed
-    # Old login, identity, jobs, cache and API JSON must retain their schema.
-    contracts = (entry / 'obfuscation-contracts.txt').read_text().split('-keep-property-name\n', 1)[1]
-    properties = {line for line in contracts.split('-keep-global-name', 1)[0].splitlines()
-                  if line and not line.startswith('#')}
-    changed_contracts = properties.intersection(cache.get('PropertyCache', {}))
-    if changed_contracts:
-        raise ValueError('Serialized contract was renamed: ' + ', '.join(sorted(changed_contracts)))
+def verify_release(hap):
+    hap = Path(hap)
     with zipfile.ZipFile(hap) as archive:
         leaked = [name for name in archive.namelist() if
                   name.lower().endswith(('.map', '.ets', '.ts', '.rs', '.cpp', '.c', '.h')) or
                   any(marker in name.lower() for marker in ('sourcemap', 'namecache', 'kept-names', 'obfuscation-'))]
         if leaked:
             raise ValueError('Release exposes source/diagnostic maps: ' + ', '.join(leaked))
+        bytecode = archive.read('ets/modules.abc')
+        if any(name.rsplit('/', 1)[1].encode() not in bytecode for name in CORE_FILES):
+            raise ValueError('Release unexpectedly renamed core implementation symbols')
         exports = elf_symbols(archive.read('libs/arm64-v8a/libhap_core.so'))
         if exports != ['RegisterHapCore']:
             raise ValueError('Unexpected native exports: ' + ', '.join(exports))
     return {'sha256': hashlib.sha256(hap.read_bytes()).hexdigest(), 'bytes': hap.stat().st_size,
-            'protectedCoreFiles': core, 'renamedProperties': len(cache['PropertyCache']),
-            'renamedFileSegments': len(cache['FileNameCache']), 'nativeExports': exports,
-            'stableContractFields': len(properties), 'sourceOrMapsPackaged': False}
+            'obfuscated': False, 'nativeExports': exports, 'sourceOrMapsPackaged': False}

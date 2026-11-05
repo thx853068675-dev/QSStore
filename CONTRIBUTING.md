@@ -4,3 +4,5 @@
 2. 安装 Node.js 24、Python 3.12、Rust、CMake 和 C++ 编译工具；依赖及测试步骤见 [.github/workflows/regression.yml](.github/workflows/regression.yml)。执行 `python3 tools/check_local.py`，确保回归通过。
 3. 真机构建参考 [native/README.md](native/README.md)，需要 DevEco SDK。将 `native/config/store.example.json` 复制为 `native/store.local.json`，填入自己的 HTTPS 商店地址、公钥摘要和 CA 路径；未配置时仍可运行主机测试，商店联网功能会提示未配置。
 4. PR 简要说明问题、修改效果和验证方式；涉及界面请附截图。私钥、Profile、令牌、本地服务配置、构建产物及 `docs/` 不提交。
+
+使用源码压缩包时，先 Fork 并 clone 仓库，再将压缩包内容覆盖到自己的开发分支；压缩包不包含 `.git` 历史。

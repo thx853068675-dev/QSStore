@@ -64,19 +64,13 @@ def main():
             raise FileNotFoundError(OUTPUT)
         checked = verify_unsigned(OUTPUT)
         print('Verified unsigned outer/embedded packages:', len(checked))
-        protection = verify_release(OUTPUT, ROOT / 'entry') if args.build_mode == 'release' else None
+        release_check = verify_release(OUTPUT) if args.build_mode == 'release' else None
         args.output.parent.mkdir(parents=True, exist_ok=True)
         staging = args.output.with_suffix(args.output.suffix + '.tmp')
         shutil.copyfile(OUTPUT, staging)
         staging.replace(args.output)
-        if protection is not None:
-            # Maps match this exact artifact and stay local/private for decoding crash stacks.
-            private = args.output.parent / '.private-obfuscation' / args.output.stem
-            private.mkdir(parents=True, exist_ok=True)
-            for name in ('obfuscation-namecache.json', 'obfuscation-kept-names.json'):
-                shutil.copyfile(ROOT / 'entry' / name, private / name)
-            (private / 'verification.json').write_text(json.dumps(protection, indent=2) + '\n')
-            print('Verified obfuscated release:', protection['renamedProperties'], 'renamed properties')
+        if release_check is not None:
+            print('Verified unobfuscated release and native exports')
     finally:
         APP.write_text(original)
 

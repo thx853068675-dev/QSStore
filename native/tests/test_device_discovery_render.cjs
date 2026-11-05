@@ -1,7 +1,7 @@
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const {loadEts}=require('./load_ets.cjs');
-const ts=require('/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+const ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 function peer(host,debugDetected=false){return{id:host,host,port:debugDetected?49231:0,debugDetected,name:host,online:true,checking:false,udid:'',kind:'phone',model:'',marketName:''};}
 function indexFixture(){let parsed=0;const {DeviceDiscoveryIndex}=loadEts('data/DeviceDiscoveryIndex',{}, {Number:value=>{parsed++;return Number(value);}});return{index:new DeviceDiscoveryIndex(),parsed:()=>parsed};}
 function methods(names,globals={}){

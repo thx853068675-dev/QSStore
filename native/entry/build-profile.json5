@@ -7,16 +7,21 @@
       "cppFlags": ""
     }
   },
-  "buildOptionSet": [{
-    "name": "release",
-    "arkOptions": {
-      "obfuscation": {
-        "ruleOptions": {
-          "enable": true,
-          "files": ["./obfuscation-rules.txt", "./obfuscation-contracts.txt"]
+  "buildOptionSet": [
+    {
+      "name": "release",
+      "arkOptions": {
+        "obfuscation": {
+          "ruleOptions": {
+            "enable": false
+          }
         }
       }
     }
-  }],
-  "targets": [{ "name": "default" }]
+  ],
+  "targets": [
+    {
+      "name": "default"
+    }
+  ]
 }

@@ -78,9 +78,13 @@ test('stale policy actions cannot affect an application removed before selection
   const f = fixture(); f.installed = [];
   await f.ui.showInstalledActions(f.job, 'stopUpdates'); assert.equal(f.writes.length, 0);
 });
-test('policy UI uses valid system symbols and lazy signatures without adding long press, scans or requests', () => {
-  const resources = require('/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/ets/build-tools/ets-loader/sysResource.js').sys.symbol;
+const resourceCatalog = path.join(process.env.DEVECO_SDK_HOME || '/Applications/DevEco-Studio.app/Contents/sdk',
+  'default/openharmony/ets/build-tools/ets-loader/sysResource.js');
+test('policy icons exist in an installed SDK resource catalog', {skip:!fs.existsSync(resourceCatalog)}, () => {
+  const resources = require(resourceCatalog).sys.symbol;
   assert.ok(resources.pause_circle); assert.ok(resources.arrow_clockwise);
+});
+test('policy UI retains lazy signatures without adding long press, scans or requests', () => {
   assert.match(source, /@StorageProp\('updatePolicyRevision'\) @Watch\('onUpdatePolicyChanged'\)/);
   const initialize = source.slice(source.indexOf('  private initializeBusiness()'), source.indexOf('\n  }', source.indexOf('  private initializeBusiness()')));
   assert.ok(initialize.indexOf('restoreUpdatePolicy()') < initialize.indexOf('loadJobs()'));

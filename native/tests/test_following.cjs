@@ -101,7 +101,7 @@ test('account changed while channel preferences load cannot submit the new accou
 });
 
 test('first follow closes only the mounted tab, and an animation error never prevents saving',async()=>{
- const path=require('path'),vm=require('vm'),ts=require('/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+ const path=require('path'),vm=require('vm'),ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
  const source=fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/pages/Index.ets'),'utf8');
  const methods=['closeFollowSwipe','toggleFollow'].map(name=>{const start=source.indexOf(name==='toggleFollow'?'  private async '+name+'(':'  private '+name+'(');return source.slice(start,source.indexOf('\n  }',start)+4);}).join('\n');
  const calls=[],box={Index:{TAB_MANAGE:2},FollowingRegistry:{has:()=>false,set:async()=>calls.push('save')},ForegroundIdle:{interaction:()=>{}},getContext:()=>({}),promptAction:{showToast:()=>{}}};

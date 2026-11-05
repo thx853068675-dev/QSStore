@@ -2,6 +2,7 @@ import { readArchiveFile, readModuleJson, readHapIcon } from 'libhap_core.so';
 import { util } from '@kit.ArkTS';
 import { image } from '@kit.ImageKit';
 import { ResourceIndex } from './ResourceIndex';
+import { I18n } from '../data/I18n';
 
 export class PackagePresentation {
   static manifest(path: string): Record<string, Object> { return JSON.parse(readModuleJson(path)) as Record<string, Object>; }
@@ -57,7 +58,7 @@ export class PackagePresentation {
     const bytes = ref.startsWith('resources/') ? readArchiveFile(path, ref) : readHapIcon(path, ref);
     const source = image.createImageSource(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
     try { const info=await source.getImageInfo();
-      if(info.size.width<=0 || info.size.height<=0 || info.size.width*info.size.height>16777216)throw new Error('图标尺寸过大');
+      if(info.size.width<=0 || info.size.height<=0 || info.size.width*info.size.height>16777216)throw new Error(I18n.t('图标尺寸过大'));
       return await source.createPixelMap({ desiredPixelFormat: image.PixelMapFormat.RGBA_8888, desiredSize:{width:512,height:512} }); }
     finally { source.release(); }
   }

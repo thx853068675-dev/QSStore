@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -9,18 +10,26 @@ const { Palette } = require('./load_ets.cjs').loadEts('theme/Palette');
 
 function fixture() {
   const storage = new Map(), handlers = new Map(), state = {
-    top: 144, cutout: 100, density: 3, unavailable: false, loaded: false, uiReads: 0,
+    top: 144, bottom: 60, cutout: 100, density: 3, unavailable: false, loaded: false, uiReads: 0,
+    rect: { left: 0, top: 0, width: 1080, height: 2400 },
     events: [], backgroundWrites: 0, storageWrites: 0, failFullscreen: false, enabledBars: {},
-    managementLoad: async () => {}
+    managementLoad: async () => {},gestureBack:true,gestureBackWrites:0
   };
   const win = {
+    setPreferredOrientation:async value=>{
+      state.orientationRequests=(state.orientationRequests||0)+1;state.orientation=value;
+      if(state.failOrientation)throw Error('orientation unavailable');
+    },
+    isGestureBackEnabled:()=>state.gestureBack,
+    setGestureBackEnabled:async value=>{state.gestureBack=value;state.gestureBackWrites++;},
     on: (name, callback) => handlers.set(name, callback),
     off: (name, callback) => { assert.equal(handlers.get(name), callback); handlers.delete(name); },
     getWindowAvoidArea: type => {
       if (state.unavailable) throw Error('window switching');
-      return { topRect: { height: type === 0 ? state.top : state.cutout } };
+      return { topRect: { height: type === 0 ? state.top : state.cutout },
+        bottomRect: { height: type === 0 ? state.bottom : 0 } };
     },
-    getWindowProperties: () => ({ displayId: 7 }),
+    getWindowProperties: () => ({ displayId: 7, windowRect: state.rect }),
     getWindowSystemBarProperties: () => {
       if (state.barReadFails) throw Error('window property unavailable');
       return state.bars ?? {};
@@ -49,25 +58,30 @@ function fixture() {
     }
   };
   const exports = {};
+  const gestureModule=require('./load_ets.cjs').loadEts('jobs/DeviceOrbGestureGuard');
   const source = fs.readFileSync(path.join(__dirname,
     '../entry/src/main/ets/entryability/EntryAbility.ets'), 'utf8');
   vm.runInNewContext(ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText, {
     exports, AppStorage: { get: key => storage.get(key), setOrCreate: (key, value) => { state.storageWrites++; storage.set(key, value); } },
-    require: name => name === '../jobs/BackgroundInstallTask' ? {
+    require: name => name.endsWith('/DeviceOrbGestureGuard') ? gestureModule : name.endsWith('/DeviceOrbHost') ? {DeviceOrbHost:{install(){},dispose(){},attached:()=>true}} : name.endsWith('/PrivacyConsent') ? publicConsentModule(name) : name === '../jobs/BackgroundInstallTask' ? {
       BackgroundInstallTask: { configure: () => {}, onForeground: () => {} }
-    } : name === '../jobs/WirelessDebugLifecycle' ? {
+    } : name === '../jobs/InstallCoordinator' ? { InstallCoordinator: { configure() {} } }
+      : name === '../jobs/NotificationOpen' ? { NotificationOpen: { receive:()=>false,configure(){},openPending(){},suspendRouting(){} } }
+      : name === '../jobs/DeviceDiscovery' ? {DeviceDiscovery:{onBackground(){},onForeground(){},onPrivacyChanged(){},dispose(){}}}
+      : name === '../jobs/WirelessDebugLifecycle' ? {
       WirelessDebugLifecycle: { configure() {}, onForeground() {}, onBackground() {} }
     } : name === '../theme/ResumeFramePacing' ? { ResumeFramePacing: { start() {}, stop() {} } }
       : name === '../theme/Palette' ? { Palette }
       : name === '../data/AppearancePreferences' ? { AppearancePreferences: { async load() {} } }
+      : name === '../data/MaterialPreferences' ? { MaterialPreferences: { async load() {} } }
       : name === '../data/DiscoverSortPreferences' ? { DiscoverSortPreferences: { async load() {} } }
       : name === '../data/ManagementPreferences' ? { ManagementPreferences: { load: () => state.managementLoad() } }
       : name === '../jobs/ForegroundIdle' ? { ForegroundIdle: { onForeground() {}, onBackground() {} } } : name === '../jobs/ExternalInstallOpen' ? { ExternalInstallOpen: { receive: () => false, configure: () => state.events.push('file-open-context'), openPending() {}, suspendRouting() {} } } : name === '@kit.AbilityKit' ? {
       UIAbility: class {}, ConfigurationConstant: { ColorMode: { COLOR_MODE_DARK: 1 } }
     } : {
-      window: { AvoidAreaType: { TYPE_SYSTEM: 0, TYPE_CUTOUT: 1 } },
+      window: { AvoidAreaType: { TYPE_SYSTEM: 0, TYPE_CUTOUT: 1 },Orientation:{AUTO_ROTATION_UNSPECIFIED:12} },
       display: { getDisplayByIdSync: id => { assert.equal(id, 7); return { densityPixels: state.density }; } }
     }
   });
@@ -76,6 +90,7 @@ function fixture() {
   const stage = { getMainWindowSync: () => win,
     loadContent: (page, callback) => {
       assert.equal(page, 'pages/Index'); state.loaded = true;
+      state.storageAtLoad = new Map(storage);
       state.events.push('load');
       // Loading the content can restore component defaults too.
       state.bars = { statusBarColor: '#FFFFFFFF' };
@@ -101,6 +116,100 @@ test('saved appearance controls page colors and transparent system bars independ
   f.ability.onForeground(); await new Promise(setImmediate);
   assert.equal(f.storage.get('darkMode'), true);
   assert.equal(f.state.bars.navigationBarColor, '#00000000');
+});
+
+test('sensor rotation follows the system lock and is configured once before loading the page', async () => {
+  const f=fixture();f.ability.onWindowStageCreate(f.stage);await new Promise(setImmediate);
+  assert.equal(f.state.orientation,12);assert.equal(f.state.orientationRequests,1);assert.equal(f.state.loaded,true);
+  f.ability.onForeground();f.ability.onForeground();await new Promise(setImmediate);
+  assert.equal(f.state.orientationRequests,1,'foreground animation must not repeat window rotation requests');
+  const unavailable=fixture();unavailable.state.failOrientation=true;
+  unavailable.ability.onWindowStageCreate(unavailable.stage);await new Promise(setImmediate);
+  assert.equal(unavailable.state.loaded,true,'unsupported window policies cannot block startup');
+});
+
+test('window bounds and navigation insets are converted from native pixels before the first page is loaded', async () => {
+  const f = fixture();
+  f.ability.onWindowStageCreate(f.stage);
+  await new Promise(setImmediate);
+  assert.equal(f.state.storageAtLoad.get('windowWidth'), 360);
+  assert.equal(f.state.storageAtLoad.get('windowHeight'), 800);
+  assert.equal(f.state.storageAtLoad.get('navigationBottomInset'), 20);
+  assert.equal(f.state.storageAtLoad.get('statusBarInset'), 48);
+  assert.equal(f.state.uiReads, 1, 'native viewport reads must not request an early UIContext');
+});
+
+test('resize events override stale window properties for landscape, rotation and split-screen widths', async () => {
+  const f = fixture();
+  f.ability.onWindowStageCreate(f.stage); await new Promise(setImmediate);
+  const resize = f.handlers.get('windowSizeChange');
+  assert.equal(typeof resize, 'function');
+  // getWindowProperties can lag the native event by a frame during rotation.
+  for (const [pixels, expected] of [
+    [{ width: 3840, height: 2400 }, [1280, 800]],
+    [{ width: 2400, height: 3840 }, [800, 1280]],
+    [{ width: 960, height: 2400 }, [320, 800]]
+  ]) {
+    resize(pixels);
+    assert.equal(f.storage.get('windowWidth'), expected[0]);
+    assert.equal(f.storage.get('windowHeight'), expected[1]);
+  }
+  const writes = f.state.storageWrites;
+  resize({ width: 960, height: 2400 });
+  assert.equal(f.state.storageWrites, writes, 'identical resize events must not invalidate every page');
+});
+
+test('ordinary foreground and avoid-area callbacks read current window properties when there is no resize payload', async () => {
+  const f = fixture();
+  f.ability.onWindowStageCreate(f.stage); await new Promise(setImmediate);
+  f.state.rect = { left: 0, top: 0, width: 2400, height: 3840 };
+  f.state.bottom = 90;
+  f.handlers.get('avoidAreaChange')({ type: 0 });
+  assert.equal(f.storage.get('windowWidth'), 800);
+  assert.equal(f.storage.get('windowHeight'), 1280);
+  assert.equal(f.storage.get('navigationBottomInset'), 30);
+  f.state.rect = { left: 0, top: 0, width: 960, height: 2400 };
+  f.state.bottom = 0;
+  f.ability.onForeground(); await new Promise(setImmediate);
+  assert.equal(f.storage.get('windowWidth'), 320);
+  assert.equal(f.storage.get('windowHeight'), 800);
+  assert.equal(f.storage.get('navigationBottomInset'), 0, 'desktop/split windows must not retain the old gesture inset');
+});
+
+test('unavailable bounds and invalid display density retain the last usable geometry', async () => {
+  const f = fixture();
+  f.ability.onWindowStageCreate(f.stage); await new Promise(setImmediate);
+  f.state.rect = undefined;
+  const writes = f.state.storageWrites;
+  f.handlers.get('avoidAreaChange')({ type: 0 });
+  assert.equal(f.storage.get('windowWidth'), 360);
+  assert.equal(f.storage.get('windowHeight'), 800);
+  assert.equal(f.state.storageWrites, writes);
+  for (const density of [0, NaN, Infinity]) {
+    f.state.density = density;
+    f.handlers.get('windowSizeChange')({ width: 3840, height: 2400 });
+    assert.equal(f.state.storageWrites, writes);
+  }
+  f.state.density = 3;
+  f.handlers.get('windowSizeChange')({ width: 3840, height: 2400 });
+  assert.equal(f.storage.get('windowWidth'), 1280,
+    'valid resize events must recover even when native window properties are unavailable');
+  assert.equal(f.storage.get('windowHeight'), 800);
+});
+
+test('destroying the stage unregisters viewport callbacks and late events cannot revive old geometry', async () => {
+  const f = fixture();
+  f.ability.onWindowStageCreate(f.stage); await new Promise(setImmediate);
+  const resize = f.handlers.get('windowSizeChange');
+  const avoid = f.handlers.get('avoidAreaChange');
+  assert.equal(typeof resize, 'function');
+  f.ability.onWindowStageDestroy();
+  assert.equal(f.handlers.size, 0);
+  const writes = f.state.storageWrites;
+  resize({ width: 5760, height: 3240 });
+  avoid({ type: 0 });
+  assert.equal(f.state.storageWrites, writes);
+  assert.equal(f.storage.get('windowWidth'), 360);
 });
 
 test('edge-to-edge startup reads real insets before UI content without obtaining UIContext before loadContent', async () => {

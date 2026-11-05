@@ -21,7 +21,7 @@ function fixture(t, legacy) {
   const source = fs.readFileSync(path.join(root, 'JobStore.ets'), 'utf8');
   const schema = source.match(/const JOB_SCHEMA = `([\s\S]*?)`;/)[1];
   if (legacy) {
-    db.exec(schema.replace(/^  (renewal_|authorization_expires_at|installed_update_time|installed_fingerprint|release_tag|release_name|catalog_sha256|replacement_install_baseline).*\n/gm, ''));
+    db.exec(schema.replace(/^  (renewal_|authorization_expires_at|installed_update_time|installed_fingerprint|release_tag|release_name|catalog_sha256|replacement_install_baseline|custom_mirror_prefix|force_install|skip_reason|conflict_kind|conflict_state|approved_install_proof|approved_installed_update_time).*\n/gm, ''));
     db.prepare(`INSERT INTO install_jobs
       (id, app_id, asset_name, source_url, expected_sha256, bundle_name, version_code,
        stage, cache_path, signed_path, transfer_task_id, attempt, last_error, updated_at)
@@ -42,6 +42,7 @@ function fixture(t, legacy) {
   };
   const jobs = load('InstallJob');
   const { JobStore } = load('JobStore', {
+    './InstallPreflight':require('./load_ets.cjs').publicConsentModule('./InstallPreflight'),
     './InstallJob': jobs, './RecoveryPlanner': load('RecoveryPlanner', { './InstallJob': jobs }),
     '@kit.ArkData': { relationalStore: { getRdbStore: async () => adapter, SecurityLevel: { S1: 1 } } },
     '@kit.CoreFileKit': { fileIo: { accessSync: p => files.has(p) } },
@@ -50,6 +51,37 @@ function fixture(t, legacy) {
   });
   return { db, JobStore, jobs, files, context: { filesDir: '/sandbox' } };
 }
+for (const legacy of [true, false]) test('custom download provenance persists across real SQLite restart; legacy=' + legacy, async t => {
+  const f = fixture(t, legacy), store = await f.JobStore.initialize(f.context);
+  if (legacy) assert.equal((await store.get('legacy:pending')).customMirrorPrefix, '');
+  const origin = 'https://github.com/o/r/releases/download/v1/app.zip#qingqi-package=entry.hap';
+  const job = f.jobs.InstallJob.create('mirror:pending', 7, 'app.zip', 'https://chosen.example/path/' + origin, '');
+  job.customMirrorPrefix = 'https://chosen.example/path/';
+  job.mirrorUrls = ['https://gh-proxy.com/' + origin, origin];
+  await store.save(job);
+  const reopened = await f.JobStore.initialize(f.context), restored = await reopened.get(job.id);
+  assert.equal(restored.customMirrorPrefix, job.customMirrorPrefix);
+  assert.equal(restored.sourceUrl, job.sourceUrl);
+  assert.deepEqual(Array.from(restored.mirrorUrls), job.mirrorUrls);
+  assert.equal(f.jobs.InstallJob.displayCopy(restored).customMirrorPrefix, job.customMirrorPrefix);
+  restored.customMirrorPrefix = ''; await reopened.save(restored);
+  assert.equal((await reopened.get(job.id)).customMirrorPrefix, '');
+});
+
+test('legacy JSON cleanup receipts safely default missing or malformed custom provenance', async t => {
+  const f = fixture(t, false), store = await f.JobStore.initialize(f.context);
+  for (const value of [undefined, null, 42]) {
+    const job = f.jobs.InstallJob.create('old-receipt-' + String(value), 7, 'old.hap', 'https://example.com/old.hap', '');
+    if (value === undefined) delete job.customMirrorPrefix; else job.customMirrorPrefix = value;
+    f.db.prepare('INSERT INTO cancelled_job_cleanup (id, payload) VALUES (?, ?)').run(job.id, JSON.stringify(job));
+  }
+  const receipts = await store.cancelledFiles();
+  assert.equal(receipts.length, 3);
+  assert.ok(receipts.every(job => job.customMirrorPrefix === ''));
+  const old = f.jobs.InstallJob.create('legacy-view', 0, 'local.hap', 'local', '');
+  delete old.customMirrorPrefix;
+  assert.equal(f.jobs.InstallJob.displayCopy(old).customMirrorPrefix, '');
+});
 for (const legacy of [true, false]) test('renewal journal persists all authorization proofs; legacy schema=' + legacy, async t => {
   const f = fixture(t, legacy);
   const store = await f.JobStore.initialize(f.context);
@@ -82,6 +114,27 @@ for (const legacy of [true, false]) test('renewal journal persists all authoriza
   await store.approveDataLoss(restored.id,{versionCode:7,fingerprint:'A'.repeat(64),appIdentifier:'app'});
   const approved=await store.get(restored.id);assert.equal(approved.allowDataLoss,true);
   assert.equal(approved.approvedInstalledFingerprint,'A'.repeat(64));
+});
+
+for(const legacy of [true,false])test('conflict proof, safe skip and per-device completed receipt survive SQLite migration; legacy='+legacy,async t=>{
+ const f=fixture(t,legacy),store=await f.JobStore.initialize(f.context);
+ const {InstallPreflight:P}=require('./load_ets.cjs').publicConsentModule('./InstallPreflight');
+ const j=f.jobs.InstallJob.create('receipt',7,'demo.hap','https://example.com/demo.hap','a'.repeat(64));
+ Object.assign(j,{bundleName:'com.example.demo',versionCode:7,stage:f.jobs.InstallStage.INSTALLED,
+  installedUpdateTime:12345,installedFingerprint:'A'.repeat(64)});
+ await store.save(j);j.stage=f.jobs.InstallStage.QUEUED;j.stageHistory=[];await store.save(j);
+ const receipts=await store.deviceReceipts(j);assert.equal(receipts.length,1);assert.equal(receipts[0].stage,f.jobs.InstallStage.INSTALLED);
+ assert.equal(receipts[0].installedUpdateTime,12345,'reusing the task ID must not erase prior completed proof');
+ const state={versionCode:7,updateTime:12345,fingerprint:'A'.repeat(64),appIdentifier:'appid'};
+ j.stage=f.jobs.InstallStage.WAITING_CONFIRMATION;j.conflictKind='signature';j.conflictState=JSON.stringify(state);await store.save(j);
+ const proof=P.packageProof(j);
+ await assert.rejects(()=>store.approveDataLoss(j.id,{...state,updateTime:12346},proof),/发生变化/);
+ const approved=await store.approveDataLoss(j.id,state,proof);
+ const restored=await store.get(j.id);assert.equal(P.approved(restored,state),true);
+ restored.expectedSha256='b'.repeat(64);assert.equal(P.approved(restored,state),false);
+ await store.skip(j.id,'skip-newer');const skipped=await store.get(j.id);
+ assert.equal(skipped.stage,f.jobs.InstallStage.SKIPPED);assert.equal(skipped.skipReason,'skip-newer');
+ assert.equal(skipped.allowDataLoss,false);assert.equal((await store.deviceReceipts(j))[0].installedUpdateTime,12345,'skip cannot overwrite an installation receipt');
 });
 
 for(const legacy of [true,false])test('online release identity, digest and same-code replacement intent survive SQLite restart; legacy='+legacy,async t=>{

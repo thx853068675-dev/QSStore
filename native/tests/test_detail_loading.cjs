@@ -7,15 +7,16 @@ function deferred() { let resolve, reject; const promise = new Promise((a, b) =>
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function fixture() {
   const f = { app: deferred(), icon: deferred(), versions: deferred(), reviews: deferred(), calls: [], saved: [], released: 0 };
-  const box = { Promise, getContext: () => ({}), router: { getParams: () => ({ id: 42 }) }, errorText: e => e.message,
-    ReleaseChannelRegistry: { restore: async () => {}, preview: () => true, select: async (...args) => f.saved.push(args) },
+  const box = { Promise,AccountSession:{load:async()=>undefined},DeveloperAccount:class{},CatalogApp:{copy:app=>({...app})}, getContext: () => ({}), router: { getParams: () => ({ id: 42 }) }, errorText: e => e.message,
+    UpdatePolicy:{restore:async()=>{if(f.policyWait)await f.policyWait;if(f.policyFail)throw Error('preferences unavailable');},disabled:()=>false},
+    ReleaseChannelRegistry: { staleReleases: () => false, restore: async () => {}, preview: () => true, select: async (...args) => f.saved.push(args) },
     StoreClient: class {
       appDetail() { f.calls.push('app'); return f.app.promise; }
       appIcon() { f.calls.push('icon'); return f.icon.promise; }
       listReleases() { f.calls.push('versions'); return f.versions.promise; }
       listReviews() { f.calls.push('reviews'); return f.reviews.promise; }
     } };
-  const methods = ['loadApp', 'loadDetailIcon', 'loadInitialReleases', 'fetchReviewPage', 'loadReviews', 'refreshPage'].map(name => {
+  const methods = ['loadApp', 'restoreUpdatePolicy', 'syncUpdatePolicy', 'loadDetailIcon', 'loadInitialReleases', 'fetchReviewPage', 'applyReviewPage', 'loadReviews', 'refreshPage'].map(name => {
     const at = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
     assert.ok(at >= 0, name); return source.slice(at, source.indexOf('\n  }', at) + 4);
   }).join('\n');
@@ -23,8 +24,8 @@ function fixture() {
     ${methods} }; globalThis.Page = Detail;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, box);
   f.ui = Object.assign(new box.Page(), { disposed: false, loaded: false, detailLoading: false, error: '', releaseLoading: true,
     releaseMessage: '', app: {}, appIcon: null, releases: [], reviewPage: 0, reviewPageBusy: false, reviews: [],
-    reconcileSelectedAsset() { this.selectedAsset = this.releases[0]?.assets[0]; }, refreshHeroColor() {},
-    refreshInstalledVersion() {}, syncInstallTask() {}, checkForUpdates() { f.calls.push('collection'); } });
+    reconcileSelectedAsset() { this.selectedAsset = this.releases[0]?.assets[0]; }, refreshHeroColor() {}, notifyEmbeddedReady() {},
+    refreshInstalledVersion() {}, selectedBundleName:()=>'', syncInstallTask() {}, checkForUpdates() { f.calls.push('collection'); } });
   f.finish = () => { f.icon.resolve(null); f.versions.resolve({ items: [{ assets: ['hap'] }], page: 1, total: 1 });
     f.reviews.resolve({ items: [], page: 1, total: 0 }); };
   return f;

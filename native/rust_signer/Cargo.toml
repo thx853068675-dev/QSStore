@@ -22,3 +22,9 @@ zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+debug = 0
+# The static archive still needs its FFI symbols for the final NAPI link.
+# The release shared library's export map/strip removes implementation symbols.
+strip = "debuginfo"
+# Native entrypoints translate caught panics to errors; abort would kill the app.
+panic = "unwind"

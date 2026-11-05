@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -10,7 +11,7 @@ function load(file, mocks = {}) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, file + '.ets'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
-  }).outputText, { exports, require: name => mocks[name] || {}, console });
+  }).outputText, { exports, require: name => mocks[name] || publicConsentModule(name), console });
   return exports;
 }
 const bundle = 'com.tonghongxiang.quietstart';
@@ -394,4 +395,175 @@ test('scanned signing identity survives restart and is invalidated by a new vers
   restored.rememberLauncher(output, bundle); restored.remember(bundle, 0); await restored.persist({});
   const deleted = load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry; await deleted.load({});
   assert.equal(deleted.signingIdentity(bundle), undefined);
+});
+
+function originFixture() {
+  const disk = new Map(), mocks = { '@kit.ArkData': { preferences: { getPreferences: async () => ({
+    get: async (key, fallback) => disk.get(key) ?? fallback,
+    put: async (key, value) => disk.set(key, value), flush: async () => {}
+  }) } } };
+  return { disk, mocks, registry: load('jobs/InstalledAppRegistry', mocks).InstalledAppRegistry };
+}
+const rockBundle = 'com.nrc.huawei';
+function rockDump({ version = 111112, updateTime = Date.now() - 5000, distribution = 'app_gallery',
+  provision = 'release', source = 'com.huawei.hmsapp.appgallery' } = {}) {
+  return JSON.stringify({ name: rockBundle, versionCode: version, versionName: '1.111.0.112', updateTime,
+    applicationInfo: { appDistributionType: distribution, appProvisionType: provision, installSource: source } });
+}
+
+test('official AppGallery source is version-bound and survives restart independently of catalog metadata', async () => {
+  const f = originFixture(); f.registry.observe(rockDump(), rockBundle);
+  assert.equal(f.registry.isAppGallery(rockBundle), true); assert.equal(f.registry.hasApplicationOrigin(rockBundle), true);
+  await f.registry.persist({});
+  const restarted = load('jobs/InstalledAppRegistry', f.mocks).InstalledAppRegistry;
+  await restarted.load({}); assert.equal(restarted.isAppGallery(rockBundle), true);
+  assert.equal(restarted.hasApplicationOrigin(rockBundle), true);
+  restarted.remember(rockBundle, 111113);
+  assert.equal(restarted.isAppGallery(rockBundle), false, 'a different build cannot inherit prior source');
+  assert.equal(restarted.hasApplicationOrigin(rockBundle), false);
+  restarted.remember(rockBundle, 0); assert.equal(restarted.isAppGallery(rockBundle), false);
+});
+
+test('ordinary version observations preserve reliable origin, while a same-code replacement refreshes it', () => {
+  const f = originFixture(), at = Date.now() - 10000;
+  f.registry.observe(rockDump({ updateTime: at }), rockBundle);
+  f.registry.remember(rockBundle, 111112);
+  assert.equal(f.registry.isAppGallery(rockBundle), true);
+  f.registry.rememberApplicationInfo(rockBundle, 111112, '1.111.0.112', '', '', '', at);
+  assert.equal(f.registry.isAppGallery(rockBundle), true, 'an incomplete query is not contrary source evidence');
+  f.registry.observe(rockDump({ updateTime: at + 1000, distribution: 'none', provision: 'debug', source: 'shell' }), rockBundle);
+  assert.equal(f.registry.isAppGallery(rockBundle), false, 'side-loaded same-code build can rejoin matching');
+  assert.equal(f.registry.hasApplicationOrigin(rockBundle), true);
+  f.registry.observe(rockDump({ updateTime: at + 2000 }), rockBundle);
+  assert.equal(f.registry.isAppGallery(rockBundle), true, 'official reinstall replaces side-load origin again');
+});
+
+test('changed installation timestamp without application metadata invalidates an old origin instead of carrying it forward', () => {
+  const f = originFixture(), at = Date.now() - 10000;
+  f.registry.observe(rockDump({ updateTime: at }), rockBundle);
+  f.registry.observe(JSON.stringify({ name: rockBundle, versionCode: 111112, updateTime: at + 1000 }), rockBundle);
+  assert.equal(f.registry.isAppGallery(rockBundle), false); assert.equal(f.registry.hasApplicationOrigin(rockBundle), false);
+  f.registry.observe(rockDump({ updateTime: at + 2000 }), rockBundle);
+  f.registry.rememberApplicationInfo(rockBundle, 111112, '1.111.0.112', '', '', '', at + 3000);
+  assert.equal(f.registry.isAppGallery(rockBundle), false); assert.equal(f.registry.hasApplicationOrigin(rockBundle), false);
+});
+
+test('legacy unknown origin remains compatible with side loads; explicit install source is guarded by provision type', async () => {
+  const f = originFixture();
+  f.disk.set('last-confirmed', JSON.stringify([{ bundleName: rockBundle, version: 111112,
+    at: Date.now() - 1000, installationUpdateTime: Date.now() - 1000 }]));
+  await f.registry.load({}); assert.equal(f.registry.isAppGallery(rockBundle), false);
+  assert.equal(f.registry.hasApplicationOrigin(rockBundle), false);
+  f.registry.rememberApplicationInfo(rockBundle, 111112, '', '', 'release', 'com.huawei.appmarket');
+  assert.equal(f.registry.isAppGallery(rockBundle), true);
+  f.registry.rememberApplicationInfo(rockBundle, 111112, '', 'none', 'debug', 'com.huawei.appmarket');
+  assert.equal(f.registry.isAppGallery(rockBundle), false, 'debug evidence overrides the last installer package');
+  f.registry.rememberApplicationInfo(rockBundle, 111112, '', 'app_gallery', 'debug', 'com.huawei.hmsapp.appgallery');
+  assert.equal(f.registry.isAppGallery(rockBundle), false, 'a real debug Profile overrides leftover distribution metadata');
+  assert.equal(f.registry.hasApplicationOrigin(rockBundle), true);
+  await f.registry.persist({});
+  const debugRestart = load('jobs/InstalledAppRegistry', f.mocks).InstalledAppRegistry; await debugRestart.load({});
+  assert.equal(debugRestart.isAppGallery(rockBundle), false);
+  assert.equal(debugRestart.hasApplicationOrigin(rockBundle), true);
+  const saved = { bundleName: rockBundle, version: 111112, at: Date.now() - 1000,
+    installationUpdateTime: 1700000000001, distributionVersion: 111112, distributionUpdateTime: 1700000000000,
+    appDistributionType: 'app_gallery' };
+  f.disk.set('last-confirmed', JSON.stringify([saved]));
+  const restarted = load('jobs/InstalledAppRegistry', f.mocks).InstalledAppRegistry; await restarted.load({});
+  assert.equal(restarted.isAppGallery(rockBundle), false, 'a saved source for another installation is not trusted');
+  assert.equal(restarted.hasApplicationOrigin(rockBundle), false);
+});
+
+test('replacement preflight obtains the real official app label only when it is missing', async () => {
+  const f = originFixture(), calls = [];
+  const { HdcDeviceBridge } = load('jobs/HdcDeviceBridge', {
+    './InstalledAppRegistry': { InstalledAppRegistry: f.registry }
+  });
+  const bridge = new HdcDeviceBridge({}); bridge.connected = async () => true;
+  const official = JSON.parse(rockDump()); official.appIdentifier = 'TencentRockOfficial';
+  bridge.command = async (operation, name) => {
+    calls.push([operation, name]);
+    return operation === 14 ? '洛克王国：世界\n' : JSON.stringify(official);
+  };
+  const identity = await bridge.installedSigningIdentity(rockBundle);
+  assert.equal(identity.versionCode, 111112); assert.equal(identity.appIdentifier, 'TencentRockOfficial');
+  assert.equal(f.registry.displayName(rockBundle), '洛克王国：世界');
+  assert.deepEqual(calls, [[3, rockBundle], [14, rockBundle]]);
+  await bridge.installedSigningIdentity(rockBundle);
+  assert.equal(calls.filter(([operation]) => operation === 14).length, 1, 'the cached real label needs no extra lookup');
+  await f.registry.persist({});
+  const restored = load('jobs/InstalledAppRegistry', f.mocks).InstalledAppRegistry; await restored.load({});
+  assert.equal(restored.displayName(rockBundle), '洛克王国：世界');
+});
+
+test('preflight label failure preserves verified identity and sideloads never issue the additional label query', async () => {
+  for (const label of [undefined, '[Fail] label lookup denied', 'incorrect\nmultiline']) {
+    const f = originFixture(), calls = [];
+    const { HdcDeviceBridge } = load('jobs/HdcDeviceBridge', {
+      './InstalledAppRegistry': { InstalledAppRegistry: f.registry }
+    });
+    const bridge = new HdcDeviceBridge({}); bridge.connected = async () => true;
+    const official = JSON.parse(rockDump()); official.appIdentifier = 'TencentRockOfficial';
+    bridge.command = async operation => {
+      calls.push(operation);
+      if (operation === 14) { if (label === undefined) throw Error('resource unavailable'); return label; }
+      return JSON.stringify(official);
+    };
+    assert.equal((await bridge.installedSigningIdentity(rockBundle)).appIdentifier, 'TencentRockOfficial');
+    assert.equal(f.registry.displayName(rockBundle), '');
+    official.applicationInfo.appProvisionType = 'debug';
+    assert.equal((await bridge.installedSigningIdentity(rockBundle)).versionCode, 111112);
+    assert.deepEqual(calls, [3, 14, 3]);
+  }
+});
+
+test('old source snapshots and installation times cannot replace a newer observation', () => {
+  const f = originFixture(), at = Date.now() - 10000;
+  f.registry.rememberApplicationInfo(rockBundle, 111113, 'new-build', 'none', 'debug', 'shell', at + 1000);
+  assert.equal(f.registry.rememberApplicationInfo(rockBundle, 111112, 'old-build', 'app_gallery', 'release',
+    'com.huawei.hmsapp.appgallery', at), false);
+  assert.equal(f.registry.version(rockBundle), 111113); assert.equal(f.registry.isAppGallery(rockBundle), false);
+  assert.equal(f.registry.installationTime(rockBundle, 111113), at + 1000);
+  assert.throws(() => f.registry.observe(rockDump({ version: 111112, updateTime: at }), rockBundle), /更新的查询/);
+  f.registry.rememberLauncher(rockDump({ version: 111113, updateTime: at }), rockBundle);
+  assert.equal(f.registry.isAppGallery(rockBundle), false); assert.equal(f.registry.installationTime(rockBundle, 111113), at + 1000);
+});
+
+test('official label is invalidated after a same-bundle debug replacement, even with the same version code', () => {
+  const f = originFixture(), at = Date.now() - 10000;
+  f.registry.observe(rockDump({ updateTime: at }), rockBundle); f.registry.rememberDisplayName(rockBundle, '洛克王国：世界');
+  f.registry.observe(rockDump({ updateTime: at + 1000, distribution: 'none', provision: 'debug', source: 'shell' }), rockBundle);
+  assert.equal(f.registry.isAppGallery(rockBundle), false); assert.equal(f.registry.displayName(rockBundle), '');
+  f.registry.rememberDisplayName(rockBundle, '米哈游启动器');
+  f.registry.remember(rockBundle, 111113); assert.equal(f.registry.displayName(rockBundle), '');
+});
+
+test('a late signing preflight cannot approve an old identity or replace the newer observed source', async () => {
+  const f = originFixture(); let reply, started;
+  const entered = new Promise(resolve => started = resolve);
+  const { HdcDeviceBridge } = load('jobs/HdcDeviceBridge', { './InstalledAppRegistry': { InstalledAppRegistry: f.registry } });
+  const bridge = new HdcDeviceBridge({}); bridge.connected = async () => true;
+  bridge.command = async () => { started(); return new Promise(resolve => reply = resolve); };
+  const pending = bridge.installedSigningIdentity(rockBundle); await entered;
+  const at = Date.now() - 1000;
+  f.registry.rememberApplicationInfo(rockBundle, 111113, 'new-device-build', 'none', 'debug', 'shell', at);
+  const old = JSON.parse(rockDump({ updateTime: at - 1000 })); old.appIdentifier = 'OldOfficialIdentity';
+  reply(JSON.stringify(old));
+  await assert.rejects(pending, /应用状态已变化/);
+  assert.equal(f.registry.version(rockBundle), 111113); assert.equal(f.registry.isAppGallery(rockBundle), false);
+});
+
+test('an official label lookup cannot write its old name into a replacement installed during the lookup', async () => {
+  const f = originFixture(); let reply, started;
+  const entered = new Promise(resolve => started = resolve);
+  const { HdcDeviceBridge } = load('jobs/HdcDeviceBridge', { './InstalledAppRegistry': { InstalledAppRegistry: f.registry } });
+  const bridge = new HdcDeviceBridge({}); bridge.connected = async () => true;
+  const at = Date.now() - 10000, old = JSON.parse(rockDump({ updateTime: at })); old.appIdentifier = 'OldOfficialIdentity';
+  bridge.command = async operation => operation === 3 ? JSON.stringify(old) :
+    (started(), new Promise(resolve => reply = resolve));
+  const pending = bridge.installedSigningIdentity(rockBundle); await entered;
+  f.registry.rememberApplicationInfo(rockBundle, 111113, 'new-device-build', 'none', 'debug', 'shell', at + 1000);
+  f.registry.rememberDisplayName(rockBundle, '米哈游启动器'); reply('洛克王国：世界');
+  await assert.rejects(pending, /应用状态已变化/);
+  assert.equal(f.registry.displayName(rockBundle), '米哈游启动器'); assert.equal(f.registry.isAppGallery(rockBundle), false);
 });

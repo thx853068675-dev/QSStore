@@ -2,6 +2,8 @@ import { common } from '@kit.AbilityKit';
 import { http, socket } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { DeveloperAccount } from './DeveloperAccount';
+import { PrivacyConsent } from './PrivacyConsent';
+import { I18n } from './I18n';
 
 /**
  * 账号服务的临时故障标记。
@@ -11,7 +13,7 @@ import { DeveloperAccount } from './DeveloperAccount';
  */
 const TRANSIENT = 'TRANSIENT|';
 
-/** 已确认登录态失效（4xx）。与 TRANSIENT 相对，调用方必须重新登录。 */
+/** 已确认登录态失效（401）。与 TRANSIENT 相对，调用方必须重新登录。 */
 const AUTH_FAILED = 'AUTHFAILED|';
 
 export function isTransientAuthError(error: Object): boolean {
@@ -44,6 +46,7 @@ export class DevEcoLogin {
   private static async requestJson(url: string, method: http.RequestMethod,
     headers: Record<string, string> = {}, body: string = '',
     allowPlainToken: boolean = false): Promise<Record<string, Object>> {
+    PrivacyConsent.assertBusinessAllowed();
     const request = http.createHttp();
     try {
       const options: http.HttpRequestOptions = {
@@ -55,11 +58,13 @@ export class DevEcoLogin {
       };
       if (body.length > 0) options.extraData = body;
       const response = await request.request(url, options);
+      PrivacyConsent.assertBusinessAllowed();
       if (response.responseCode !== 200 || typeof response.result !== 'string') {
         const code = response.responseCode;
-        // 5xx / 0 是服务端或网络问题，4xx 才可能是登录态本身有问题
-        const head = (code === 0 || code === 408 || code === 429 || code >= 500) ? TRANSIENT : AUTH_FAILED;
-        throw new Error(head + '华为账号服务暂不可用（HTTP ' + code + '）');
+        // 只有明确的 401 可认定会话失效；403、429 等也可能是权限或服务限制。
+        if (code === 401) throw new Error(AUTH_FAILED + I18n.t('登录已过期，请重新登录'));
+        if (code === 403) throw new Error(TRANSIENT + I18n.t('华为账号服务拒绝访问，请检查账号权限后重试（HTTP 403）'));
+        throw new Error(TRANSIENT + I18n.t('华为账号服务暂不可用（HTTP ') + code + I18n.t('）'));
       }
       try {
         const parsed = JSON.parse(response.result) as Object;
@@ -77,7 +82,7 @@ export class DevEcoLogin {
           token.ret.msg = response.result.trim();
           return JSON.parse(JSON.stringify(token)) as Record<string, Object>;
         }
-        throw new Error('华为账号服务返回的数据格式无效');
+        throw new Error(I18n.t('华为账号服务返回的数据格式无效'));
       }
     } catch (error) {
       const text = String(error);
@@ -103,7 +108,7 @@ export class DevEcoLogin {
     account.displayName = String(info['nickName'] ?? '');
     if (typeof info['realName'] === 'boolean') account.realNameVerified = info['realName'] as boolean;
     if (account.accessToken.length === 0 || account.userId.length === 0) {
-      throw new Error('华为账号返回的信息不完整');
+      throw new Error(I18n.t('华为账号返回的信息不完整'));
     }
     return account;
   }
@@ -112,7 +117,7 @@ export class DevEcoLogin {
     const data = await DevEcoLogin.requestJson(AUTH_API + '/jwToken/check',
       http.RequestMethod.GET, { 'jwtToken': jwt, 'refresh': refresh ? 'true' : 'false' });
     const info = data['userInfo'] as Record<string, Object> | undefined;
-    if (!info) throw new Error('华为登录态已失效，请重新登录');
+    if (!info) throw new Error(I18n.t('华为登录态已失效，请重新登录'));
     const account = DevEcoLogin.fromUserInfo(info, jwt);
     await DevEcoLogin.fillPublicProfile(account);
     return account;
@@ -138,7 +143,7 @@ export class DevEcoLogin {
 
   static async refresh(saved: DeveloperAccount): Promise<DeveloperAccount> {
     const refreshed = await DevEcoLogin.userInfo(saved.jwtToken, true);
-    if (refreshed.userId !== saved.userId) throw new Error('账号身份发生变化，请重新登录');
+    if (refreshed.userId !== saved.userId) throw new Error(I18n.t('账号身份发生变化，请重新登录'));
     if (refreshed.avatarUrl.length === 0) refreshed.avatarUrl = saved.avatarUrl;
     if (refreshed.realNameVerified === undefined) refreshed.realNameVerified = saved.realNameVerified;
     if (refreshed.label === refreshed.userId && saved.label !== saved.userId) {
@@ -153,11 +158,12 @@ export class DevEcoLogin {
     const data = await DevEcoLogin.requestJson(url, http.RequestMethod.GET, {}, '', true);
     const ret = data['ret'] as Record<string, Object> | undefined;
     const jwt = String(ret?.['msg'] ?? '');
-    if (jwt.length === 0) throw new Error('华为授权回执无效');
+    if (jwt.length === 0) throw new Error(I18n.t('华为授权回执无效'));
     return DevEcoLogin.userInfo(jwt, false);
   }
 
   static async login(context: common.UIAbilityContext): Promise<DeveloperAccount> {
+    PrivacyConsent.assertBusinessAllowed();
     const server = socket.constructTCPSocketServerInstance();
     let port = 0;
     for (const candidate of [8888, 3333 + Math.floor(Math.random() * 1000)]) {
@@ -167,7 +173,7 @@ export class DevEcoLogin {
         break;
       } catch (_) {}
     }
-    if (port === 0) throw new Error('无法启动本机登录回调，请稍后重试');
+    if (port === 0) throw new Error(I18n.t('无法启动本机登录回调，请稍后重试'));
 
     let done = false;
     let timer = 0;
@@ -227,17 +233,17 @@ export class DevEcoLogin {
           await finish(undefined, new Error('已取消登录'));
         } else if (tokenMatch) {
           const account = await DevEcoLogin.exchange(decodeURIComponent(tokenMatch[1]));
-          messageText = '登录成功，请返回轻启·安装器';
+          messageText = I18n.t('登录成功，请返回轻启·安装器');
           resolveLogin(account);
           done = true;
           clearTimeout(timer);
         } else {
-          messageText = '无效的登录回调';
+          messageText = I18n.t('无效的登录回调');
         }
         } catch (error) {
           await finish(undefined, new Error(String(error)));
         }
-        const html = '<!doctype html><meta charset="utf-8"><title>华为账号登录</title>' +
+        const html = I18n.t('<!doctype html><meta charset="utf-8"><title>华为账号登录</title>') +
           '<p style="font:18px sans-serif;padding:32px">' + messageText + '</p>';
         try {
           await connection.send({ data: 'HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n' +
@@ -250,16 +256,17 @@ export class DevEcoLogin {
     });
 
     timer = setTimeout(() => {
-      finish(undefined, new Error('等待华为账号登录超时'));
+      finish(undefined, new Error(I18n.t('等待华为账号登录超时')));
     }, 600000);
     try {
+      PrivacyConsent.assertBusinessAllowed();
       await context.startAbility({
         action: 'ohos.want.action.viewData',
         entities: ['entity.system.browsable'],
         uri: AUTH_PAGE.replace('port=8888', 'port=' + port)
       });
     } catch (error) {
-      await finish(undefined, new Error('无法打开华为授权页：' + String(error)));
+      await finish(undefined, new Error(I18n.t('无法打开华为授权页：') + String(error)));
     }
     return result;
   }

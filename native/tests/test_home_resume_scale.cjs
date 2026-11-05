@@ -1,8 +1,11 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const { loadEts } = require('./load_ets.cjs');
-const { CatalogLookup } = loadEts('data/CatalogLookup');
+const lookupRelease = loadEts('data/ReleaseInfo');
+const { CatalogLookup } = loadEts('data/CatalogLookup', { './ReleaseInfo': lookupRelease,
+  './CatalogApp': loadEts('data/CatalogApp', { './ReleaseInfo': lookupRelease }) });
 const { InstallJob } = loadEts('jobs/InstallJob');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
@@ -14,16 +17,17 @@ function method(name) {
   assert(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
 }
 function page(names, mocks = {}) {
-  const box = { ...mocks };
+  const box = { DeviceOrbNavigation:{}, DeviceInstallGroup:require('./load_ets.cjs').loadEts('jobs/DeviceInstallGroup').DeviceInstallGroup, PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent,
+    UpdatePolicy: { disabled: () => false }, ...mocks };
   vm.runInNewContext(ts.transpileModule('class Page {' + names.map(method).join('\n') +
     '}; globalThis.Page=Page;', { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, box);
-  return new box.Page();
+  return Object.assign(new box.Page(), { updatePolicyReady: true });
 }
 
 test('one thousand installed source lookups reuse one catalog projection, including repeated warm frames', () => {
   const rows = Array.from({ length: 1000 }, (_, i) => app(i + 1)); let projections = 0;
   const ui = page(['catalogLookup', 'catalogApp', 'catalogForJob', 'updateApps'], {
-    CatalogLookup, ReleaseChannelRegistry: { apply: row => { projections++; return row; } }
+    CatalogLookup, InstalledAppRegistry: { isAppGallery: () => false }, ReleaseChannelRegistry: { apply: row => { projections++; return row; } }
   });
   Object.assign(ui, { apps: rows, updateCatalog: rows, updateCatalogReady: true, releaseChannelRevision: 1 });
   const first = ui.updateApps();
@@ -108,13 +112,13 @@ test('hidden management mutations coalesce without timers or list publication; r
   const ui = page(['syncManagementRows'], { setTimeout: fn => { timers.push(fn); return timers.length; } });
   const data = label => ({ update: rows => published.push([label, rows]), totalCount: () => 1 });
   Object.assign(ui, { pageVisible: false, managementRowsTimer: -1, queueRows: data('queue'),
-    onlineInstalledRows: data('online'), offlineInstalledRows: data('offline'), publishedRows: data('published'),
-    managementQueueJobs: () => ['latest queue'], managementInstalledJobs: local => [local ? 'offline' : 'online'], myApps: ['new publication'] });
+    onlineInstalledRows: data('online'), offlineInstalledRows: data('offline'), publishedRows: data('published'),followingRows:{update(){},totalCount:()=>0},followingSnapshot:[],
+    managementQueueJobs: () => [{id:'latest queue'}], managementInstalledJobs: local => [local ? 'offline' : 'online'], myApps: ['new publication'] });
   for (let i = 0; i < 100; i++) ui.syncManagementRows();
   assert.equal(timers.length, 0); assert.equal(published.length, 0); assert(ui.managementRowsPending);
   ui.pageVisible = true; ui.syncManagementRows(); ui.syncManagementRows(); assert.equal(timers.length, 1);
   timers.shift()(); assert.equal(published.length, 4); assert(!ui.managementRowsPending);
-  assert.deepEqual(published[0], ['queue', ['latest queue']]);
+  assert.deepEqual(published[0], ['queue', [{id:'latest queue'}]]);
   assert.deepEqual(published.at(-1), ['published', ['new publication']]);
 });
 
@@ -123,7 +127,8 @@ test('home lifecycle is read by small control components rather than the full ca
   const controls = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/components/HomeControls.ets'), 'utf8');
   assert.match(state, /@Track visible/); assert.doesNotMatch(source, /@State private pageVisible/);
   assert.match(controls, /@ObjectLink homeVisibility/);
-  assert.doesNotMatch(source.slice(source.indexOf('  @Builder\n  private discoverPage()')), /this\.pageVisible|this\.homeVisibility\.visible/);
+  const listStart=source.indexOf('  @Builder\n  private discoverList()');
+  assert.doesNotMatch(source.slice(listStart,source.indexOf('  @Builder',listStart+12)), /this\.pageVisible|this\.homeVisibility\.visible/);
 });
 
 test('an unchanged device inventory retains the mounted rows; real name, version, launcher and removal changes publish', () => {

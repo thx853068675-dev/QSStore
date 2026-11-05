@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 // Run: node --test native/tests/test_catalog_refresh.cjs
 // Exercise production page methods with deterministic network and image adapters.
 const { test } = require('node:test');
@@ -105,7 +106,7 @@ function fixture(clock) {
   const staleRefreshes = [];
   const removed = [];
   const calls = [];
-  const f = { requests, icons, saved, savedIcons, releases, staleRefreshes, cachedIcons: new Map(),
+  const f = { requests, icons, saved, savedIcons, releases, staleRefreshes, cacheGeneration: 0, iconCacheReads: [], cachedIcons: new Map(), fixedPortWakes: 0,
     staleChanged: 0, icon: async () => undefined,
     decode: async () => ({ release: async () => releases.push('pixels') }) };
   const f2 = {};
@@ -145,9 +146,10 @@ function fixture(clock) {
   f2.deviceVersions = {};
   f2.knownBundles = [];
   const sortDirections = new Map();
-  const sandbox = { ...sortLogic, DiscoverSortPreferences: { directionFor: key => sortDirections.get(key) || 'desc',
-    save: async (_, key, direction) => { sortDirections.set(key, direction); } }, AppStorage: { setOrCreate() {} }, ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, ForegroundIdle: { wait: async () => {}, cancel() {}, defer: (_key, fn) => setTimeout(fn, 0) }, VersionCacheEntry: class {}, InstalledBundleState: class { versionCode = -1; versionName = ''; }, setTimeout: clock?.setTimeout ?? setTimeout, clearTimeout: clock?.clearTimeout ?? clearTimeout, console, Curve: { EaseOut: 'ease-out' },
+  const sandbox = { PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent, ...sortLogic, DiscoverSortPreferences: { directionFor: key => sortDirections.get(key) || 'desc',
+    save: async (_, key, direction) => { sortDirections.set(key, direction); } }, AppStorage: { setOrCreate() {} }, ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, ForegroundIdle: { wait: async () => {}, promote() {}, cancel() {}, defer: (key, fn) => f.defer ? f.defer(key, fn) : setTimeout(fn, 0) }, VersionCacheEntry: class {}, InstalledBundleState: class { versionCode = -1; versionName = ''; }, setTimeout: clock?.setTimeout ?? setTimeout, clearTimeout: clock?.clearTimeout ?? clearTimeout, console, Curve: { EaseOut: 'ease-out' },
     InstallReconnect: { clear() {}, deactivate() {} }, InstallConfirmation: { deactivate() {} }, InstallCoordinator: { conditionReady() {} }, InstallStage: { WAITING_DEVICE: 'waiting-device' },
+    FixedDebugPort: { wake() { f.fixedPortWakes++; } },
     StoreClient: class {
       listApps(number, size, sort, query, category, forceRefresh, direction, snapshot, stablePages) {
         const d = deferred(); requests.push({ ...d, number, query, sort, category, forceRefresh, direction, snapshot, stablePages }); return d.promise;
@@ -158,15 +160,22 @@ function fixture(clock) {
     },
     getContext: () => ({}), errorText: e => (e && e.message) || String(e),
     AppIcon: class {}, CachedIcon: class {}, ListPage: class { items = []; rawItems = []; },
-    CatalogCache: { iconWithinLimit: () => true,
-      loadIcons: async (_, apps) => new Map(apps.filter(app => f.cachedIcons.has(app.id + ':' + app.iconRev))
-        .map(app => [app.id, f.cachedIcons.get(app.id + ':' + app.iconRev)])),
-      save: (_, rows) => saved.push(rows.map(r => r.id)),
-      saveIcons: (_, rows) => savedIcons.push(rows) },
+    CatalogCache: { generation: () => f.cacheGeneration, iconWithinLimit: () => true,
+      loadIcons: async (_, apps) => {
+        f.iconCacheReads.push(Array.from(apps, a => a.id));
+        return new Map(apps.filter(app => f.cachedIcons.has(app.id + ':' + app.iconRev))
+          .map(app => [app.id, f.cachedIcons.get(app.id + ':' + app.iconRev)]));
+      },
+      save: (_, rows, _raw, _sort, _direction, generation) => {
+        if (generation === f.cacheGeneration) saved.push(rows.map(r => r.id));
+      },
+      saveIcons: (_, rows, generation) => {
+        if (generation === f.cacheGeneration) savedIcons.push(rows);
+      } },
     image: { createImageSource: () => ({ createPixelMap: () => f.decode(),
       release: async () => releases.push('source') }) },
     util: { Base64Helper: class { encodeToStringSync(bytes) { return Buffer.from(bytes).toString('base64'); } } },
-    InstalledAppRegistry: { observedAt: () => 0, markCatalogSnapshot: async () => {}, versionName: () => '', version: () => -1 },
+    InstalledAppRegistry: { isAppGallery: () => false, hasApplicationOrigin: () => true, persist: async () => {}, observedAt: () => 0, markCatalogSnapshot: async () => {}, versionName: () => '', version: () => -1 },
     LocalBundles: f.localBundles,
     HdcDeviceBridge: f.bridgeClass,
     JobStore: { open: async () => f.store }
@@ -174,7 +183,7 @@ function fixture(clock) {
   vm.runInNewContext(code, sandbox);
   sandbox.Page.REFRESH_MIN_VISIBLE_MS = 20;
   const ui = new sandbox.Page();
-  Object.assign(ui, { homeVisibility: { visible: true }, managementRowsTimer: -1, resumeMaintenancePending: false, catalogStatePending: false, catalogStateRescan: false, discoverSort: 'discover', discoverDirection: 'desc', catalogSnapshot: '', catalogToken: 0, catalogFilterTimer: -1, activeQuery: '', activeCategory: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
+  Object.assign(ui, { homeVisibility: { visible: true }, managementRowsTimer: -1, resumeMaintenancePending: false, catalogStatePending: false, catalogStateRescan: false, discoverSort: 'stars', discoverDirection: 'desc', catalogSnapshot: '', catalogToken: 0, catalogFilterTimer: -1, activeQuery: '', activeCategory: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
     catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false, catalogMoreError: '',
     catalogRefreshing: false, catalogRefreshBusy: false, catalogError: '',
     getUIContext: () => ({ animateTo: (_options, change) => change() }),
@@ -191,6 +200,31 @@ function fixture(clock) {
   f.StoreClientClass = sandbox.StoreClient;
   return f;
 }
+
+test('a catalog response begun before cleanup still renders but cannot restore the cleared snapshot', async () => {
+  const f = fixture();
+  const old = f.ui.loadApps(); f.cacheGeneration++;
+  f.requests[0].resolve(page([1])); await old;
+  assert.equal(f.ui.apps[0].id, 1); assert.deepEqual(f.saved, []);
+  const fresh = f.ui.loadApps();
+  f.requests[1].resolve(page([2])); await fresh;
+  assert.deepEqual(f.saved, [[2]]);
+});
+
+test('an old discovery icon batch preserves visible icons but cannot refill disk after cleanup', async () => {
+  const f = fixture(), gate = deferred();
+  f.ui.apps = page([1]).items;
+  f.icon = () => gate.promise;
+  const old = f.ui.loadCatalogIcons(new f.StoreClientClass(), f.ui.apps, ''); await tick();
+  assert.deepEqual(f.icons, [1]);
+  f.cacheGeneration++;
+  gate.resolve(Uint8Array.from([42]).buffer); await old;
+  assert.equal(f.ui.appIcons.length, 1); assert.equal(f.savedIcons.length, 0);
+  f.ui.appIcons = []; f.icon = async () => Uint8Array.from([43]).buffer;
+  await f.ui.loadCatalogIcons(new f.StoreClientClass(), f.ui.apps, '');
+  assert.equal(f.savedIcons.length, 1, 'a genuinely new icon batch may cache again');
+});
+
 test('Refresh binding true before callback still starts a request; duplicate callbacks are coalesced', async () => {
   const f = fixture(), ui = f.ui;
   ui.catalogRefreshing = true;
@@ -427,13 +461,13 @@ test('displayApps preserves the committed order when new pages have already been
   assert.deepEqual(Array.from(ui.displayApps(), a => a.stars), [10, 300, 50, 120, 400]);
 });
 
-test('Discover asks the server to rank featured cards before both first-page and next-page slicing', async () => {
+test('Discover asks the server to rank stars before both first-page and next-page slicing', async () => {
   const f = fixture(), ui = f.ui;
   let run = ui.loadApps();
-  assert.equal(f.requests[0].sort, 'discover');
+  assert.equal(f.requests[0].sort, 'stars');
   f.requests[0].resolve(page([{ id: 1, stars: 9000 }], 60)); await run;
   run = ui.loadApps(false);
-  assert.equal(f.requests[1].sort, 'discover');
+  assert.equal(f.requests[1].sort, 'stars');
   f.requests[1].resolve(page([{ id: 2, stars: 150 }], 60)); await run;
   assert.deepEqual(Array.from(ui.displayApps(), app => app.id), [1, 2]);
 });
@@ -528,6 +562,34 @@ test('pull refresh waits for device recognition but leaves icon downloads in the
   assert.equal(ui.appIcons.length, 1);
   assert.equal(ui.installedVersions.get(1), 123);
   assert.equal(f.savedIcons[0][0].id, '1');
+});
+
+test('complete management metadata sync is deferred until after refresh, and does not hold its spinner', async () => {
+  const f = fixture(), ui = f.ui, background = deferred(), work = [];
+  ui.pageVisible = true; f.defer = (key, run) => work.push({ key, run });
+  const calls = [];
+  ui.loadUpdateCatalog = force => {
+    calls.push({ force, refreshing: ui.catalogRefreshing }); return background.promise;
+  };
+  const refresh = ui.pullRefreshCatalog(); f.requests[0].resolve(page([1])); await refresh;
+  assert.equal(ui.catalogRefreshing, false); assert.equal(calls.length, 0);
+  assert.equal(work[0].key, 'index-refresh-catalog');
+  work[0].run(); assert.deepEqual(calls, [{ force: true, refreshing: false }]);
+  background.resolve();
+});
+
+test('unchanged visible icons skip cache decoding; only missing revisions are read', async () => {
+  const f = fixture(), ui = f.ui;
+  ui.apps = page([1, 2]).items;
+  ui.appIcons = [{ id: 1, rev: 'rev-1' }, { id: 2, rev: 'rev-1' }];
+  await ui.loadCatalogIcons(new f.StoreClientClass(), ui.apps, '');
+  assert.equal(f.iconCacheReads.length, 0); assert.equal(f.icons.length, 0);
+  ui.apps[1].iconRev = 'rev-2';
+  f.icon = async () => new ArrayBuffer(4);
+  await ui.loadCatalogIcons(new f.StoreClientClass(), ui.apps, '');
+  assert.deepEqual(f.iconCacheReads, [[2]]);
+  assert.deepEqual(f.icons, [2]);
+  assert.equal(ui.appIcons.find(icon => icon.id === 2).rev, 'rev-2');
 });
 
 test('dispatcher deduplicates variant bundle names and only sends system-unknown packages to wireless', async () => {
@@ -628,7 +690,7 @@ test('a failed device scan releases pull refresh without erasing confirmed versi
   assert.equal(ui.installedVersions.get(1), 123);
 });
 
-test('failed automatic reconnect opens a sheet and successful manual connection resumes the same refresh', async () => {
+test('failed automatic reconnect opens a sheet and successful manual connection resumes the same refresh', { timeout: 3000 }, async () => {
   const f = fixture(), ui = f.ui;
   f.localVersion = -1; f.deviceConnected = false;
   ui.pageVisible = true; ui.showReconnect = false; ui.resumeJobId = ''; ui.reconnectPort = '45678';
@@ -655,7 +717,11 @@ test('failed automatic reconnect opens a sheet and successful manual connection 
   assert.equal(ui.showReconnect, true, 'bad manual port leaves the sheet available for retry');
   assert.equal(ui.catalogRefreshing, true);
   assert.equal(ui.reconnectBusy, false);
-  await ui.reconnect(); await pull;
+  assert.equal(f.fixedPortWakes, 0, 'a failed port must not restart fixed-port recovery');
+  await ui.reconnect();
+  assert.equal(f.fixedPortWakes, 1, 'a successful manual connection resets fixed-port recovery before resuming refresh');
+  assert.equal(ui.refreshConnectionWaiter, undefined, 'success must wake the pending refresh before the test awaits it');
+  await pull;
   assert.equal(probes, 2, 'resume the existing batch, without an extra parallel scan');
   assert.equal(ui.showReconnect, false);
   assert.equal(ui.catalogRefreshing, false);

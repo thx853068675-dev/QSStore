@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -31,7 +32,7 @@ function fixture() {
     './InstallJob': identity.exports, './InstalledAppRegistry': { InstalledSigningIdentity: class {}, InstalledAppRegistry: {
       signingIdentity: () => f.cached, installationTime: () => f.installationTime || 0 } }
   };
-  const box = { exports: {}, require: name => mocks[name] || {}, setTimeout };
+  const box = { exports: {}, require: name => mocks[name] || publicConsentModule(name), setTimeout };
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(folder, 'InstalledSigningExpiry.ets'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
@@ -169,7 +170,7 @@ function managementFixture() {
     estimateMaterials: async (_context, bundles) => { f.batches.push(Array.from(bundles)); if (f.wait) await f.wait; return []; },
     estimate: () => f.estimate, label: (exact, estimate) => exact ? '到期' : estimate ? '预计到期' : '待确认',
     dueSoon: value => value > 0 };
-  const box = { Index: { TAB_MANAGE: 2 }, ForegroundIdle: { wait: async () => {} }, InstalledSigningExpiry: expiry, getContext: () => ({}),
+  const box = { PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent, Index: { TAB_MANAGE: 2 }, ForegroundIdle: { wait: async () => {} }, InstalledSigningExpiry: expiry, getContext: () => ({}),
     InstalledAppRegistry: { installationTime: () => 1800000000000 }, InstallStage: { INSTALLED: 'installed' } };
   vm.runInNewContext(ts.transpileModule('class Page {' + methods + '}; globalThis.Page = Page;', {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }

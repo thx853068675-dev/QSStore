@@ -53,6 +53,7 @@ export class SubmitDraft {
 }
 
 export class AppReview {
+  canDelete: boolean = false;
   id: number = 0;
   displayName: string = '';
   avatarUrl: string = '';
@@ -63,6 +64,7 @@ export class AppReview {
   static fromJson(row: Record<string, Object>): AppReview {
     const review = new AppReview();
     review.id = Number(row['id'] ?? 0);
+    review.canDelete = row['can_delete'] === true || row['can_delete'] === 1;
     review.displayName = String(row['display_name'] ?? '');
     const avatar = String(row['avatar_url'] ?? '');
     review.avatarUrl = /^https:\/\//.test(avatar) ? avatar : '';

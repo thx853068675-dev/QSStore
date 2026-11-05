@@ -5,6 +5,7 @@ const ts = require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio
 const root = path.join(__dirname, '../entry/src/main/ets');
 function load(file, mocks, globals = {}) {
   const exports = {};
+  if (file === 'data/SettingsCache' && !mocks['./ApplicationIcons']) mocks['./ApplicationIcons'] = { applicationIcons: () => ({ stats: () => ({ bytes: 0 }), clear: () => {} }) };
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, file + '.ets'), 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS }
   }).outputText, { exports, require: name => mocks[name] || {}, ...globals });
@@ -124,32 +125,39 @@ test('cache measurement cannot follow symlinks or include signing materials and 
     isDirectory: () => !file, isSymbolicLink: () => link });
   const files = { '/sandbox/install-jobs': stat(0, false), '/sandbox/install-jobs/job.hap': stat(4096),
     '/sandbox/install-jobs/symlink.app': stat(100000, true, true), '/sandbox/install-jobs/nested.zip': stat(0, false) };
-  const { SettingsCache } = load('data/SettingsCache', { './CatalogCache': { CatalogCache: { size: async () => 2048 } }, '@kit.CoreFileKit': { fileIo: {
+  const { SettingsCache } = load('data/SettingsCache', { './CatalogCache': { CatalogCache: { size: async () => 2048 } },
+    './DeviceArtwork': { DeviceArtwork: { size: async () => 512 } },
+    '../jobs/DownloadIconCache': { DownloadIconCache: { size: async () => 1024 } }, '@kit.CoreFileKit': { fileIo: {
     lstat: async file => { paths.push(file); if (!files[file]) throw Error('gone'); return files[file]; },
     listFile: async () => ['job.hap', 'symlink.app', 'nested.zip', 'gone.part', '../identity.pem', 'identity.pem', 'metadata.json']
   } } });
-  assert.equal(await SettingsCache.size({ filesDir: '/sandbox' }), 6144);
+  assert.equal(await SettingsCache.size({ filesDir: '/sandbox' }), 7680);
   assert.ok(paths.every(file => file.startsWith('/sandbox/install-jobs') && !file.includes('..') && !file.endsWith('.pem')));
 });
 test('cache cleanup combines public catalog cleanup with protected jobs, preserving signing materials and drafts', async () => {
   const calls = [], context = { filesDir: '/sandbox', cacheDir: '/cache' };
   const { SettingsCache } = load('data/SettingsCache', {
+    './DeviceArtwork': { DeviceArtwork: { clear: async () => calls.push('device-art') } },
     './CatalogCache': { CatalogCache: { clear: async ctx => { assert.equal(ctx, context); calls.push('catalog'); } } },
+    '../jobs/DownloadIconCache': { DownloadIconCache: { clear: async ctx => { assert.equal(ctx, context); calls.push('download-icons'); } } },
     '../jobs/JobStore': { JobStore: { open: async ctx => {
     assert.equal(ctx, context); calls.push('open');
     return { pruneCompleted: async ctx => { assert.equal(ctx, context); calls.push('completed'); },
+      pruneSupersededFailures: async ctx => { assert.equal(ctx, context); calls.push('superseded'); },
       cleanupOrphanedPackages: async ctx => { assert.equal(ctx, context); calls.push('orphans'); } };
   } } } });
   await SettingsCache.clean(context);
-  assert.deepEqual(calls, ['open', 'completed', 'orphans', 'catalog']);
+  assert.deepEqual(calls, ['open', 'completed', 'superseded', 'orphans', 'catalog', 'download-icons', 'device-art']);
 });
 
 test('phone icon cache is counted even when there are no installation working files', async () => {
   const { SettingsCache } = load('data/SettingsCache', {
     './CatalogCache': { CatalogCache: { size: async () => 8192 } },
+    './DeviceArtwork': { DeviceArtwork: { size: async () => 512 } },
+    '../jobs/DownloadIconCache': { DownloadIconCache: { size: async () => 4096 } },
     '@kit.CoreFileKit': { fileIo: { lstat: async () => { throw Error('no install files'); } } }
   });
-  assert.equal(await SettingsCache.size({ filesDir: '/sandbox' }), 8192);
+  assert.equal(await SettingsCache.size({ filesDir: '/sandbox' }), 12800);
 });
 test('management refresh keeps its indicator until both server lists and device inventory finish', async () => {
   const source = fs.readFileSync(path.join(root, 'pages/Index.ets'), 'utf8');
@@ -160,6 +168,7 @@ test('management refresh keeps its indicator until both server lists and device 
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, sandbox);
   const ui = new sandbox.Page(), gates = [], calls = [];
+  ui.syncFollowing = async () => {};
   for (const name of ['loadMyApps', 'refreshInstalled', 'loadUpdateCatalog']) {
     ui[name] = () => { calls.push(name); return new Promise(resolve => gates.push(resolve)); };
   }
@@ -203,4 +212,17 @@ test('appearance selection closes the menu before applying the theme and Back di
   ui.selectAppearance('dark'); assert.deepEqual(changes, [{ mode: 'dark', open: false }]);
   ui.appearanceMenuOpen = true; ui.back(); assert.equal(ui.appearanceMenuOpen, false); assert.equal(timers.length, 0);
   ui.back(); assert.equal(timers.length, 1);
+});
+
+test('installed application market icons are counted and cleared with other caches', async () => {
+  const calls = [], context = {filesDir:'/sandbox',cacheDir:'/cache'};
+  const {SettingsCache} = load('data/SettingsCache', {
+    './ApplicationIcons': {applicationIcons: dir => {assert.equal(dir,'/cache');return {stats:()=>({bytes:321}),clear:()=>calls.push('icons')};}},
+    './CatalogCache':{CatalogCache:{size:async()=>0,clear:async()=>{}}},
+    './DeviceArtwork':{DeviceArtwork:{size:async()=>0,clear:async()=>{}}},
+    '../jobs/DownloadIconCache':{DownloadIconCache:{size:async()=>0,clear:async()=>{}}},
+    '../jobs/JobStore':{JobStore:{open:async()=>({pruneCompleted:async()=>{},pruneSupersededFailures:async()=>{},cleanupOrphanedPackages:async()=>{}})}},
+    '@kit.CoreFileKit':{fileIo:{lstat:async()=>{throw Error('missing');}}}
+  });
+  assert.equal(await SettingsCache.size(context),321);await SettingsCache.clean(context);assert.deepEqual(calls,['icons']);
 });

@@ -1,7 +1,9 @@
+import { InstallPreflight } from './InstallPreflight';
 import { isPending } from './RecoveryPlanner';
 import { InstallReconnect } from './InstallReconnect';
 import { InstallCertificateSlots } from './InstallCertificateSlots';
 import { InstallJob, InstallStage } from './InstallJob';
+import { I18n } from '../data/I18n';
 
 /** 进程内的任务视图：阶段来自已落盘记录，进度来自下载器，执行状态来自调度器。 */
 export class InstallTaskSnapshot {
@@ -23,6 +25,16 @@ export class InstallTaskState {
   private static nextListener: number = 0;
   private static pulseTimer: number = -1;
   private static orderedIds: string[] = [];
+  private static targetProvider:()=>string=()=>'';
+  static setTargetProvider(provider:()=>string):void {InstallTaskState.targetProvider=provider;}
+  static targetChanged():void {InstallTaskState.jobsRevision++;InstallTaskState.emit();}
+  private static targetKey(value:string):string {
+    if(!value)return 'local';
+    try{return String((JSON.parse(value) as Record<string,Object>)['udid']||'invalid').toLowerCase();}catch(_){return 'invalid';}
+  }
+  private static belongs(row:InstallTaskSnapshot, target?:string):boolean {
+    return InstallTaskState.targetKey(row.job.installTarget??'')===InstallTaskState.targetKey(target??InstallTaskState.targetProvider());
+  }
   private static orderDirty: boolean = true;
   private static jobsRevision: number = 0;
 
@@ -186,19 +198,19 @@ export class InstallTaskState {
       (row.job.stage === InstallStage.INSTALLING && row.phase === 'transfer'));
   }
 
-  static forApp(rows: InstallTaskSnapshot[], appId: number, bundleName: string = ''):
+  static forApp(rows: InstallTaskSnapshot[], appId: number, bundleName: string = '', target?:string):
     InstallTaskSnapshot | undefined {
     const matches = rows.filter((row: InstallTaskSnapshot) =>
-      (appId > 0 && row.job.appId === appId) ||
-      (bundleName.length > 0 && row.job.bundleName === bundleName));
+      InstallTaskState.belongs(row,target) && ((appId > 0 && row.job.appId === appId) ||
+      (bundleName.length > 0 && row.job.bundleName === bundleName)));
     return matches.find((row: InstallTaskSnapshot) => row.running) ?? matches[0];
   }
 
   /** 活动任务按应用归属展示，切换频道不能使正在安装的任务消失。 */
-  static activeForApp(rows: InstallTaskSnapshot[], appId: number, bundleName: string = ''):
+  static activeForApp(rows: InstallTaskSnapshot[], appId: number, bundleName: string = '', target?:string):
     InstallTaskSnapshot | undefined {
     const active = rows.filter((row: InstallTaskSnapshot) =>
-      ((appId > 0 && row.job.appId === appId) ||
+      InstallTaskState.belongs(row,target) && ((appId > 0 && row.job.appId === appId) ||
         (bundleName.length > 0 && row.job.bundleName === bundleName)) &&
       (row.running || row.finishing || isPending(row.job.stage)));
     return active.find((row: InstallTaskSnapshot) => row.running || row.finishing) ?? active[0];
@@ -206,24 +218,25 @@ export class InstallTaskState {
 
   /** 当前选中的 Release 附件；旧版本或被重新上传的失败任务不能劫持新按钮。 */
   static forAsset(rows: InstallTaskSnapshot[], appId: number, bundleName: string,
-    assetName: string, sha256: string, versionCode: number): InstallTaskSnapshot | undefined {
+    assetName: string, sha256: string, versionCode: number, target?:string): InstallTaskSnapshot | undefined {
     if (assetName.length === 0) return undefined;
     const matches = rows.filter((row: InstallTaskSnapshot) => {
       const job = row.job;
+      if(!InstallTaskState.belongs(row,target))return false;
       if (appId > 0 ? job.appId !== appId : job.bundleName !== bundleName) return false;
       if (job.assetName !== assetName) return false;
       if (versionCode > 0 && job.catalogVersionCode > 0 &&
         job.catalogVersionCode !== versionCode) return false;
       if (/^[0-9a-fA-F]{64}$/.test(sha256) &&
         job.expectedSha256.toLowerCase() !== sha256.toLowerCase() &&
-        !job.id.endsWith(':' + sha256.toLowerCase())) return false;
+        (job.catalogSha256??'').toLowerCase()!==sha256.toLowerCase() && !job.id.endsWith(':' + sha256.toLowerCase())) return false;
       return true;
     });
     return matches.find((row: InstallTaskSnapshot) => row.running) ?? matches[0];
   }
 
   static stagePercent(stage: InstallStage): number {
-    return stage === InstallStage.INSTALLED ? 100 : 0;
+    return stage === InstallStage.INSTALLED || stage === InstallStage.SKIPPED ? 100 : 0;
   }
 
   /** 安装处理没有分母，显示阶段和耗时，不将里程碑冒充精确百分比。 */
@@ -240,61 +253,65 @@ export class InstallTaskState {
 
   /** 圆环中央仅显示两个字，完整状态仍用于详情按钮和安装记录。 */
   static compactLabel(row: InstallTaskSnapshot): string {
-    if (row.finishing) return '收尾';
+    if (row.finishing) return I18n.t('收尾');
     switch (row.job.stage) {
-      case InstallStage.QUEUED: return '排队';
-      case InstallStage.DOWNLOADING: return row.running ? '下载' : '续传';
-      case InstallStage.VERIFIED: return '读取';
-      case InstallStage.PACKAGE_INSPECTED: return '授权';
-      case InstallStage.PROFILE_READY: return '签名';
+      case InstallStage.QUEUED: return I18n.t('排队');
+      case InstallStage.DOWNLOADING: return row.running ? I18n.t('下载') : I18n.t('续传');
+      case InstallStage.VERIFIED: return I18n.t('读取');
+      case InstallStage.PACKAGE_INSPECTED: return I18n.t('授权');
+      case InstallStage.PROFILE_READY: return I18n.t('签名');
       case InstallStage.SIGNED:
-      case InstallStage.SIGNATURE_VERIFIED: return '准备';
+      case InstallStage.SIGNATURE_VERIFIED: return I18n.t('准备');
       case InstallStage.INSTALLING:
-        if (!row.running) return '确认';
-        if (row.phase === 'transfer') return '传包';
-        if (row.phase === 'verifying') return '核对';
-        return row.phase === 'waiting' || !row.phase ? '接收' : '安装';
-      case InstallStage.INSTALLED: return '完成';
-      case InstallStage.WAITING_DEVICE: return '连接';
-      case InstallStage.WAITING_ACCOUNT: return '登录';
-      case InstallStage.WAITING_CERTIFICATE: return '证书';
-      case InstallStage.WAITING_CONFIRMATION: return '确认';
-      case InstallStage.WAITING_NETWORK: return '网络';
-      case InstallStage.RETRYABLE_ERROR: return '暂停';
-      case InstallStage.TERMINAL_ERROR: return '失败';
-      default: return '准备';
+        if (!row.running) return I18n.t('确认');
+        if (row.phase === 'transfer') return I18n.t('传包');
+        if (row.phase === 'verifying') return I18n.t('核对');
+        return row.phase === 'waiting' || !row.phase ? I18n.t('接收') : I18n.t('安装');
+      case InstallStage.SKIPPED: return I18n.t('跳过');
+      case InstallStage.INSTALLED: return I18n.t('完成');
+      case InstallStage.WAITING_DEVICE: return I18n.t('连接');
+      case InstallStage.WAITING_ACCOUNT: return I18n.t('登录');
+      case InstallStage.WAITING_CERTIFICATE: return I18n.t('证书');
+      case InstallStage.WAITING_CONFIRMATION: return I18n.t('确认');
+      case InstallStage.WAITING_COMPATIBILITY: return I18n.t('适配');
+      case InstallStage.WAITING_NETWORK: return I18n.t('网络');
+      case InstallStage.RETRYABLE_ERROR: return I18n.t('暂停');
+      case InstallStage.TERMINAL_ERROR: return I18n.t('失败');
+      default: return I18n.t('准备');
     }
   }
 
   static label(row: InstallTaskSnapshot, now: number = Date.now()): string {
-    if (row.finishing) return '正在收尾';
+    if (row.finishing) return I18n.t('正在收尾');
     switch (row.job.stage) {
-      case InstallStage.QUEUED: return '排队中';
-      case InstallStage.DOWNLOADING: return row.running ? '下载中' +
-        (row.total > 0 ? ' ' + row.percent + '%' : '') : '等待继续下载';
-      case InstallStage.VERIFIED: return '读取安装包';
-      case InstallStage.PACKAGE_INSPECTED: return '准备授权';
-      case InstallStage.PROFILE_READY: return '签名中';
+      case InstallStage.QUEUED: return I18n.t('排队中');
+      case InstallStage.DOWNLOADING: return row.running ? I18n.t('下载中') +
+        (row.total > 0 ? ' ' + row.percent + '%' : '') : I18n.t('等待继续下载');
+      case InstallStage.VERIFIED: return I18n.t('读取安装包');
+      case InstallStage.PACKAGE_INSPECTED: return I18n.t('准备授权');
+      case InstallStage.PROFILE_READY: return I18n.t('签名中');
       case InstallStage.SIGNED:
-      case InstallStage.SIGNATURE_VERIFIED: return '准备安装';
+      case InstallStage.SIGNATURE_VERIFIED: return I18n.t('准备安装');
       case InstallStage.INSTALLING: {
-        if (!row.running) return '等待确认安装';
-        if (row.phase === 'transfer' && row.total > 0) return '传送中 ' + row.percent + '%';
+        if (!row.running) return I18n.t('等待确认安装');
+        if (row.phase === 'transfer' && row.total > 0) return I18n.t('传送中 ') + row.percent + '%';
         const currentPhase = row.phase ?? '';
-        const phase = currentPhase === 'verifying' ? '确认安装结果' :
-          (currentPhase === 'waiting' || currentPhase.length === 0 ? '等待设备接收' : '系统安装中');
+        const phase = currentPhase === 'verifying' ? I18n.t('确认安装结果') :
+          (currentPhase === 'waiting' || currentPhase.length === 0 ? I18n.t('等待设备接收') : I18n.t('系统安装中'));
         const elapsed = InstallTaskState.stageElapsedMs(row, now);
-        return elapsed >= 1000 ? phase + ' · ' + Math.floor(elapsed / 1000) + ' 秒' : phase;
+        return elapsed >= 1000 ? phase + ' · ' + Math.floor(elapsed / 1000) + I18n.t(' 秒') : phase;
       }
-      case InstallStage.INSTALLED: return '安装完成';
-      case InstallStage.WAITING_DEVICE: return '等待连接';
-      case InstallStage.WAITING_ACCOUNT: return '等待登录';
-      case InstallStage.WAITING_CERTIFICATE: return '等待释放证书名额';
-      case InstallStage.WAITING_CONFIRMATION: return '等待确认数据清除';
-      case InstallStage.WAITING_NETWORK: return '等待网络';
-      case InstallStage.RETRYABLE_ERROR: return '安装暂停';
-      case InstallStage.TERMINAL_ERROR: return '安装失败';
-      default: return '准备中';
+      case InstallStage.SKIPPED: return InstallPreflight.skipMessage(row.job.skipReason);
+      case InstallStage.INSTALLED: return I18n.t('安装完成');
+      case InstallStage.WAITING_DEVICE: return I18n.t('等待连接');
+      case InstallStage.WAITING_ACCOUNT: return I18n.t('等待登录');
+      case InstallStage.WAITING_CERTIFICATE: return I18n.t('等待释放证书名额');
+      case InstallStage.WAITING_CONFIRMATION: return I18n.t('等待确认数据清除');
+      case InstallStage.WAITING_COMPATIBILITY: return I18n.t('等待确认设备适配');
+      case InstallStage.WAITING_NETWORK: return I18n.t('等待网络');
+      case InstallStage.RETRYABLE_ERROR: return I18n.t('安装暂停');
+      case InstallStage.TERMINAL_ERROR: return I18n.t('安装失败');
+      default: return I18n.t('准备中');
     }
   }
 }

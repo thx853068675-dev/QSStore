@@ -44,9 +44,34 @@ export function displayVersion(raw: string, appName: string = ''): string {
   return result;
 }
 
-/** 展示优先级：发行标签、发行标题、包内版本；内部编号仍用于签装和设备校验。 */
+function withoutReleaseBuild(version: string): string {
+  return version.replace(/[-+]\d+$/, '');
+}
+
+/** 标题的构建号必须同时匹配当前包编号和同一语义版本。 */
+export function verifiedReleaseBuildVersion(releaseName: string, releaseTag: string,
+  packageVersion: string, appName: string, packageVersionCode: number): string {
+  const title = displayVersion(releaseName, appName);
+  const tag = displayVersion(releaseTag, appName);
+  const bracket = /[（(]\s*(?:(?:build|versioncode|构建(?:编号)?|内部编号)\s*[:：]?\s*)?(\d+)\s*[）)]\s*$/i.exec(releaseName);
+  const inline = /[-+](\d+)$/.exec(title);
+  const build = bracket?.[1] ?? inline?.[1] ?? '';
+  const titleBase = withoutReleaseBuild(title).toLowerCase();
+  const packageBase = withoutReleaseBuild(displayVersion(packageVersion, appName)).toLowerCase();
+  // 不能用标题里的发布日期或另一个附件的编号覆盖语义版本。
+  if (Number.isInteger(packageVersionCode) && packageVersionCode > 0 && Number(build) === packageVersionCode &&
+    /^\d+(?:\.\d+){1,5}(?:-[a-zA-Z0-9]+(?:[.\-][a-zA-Z0-9]+)*)?$/.test(title) &&
+    titleBase === packageBase && (!/^\d/.test(tag) || withoutReleaseBuild(tag).toLowerCase() === titleBase)) {
+    return bracket !== null ? withoutReleaseBuild(title) + '-' + String(packageVersionCode) : title;
+  }
+  return '';
+}
+
+/** 固定 tag 下换包时，以包内编号证实标题的新构建号；其余仍优先发行标签。 */
 export function releaseDisplayVersion(releaseName: string, releaseTag: string,
-  packageVersion: string, appName: string = ''): string {
+  packageVersion: string, appName: string = '', packageVersionCode: number = 0): string {
+  const verified = verifiedReleaseBuildVersion(releaseName, releaseTag, packageVersion, appName, packageVersionCode);
+  if (verified) return verified;
   for (const raw of [releaseTag, releaseName]) {
     const version = displayVersion(raw, appName);
     if (/^\d+(?:\.\d+){0,5}(?:-[a-zA-Z0-9]+(?:[.\-][a-zA-Z0-9]+)*)?(?:\+[a-zA-Z0-9]+(?:[.\-][a-zA-Z0-9]+)*)?$/.test(version)) {

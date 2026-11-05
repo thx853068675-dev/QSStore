@@ -1,7 +1,9 @@
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const {loadEts}=require('./load_ets.cjs');
 const {CatalogPackageVariant:Variant}=loadEts('data/CatalogPackageVariant');
-const {CatalogLookup}=loadEts('data/CatalogLookup');
+const lookupRelease=loadEts('data/ReleaseInfo');
+const {CatalogLookup}=loadEts('data/CatalogLookup',{'./ReleaseInfo':lookupRelease,
+ './CatalogApp':loadEts('data/CatalogApp',{'./ReleaseInfo':lookupRelease})});
 const direct={name:'HarmonyX-v2.4.2-unsigned.hap',url:'https://github.com/haohaoai0/HarmonyX/releases/download/v2.4.2/HarmonyX-v2.4.2-unsigned.hap',bundleName:'com.haohaoai0.harmonx',versionCode:16};
 const archive={...direct,name:'HarmonyX-v2.4.2-unsigned.app.zip / entry-default.hap',url:direct.url+'.zip#qingqi-package=entry-default.hap'};
 test('Harmony X old filename tracks the same HAP or archive variant through a release rename',()=>{

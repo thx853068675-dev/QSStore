@@ -1,4 +1,4 @@
-import { releaseDisplayVersion } from '../data/DisplayVersion';
+import { releaseDisplayVersion, verifiedReleaseBuildVersion } from '../data/DisplayVersion';
 import { HapAsset } from '../data/ReleaseInfo';
 import { InstallJob, InstallStage } from './InstallJob';
 
@@ -38,7 +38,7 @@ export class ReleaseUpdate {
   static completedAt(job: InstallJob): number {
     const history = job.stageHistory ?? [];
     for (let i = history.length - 1; i >= 0; i--) {
-      if (history[i].stage === InstallStage.INSTALLED) return history[i].at;
+      if (history[i].stage === InstallStage.INSTALLED || history[i].stage === InstallStage.SKIPPED) return history[i].at;
     }
     return job.updatedAt;
   }
@@ -66,7 +66,7 @@ export class ReleaseUpdate {
   }
 
   static version(asset: HapAsset): string {
-    return releaseDisplayVersion(asset.releaseName ?? '', asset.releaseTag ?? '', asset.versionName ?? '');
+    return releaseDisplayVersion(asset.releaseName ?? '', asset.releaseTag ?? '', asset.versionName ?? '', '', asset.versionCode);
   }
 
   static forJob(job: InstallJob): HapAsset {
@@ -88,9 +88,15 @@ export class ReleaseUpdate {
     const digest = asset.sha256?.toLowerCase() ?? '';
     const actual = previous?.expectedSha256?.toLowerCase() ?? '';
     const catalog = previous?.catalogSha256?.toLowerCase() ?? '';
-    if (/^[a-f0-9]{64}$/.test(digest) && (digest === actual || digest === catalog)) return false;
-    const before = previous === undefined ? installedName : releaseDisplayVersion(previous.releaseName ?? '',
-      ReleaseUpdate.tag(previous), previous.versionName || installedName);
+    const editedSource = previous?.editedSourceSha256?.toLowerCase() ?? '';
+    if (/^[a-f0-9]{64}$/.test(digest) &&
+      (digest === actual || digest === catalog || digest === editedSource)) return false;
+    // Git tag 可在原编号下换包或改名。真实构建号已相同，不能再把旧标签中的
+    // 装饰编号当成另一个已安装版本；缺少摘要的旧日志也不能要求再装一次。
+    const verifiedInstalled = verifiedReleaseBuildVersion(asset.releaseName ?? '', asset.releaseTag ?? '',
+      installedName || previous?.versionName || '', '', installed);
+    const before = verifiedInstalled || (previous === undefined ? installedName : releaseDisplayVersion(previous.releaseName ?? '',
+      ReleaseUpdate.tag(previous), previous.versionName || installedName, '', previous.versionCode));
     const order = ReleaseUpdate.compare(ReleaseUpdate.version(asset), before);
     if (order !== undefined && order !== 0) return order > 0;
     // 同号替换发行附件也可更新。没有安装来源/摘要证据时不能仅凭哈希不同猜测。
@@ -106,8 +112,10 @@ export class ReleaseUpdate {
     if (asset.versionCode > 0 && installed > asset.versionCode) return true;
     if (installed <= 0 || asset.versionCode !== installed) return false;
     const previous = ReleaseUpdate.record(jobs, asset.bundleName, installed, updateTime);
-    const before = previous === undefined ? installedName : releaseDisplayVersion(previous.releaseName ?? '',
-      ReleaseUpdate.tag(previous), previous.versionName || installedName);
+    const verifiedInstalled = verifiedReleaseBuildVersion(asset.releaseName ?? '', asset.releaseTag ?? '',
+      installedName || previous?.versionName || '', '', installed);
+    const before = verifiedInstalled || (previous === undefined ? installedName : releaseDisplayVersion(previous.releaseName ?? '',
+      ReleaseUpdate.tag(previous), previous.versionName || installedName, '', previous.versionCode));
     return (ReleaseUpdate.compare(ReleaseUpdate.version(asset), before) ?? 0) < 0;
   }
 }

@@ -1,10 +1,10 @@
 import { afterPaint } from '../theme/AfterPaint';
 import { HomeVisibility } from '../theme/HomeVisibility';
-import { uiMaterial } from '@kit.ArkUI';
-import { deviceInfo } from '@kit.BasicServicesKit';
 import { motion } from '@kit.MultimodalAwarenessKit';
 import { Palette } from '../theme/Palette';
 import { DiscoverMotion } from './DiscoverHeader';
+import { StoreMaterial } from '../theme/StoreMaterial';
+import { I18n } from '../data/I18n';
 
 /** Scroll thresholds update only this overlay, not the catalog's card tree. */
 @Component
@@ -16,13 +16,15 @@ export struct DiscoverTopOverlay {
   @Prop active: boolean = true;
   @Prop epoch: number = 0;
   action: () => void = () => {};
+  backAction: () => void = () => {};
 
   build() {
     Stack({ alignContent: Alignment.Bottom }) {
         // Keep the control mounted while hidden; only real route ownership changes replace it.
         ForEach([this.epoch], (_epoch: number) => {
           DiscoverTopAction({ darkMode: this.darkMode, inset: this.inset,
-            active: this.motion.showTop && this.active && this.homeVisibility.visible, action: this.action })
+            active: this.motion.showTop && this.active && this.homeVisibility.visible, action: this.action,
+            backAction: this.backAction })
             .position({ left: 0, bottom: 116 }).hitTestBehavior(HitTestMode.None)
         }, (epoch: number) => String(epoch))
     }.width('100%').height('100%').hitTestBehavior(HitTestMode.None)
@@ -73,6 +75,7 @@ export class HoldingSide {
 
 @Component
 export struct DiscoverTopAction {
+  @StorageProp('materialMode') private materialMode: string = 'adaptive';
   @StorageProp('routeTransitioning') @Watch('onActiveChanged') private routeTransitioning:boolean=false;
   @Prop darkMode: boolean = false;
   @Prop inset: number = 24;
@@ -82,6 +85,7 @@ export struct DiscoverTopAction {
   private popupGeneration: number = 0;
   private disposed: boolean = false;
   action: () => void = () => {};
+  backAction: () => void = () => {};
   private holding: HoldingSide = new HoldingSide((left: boolean): void => { this.leftHand = left; });
 
   aboutToAppear(): void {
@@ -111,20 +115,20 @@ export struct DiscoverTopAction {
   @Builder
   private arrow() {
     SymbolGlyph($r('sys.symbol.arrow_up')).fontSize(21)
-      .fontColor([Palette.forMode(this.darkMode).text])
+      .fontColor([StoreMaterial.icon(this.darkMode,this.materialMode)])
   }
 
   @Builder
   private immersiveAction() {
     Button({ type: ButtonType.Circle }) { this.arrow() }
-      .width(48).height(48).id('discover-back-to-top').accessibilityText('回到顶部')
+      .width(48).height(48).id('discover-back-to-top').accessibilityText(I18n.t('回到顶部'))
       .backgroundColor(Color.Transparent)
       .onClick(() => this.action())
   }
 
   build() {
     Row() {
-      if (deviceInfo.sdkApiVersion >= 26 && uiMaterial.isImmersiveMaterialSupported()) {
+      if (StoreMaterial.supported(this.materialMode)) {
         // Ordinary Button material only works in navigation/tab bars on API 26.
         // Popup supports system material throughout the page. A nonmodal,
         // arrowless circular popup supplies the native floating backplate.
@@ -134,12 +138,13 @@ export struct DiscoverTopAction {
             placement: Placement.Top, targetSpace: 0, offset: { x: 0, y: 48 },
             enableArrow: false, autoCancel: false, focusable: false, mask: false,
             transition: TransitionEffect.IDENTITY,
-            systemMaterial: new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THIN,
-              colorInvert: true, applyShadow: true, interactive: true,
-              lightEffect: { color: Palette.forMode(this.darkMode).surface } }) })
+            onWillDismiss: (action: DismissPopupAction) => {
+              if (action.reason === DismissReason.PRESS_BACK && this.active && !this.routeTransitioning) this.backAction();
+            },
+            systemMaterial: StoreMaterial.glass(this.materialMode, this.darkMode) })
         if (this.active && !this.routeTransitioning && !this.popupReady) {
           Button({ type: ButtonType.Circle }) { this.arrow() }
-            .width(48).height(48).id('discover-back-to-top-preview').accessibilityText('回到顶部')
+            .width(48).height(48).id('discover-back-to-top-preview').accessibilityText(I18n.t('回到顶部'))
             .backgroundColor(Palette.forMode(this.darkMode).fill)
             .onClick(() => this.action())
         }
@@ -147,10 +152,11 @@ export struct DiscoverTopAction {
       } else {
         // 旧系统尚无组件级 ImmersiveMaterial，使用系统毛玻璃保持形态与可读性。
         Button({ type: ButtonType.Circle }) { this.arrow() }
-          .width(48).height(48).id('discover-back-to-top').accessibilityText('回到顶部')
+          .width(48).height(48).id('discover-back-to-top').accessibilityText(I18n.t('回到顶部'))
           .backgroundColor(Color.Transparent)
-          .backgroundBlurStyle(BlurStyle.COMPONENT_THIN, {
+          .backgroundBlurStyle(StoreMaterial.blurStyle(this.materialMode), {
             colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT })
+          .backgroundColor(StoreMaterial.fallbackFill(this.darkMode))
           .border({ width: 0.5, color: Palette.forMode(this.darkMode).border, radius: 24 })
           .shadow(ShadowStyle.OUTER_DEFAULT_SM)
           .onClick(() => this.action())

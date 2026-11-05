@@ -1,4 +1,5 @@
 import { BusinessError } from '@kit.BasicServicesKit';
+import { I18n } from '../data/I18n';
 
 /**
  * 把 catch 到的任意值转成能读的文案。
@@ -15,9 +16,9 @@ export function errorText(error: Object): string {
   const business = error as BusinessError;
   if (business !== undefined && business.code !== undefined) {
     const detail = business.message !== undefined ? business.message : '';
-    return detail.length > 0 ? detail + '（错误码 ' + business.code + '）' :
-      '错误码 ' + business.code;
+    return detail.length > 0 ? detail + I18n.t('（错误码 ') + business.code + I18n.t('）') :
+      I18n.t('错误码 ') + business.code;
   }
   const text = String(error);
-  return text.length > 0 ? text : '未知错误';
+  return text.length > 0 ? text : I18n.t('未知错误');
 }

@@ -4,6 +4,7 @@ import { AssetDownload } from './AssetDownload';
 import { FailureKind, InstallJob, InstallStage } from './InstallJob';
 import { JobStore } from './JobStore';
 import { checkCatalogIdentity, inspectPackage, PackageInspectError, PackageIdentity } from './PackageInspector';
+import { I18n } from '../data/I18n';
 
 export class DownloadJobs {
   /**
@@ -27,7 +28,7 @@ export class DownloadJobs {
         identity = path.endsWith('.app') ? await PackageArchive.inspect(path) : inspectPackage(path);
         checkCatalogIdentity(job.catalogBundleName, job.catalogVersionCode, identity);
       });
-      if (identity === undefined) throw new PackageInspectError('下载包尚未核对身份');
+      if (identity === undefined) throw new PackageInspectError(I18n.t('下载包尚未核对身份'));
       job.stage = InstallStage.VERIFIED;
       await store.save(job);
       job.bundleName = identity.bundleName;

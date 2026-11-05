@@ -1,8 +1,19 @@
+const { DeviceInstallTarget } = require('./load_ets.cjs').loadEts('jobs/DeviceInstallTarget');
 const { loadEts } = require('./load_ets.cjs');
-const { CatalogLookup } = loadEts('data/CatalogLookup');
+const lookupRelease = loadEts('data/ReleaseInfo');
+const { CatalogLookup } = loadEts('data/CatalogLookup', { './ReleaseInfo': lookupRelease,
+  './CatalogApp': loadEts('data/CatalogApp', { './ReleaseInfo': lookupRelease }) });
 const { InstallJob } = loadEts('jobs/InstallJob');
 const ReleaseUpdate = require('./release_update_fixture.cjs').releaseUpdate({ INSTALLED: 'INSTALLED' });
+const { CatalogPackageVariant } = loadEts('data/CatalogPackageVariant');
+const { CatalogInstallTarget } = loadEts('jobs/CatalogInstallTarget', {
+  '../data/CatalogPackageVariant': { CatalogPackageVariant }, './ReleaseUpdate': { ReleaseUpdate },
+  './InstallJob': { InstallJob, InstallStage: { INSTALLED: 'INSTALLED' } }
+});
 const { releaseDisplayVersion } = loadEts('data/DisplayVersion');
+const { InstalledVersionDisplay } = loadEts('data/InstalledVersionDisplay', {
+  './DisplayVersion': loadEts('data/DisplayVersion'), '../jobs/ReleaseUpdate': { ReleaseUpdate }
+});
 // Production update matching and pagination, without a device or network.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -12,10 +23,10 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
-const names = ['catalogLookup', 'displayInstalledVersion', 'installedAssets', 'latestAssets', 'assetForBundle', 'updateApps', 'catalogApp', 'catalogForJob', 'renewalAppId', 'openJobDetails', 'loadUpdateCatalog', 'syncDiscoveryCategories',
+const names = ['catalogLookup', 'displayInstalledVersion', 'installedAssets', 'latestAssets', 'assetForBundle', 'catalogTarget', 'updateApps', 'catalogApp', 'catalogForJob', 'renewalAppId', 'openJobDetails', 'openInstalledInformation', 'loadUpdateCatalog', 'syncDiscoveryCategories',
   'catalogBundleName', 'catalogInstallable', 'installedVersionOf', 'installedBundleOf', 'installedJobFor', 'updateForApp',
   'installFromCatalog', 'checkInstalledUpdates', 'updateFor', 'allInstalledJobs', 'currentInstalledView',
-  'recentInstalledJobs', 'startUpdate', 'updatableInstalledJobs', 'updateAllInstalled', 'managementInstalledJobs', 'versionLabel', 'installedActionLabel', 'performInstalledAction'];
+  'recentInstalledJobs', 'startUpdate', 'updatableInstalledJobs', 'hasInstalledUpdates', 'updateAllInstalled', 'managementInstalledJobs', 'versionLabel', 'installedActionLabel', 'performInstalledAction', 'syncDetectedInstalled', 'jobIcon'];
 const methods = names.map(name => {
   const start = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
   assert.notEqual(start, -1, name);
@@ -34,22 +45,24 @@ function local() {
     versionCode: 1, stage: 'INSTALLED', updatedAt: 1 };
 }
 function fixture() {
-  const f = { requests: [], routes: [], downloads: [], enqueues: [], actual: -1,
+  const f = { requests: [], routes: [], downloads: [], enqueues: [], recognitions: [], actual: -1, official: new Set(), disabled: new Set(),
     fetch: async () => ({ items: [], pageSize: 100, total: 0 }) };
   const store = { enqueue: async (...args) => {
     f.enqueues.push(args); f.lastJob = { id: 'online', appId: args[0], stage: 'QUEUED' };
     return f.lastJob;
   } };
-  const sandbox = { CatalogPackageVariant: loadEts('data/CatalogPackageVariant').CatalogPackageVariant, CatalogLookup, InstallJob, ReleaseUpdate, releaseDisplayVersion, Index: { TAB_MINE: 3 }, InstalledInspection:{selection:(job,title,appId)=>({...job,title,appId})}, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {},
+  const sandbox = { FollowingRegistry:{entries:()=>[]},ManagementSort:require('./load_ets.cjs').loadEts('data/ManagementSort').ManagementSort, MultiDeviceTargets:{snapshots:()=>['']}, MultiDeviceInstall:{enqueue:async(_store,job)=>[job]}, DeviceInstallTarget, CatalogInstallTarget, CatalogPackageVariant, CatalogLookup, InstallJob, ReleaseUpdate, releaseDisplayVersion, InstalledVersionDisplay, Index: { TAB_MINE: 3 }, InstalledInspection:{selection:(job,title,appId,displayReleaseLabel,displayReleaseUpdateTime)=>({...job,title,appId,displayReleaseLabel,displayReleaseUpdateTime,displayReleaseVersionCode:job.versionCode})}, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, VersionCacheEntry: class {},
     StoreClient: class { listApps(...args) { f.requests.push(args); return f.fetch(...args); } },
     InstallStage: { QUEUED: 'QUEUED', DOWNLOADING: 'DOWNLOADING', WAITING_NETWORK: 'WAITING_NETWORK',
       INSTALLED: 'INSTALLED' },
     UpdateTarget: class {}, LocalBundles: { isSelfBundle: () => false, isKnown: v => v !== -1,
       installedVersion: () => f.actual, liveInstalledVersion: () => f.actual,
       installedVersionName: () => f.versionName ?? '' },
-    InstalledAppRegistry: { signingIdentity: () => f.signingIdentity, observedAt: () => 0, version: () => f.actual, versionName: () => f.observedName ?? '' },
+    InstalledAppRegistry: { isAppGallery: bundle => f.official.has(bundle), installationTime: () => f.updateTime ?? 0, signingIdentity: () => f.signingIdentity, observedAt: () => 0, version: () => f.actual, versionName: () => f.observedName ?? '' },
     StorePageMotion: { pushUrl: value => f.routes.push(value) }, getContext: () => ({}),
-    errorText: e => e.message, JobStore: { open: async () => store },
+    UpdatePolicy: { disabled: bundle => f.disabled.has(bundle) },
+    InstallDeviceCompatibility: { confirm: async () => true, confirmedFingerprint: () => '' },
+    errorText: e => e.message, JobStore: { open: async () => { if (f.storeWait) await f.storeWait; return store; } },
     JobScheduler: { runDownload: async (_, __, job) => f.downloads.push(job) }
   };
   const identity = { exports: {}, require: () => ({ InstallStage: sandbox.InstallStage }) };
@@ -63,9 +76,11 @@ function fixture() {
   Object.assign(f.ui, { activeQuery: '', activeCategory: '', discoveryCategories: [], apps: [], updateCatalog: [], updateCatalogReady: false,
     renewalDeadline: () => 1800000000,
     updateCatalogBusy: false, updateCatalogError: '', installedJobs: [local()],
-    enqueuingAppIds: [], signedIn: true, taskPending: () => false, loadJobs: async () => {},
-    installedDisplay: { get: () => f.actual >= 0 ? { version: f.actual, versionName: f.versionName ?? f.observedName ?? '' } : undefined }, storeInstalled: [], installedVersions: new Map(), updates: [], activeJobId: '',
-    refreshCatalogInstallState() { this.checkInstalledUpdates(); }, jobRunning: () => false,
+    enqueuingAppIds: [], signedIn: true, updatePolicyReady: true, taskPending: () => false, loadJobs: async () => {},
+    installedDisplay: { get: () => f.actual >= 0 ? { version: f.actual, versionName: f.versionName ?? f.observedName ?? '' } : undefined }, storeInstalled: [], deviceInstalled: [], localIcons: [], pendingJobs: [], installedVersions: new Map(), updates: [], activeJobId: '',
+    syncDetectedInstalled() {}, refreshCatalogInstallState(rescan, added) {
+      f.recognitions.push({ rescan, added }); this.checkInstalledUpdates();
+    }, jobRunning: () => false,
     jobIcon:()=>undefined,jobTitle:()=> '同名应用',openInstalled(job) { f.opened = job; },
     syncManagementIcons() {}, drainInstallQueue() { f.downloads.push(f.lastJob); f.continued = f.lastJob; } });
   return f;
@@ -89,6 +104,109 @@ test('only the exact nonempty bundle and a higher version qualify', () => {
 test('newer actual device version suppresses a stale local record update', () => {
   const f = fixture(); f.actual = 3; f.ui.updateCatalog = [app()]; f.ui.updateCatalogReady = true;
   f.ui.checkInstalledUpdates(); assert.equal(f.ui.updates.length, 0);
+});
+
+test('AppGallery Rock Kingdom is not the installed MiHoYo launcher despite their real bundle collision', () => {
+  const f = fixture(), ui = f.ui, bundle = 'com.nrc.huawei';
+  const launcher = app(73, bundle, 3002000);
+  Object.assign(launcher, { displayName: '米哈游启动器', repo: 'muleos/MiHoYoLauncher' });
+  launcher.latestAsset.versionName = '3.2.0';
+  f.actual = 111112; f.versionName = '1.111.0.112'; f.official.add(bundle);
+  ui.apps = [launcher]; ui.updateCatalog = [launcher]; ui.updateCatalogReady = true;
+  const device = { ...local(), id: 'device-' + bundle, bundleName: bundle,
+    sourceUrl: 'device', assetName: '洛克王国：世界', versionCode: 111112,
+    versionName: '1.111.0.112' };
+  ui.installedJobs = []; ui.deviceInstalled = [device];
+  delete ui.syncDetectedInstalled;
+  ui.syncDetectedInstalled(); ui.checkInstalledUpdates();
+  assert.equal(ui.storeInstalled.length, 0, 'release AppGallery installs are never synthetic store receipts');
+  assert.equal(ui.allInstalledJobs().length, 0, 'official release apps are outside the sideload inventory');
+  assert.equal(ui.catalogForJob(device), undefined);
+  assert.equal(ui.installedVersionOf(73), 0, 'Discover sees the launcher as not installed');
+  assert.equal(ui.installedBundleOf(73), ''); assert.equal(ui.installedJobFor(73), undefined);
+  assert.equal(ui.updateForApp(73), undefined); assert.equal(ui.updates.length, 0);
+  assert.equal(ui.managementInstalledJobs(false).length, 0);
+  assert.equal(ui.managementInstalledJobs(true).length, 0);
+  assert.equal(ui.catalogInstallable(73), true, 'the real launcher remains a selectable download');
+});
+
+test('old store receipts cannot revive an AppGallery replacement or borrow a launcher icon', () => {
+  const f = fixture(), ui = f.ui, bundle = 'com.nrc.huawei';
+  f.actual = 111112; f.official.add(bundle);
+  const launcher = app(73, bundle, 3002000);
+  ui.apps = [launcher]; ui.updateCatalog = [launcher]; ui.updateCatalogReady = true;
+  const history = { ...local(), appId: 73, bundleName: bundle, versionCode: 3000000,
+    assetName: 'MiHoYoLauncher.hap', sourceUrl: 'https://example.com/launcher.hap' };
+  const synthetic = { ...history, id: 'store-73-' + bundle, versionCode: 111112 };
+  ui.installedJobs = [history]; ui.storeInstalled = [synthetic];
+  ui.managedIconFor = () => { throw Error('an official install must not request launcher pixels'); };
+  const actualPixels = { app: '洛克王国：世界' };
+  ui.localIcons = [{ jobId: 'device-' + bundle, pixels: actualPixels }]; delete ui.jobIcon;
+  assert.equal(ui.catalogForJob(history), undefined);
+  assert.equal(ui.jobIcon(history), actualPixels, 'an explicit app information view still uses device pixels');
+  assert.equal(ui.allInstalledJobs().length, 0); ui.checkInstalledUpdates();
+  assert.equal(ui.updates.length, 0); assert.equal(ui.installedVersionOf(73), 0);
+  delete ui.syncDetectedInstalled; ui.syncDetectedInstalled();
+  assert.equal(ui.storeInstalled.length, 0, 'a rescan purges stale synthetic association');
+  assert.equal(history.appId, 73); assert.equal(history.versionCode, 3000000,
+    'guarded presentation never rewrites the historical installation receipt');
+  f.official.delete(bundle);
+  assert.equal(ui.jobIcon(history), actualPixels,
+    'a verified installed icon also wins over catalog fallback for genuine debug sideloads');
+});
+
+test('the same bundle becomes associable again after a verified debug sideload replaces AppGallery', () => {
+  const f = fixture(), ui = f.ui, bundle = 'com.nrc.huawei', launcher = app(73, bundle, 3002000);
+  f.actual = 3000000; f.official.add(bundle);
+  ui.installedJobs = []; ui.apps = [launcher]; ui.updateCatalog = [launcher]; ui.updateCatalogReady = true;
+  delete ui.syncDetectedInstalled; ui.syncDetectedInstalled(); assert.equal(ui.storeInstalled.length, 0);
+  f.official.delete(bundle); ui.syncDetectedInstalled(); ui.checkInstalledUpdates();
+  assert.equal(ui.storeInstalled.length, 1); assert.equal(ui.storeInstalled[0].appId, 73);
+  assert.equal(ui.catalogForJob(ui.storeInstalled[0]).id, 73);
+  assert.equal(ui.installedVersionOf(73), 3000000); assert.equal(ui.updateForApp(73).versionCode, 3002000);
+  assert.equal(ui.managementInstalledJobs(false).length, 1);
+  assert.equal(ui.managementInstalledJobs(true).length, 0);
+  f.actual = 3002000; ui.checkInstalledUpdates();
+  assert.equal(ui.updateForApp(73), undefined); assert.equal(ui.updates.length, 0);
+});
+
+test('automatic inventory association refuses duplicate-repository bundle collisions in either catalog order', () => {
+  for (const rows of [[app(7), app(8)], [app(8), app(7)]]) {
+    const f = fixture(), ui = f.ui; f.actual = 1;
+    ui.apps = rows; ui.updateCatalog = rows; ui.updateCatalogReady = true;
+    const external = local(); ui.installedJobs = []; ui.deviceInstalled = [external];
+    delete ui.syncDetectedInstalled; ui.syncDetectedInstalled(); ui.checkInstalledUpdates();
+    assert.equal(ui.storeInstalled.length, 0, 'automatic linking cannot fabricate a pinned source from row order');
+    assert.equal(ui.catalogForJob(external), undefined); assert.equal(ui.updates.length, 0);
+    assert.equal(ui.managementInstalledJobs(false).length, 0);
+    assert.equal(ui.managementInstalledJobs(true).length, 1, 'ambiguous sources remain local sideloads');
+  }
+});
+
+test('unknown legacy provenance preserves a unique external sideload association without changing history', () => {
+  const f = fixture(), ui = f.ui; f.actual = 1;
+  ui.apps = [app()]; ui.updateCatalog = ui.apps; ui.updateCatalogReady = true;
+  const before = JSON.stringify(ui.installedJobs);
+  delete ui.syncDetectedInstalled; ui.syncDetectedInstalled(); ui.checkInstalledUpdates();
+  assert.equal(ui.storeInstalled.length, 1); assert.equal(ui.catalogForJob(ui.installedJobs[0]).id, 7);
+  assert.equal(ui.updateForApp(7).versionCode, 2);
+  assert.equal(ui.managementInstalledJobs(false).length, 1);
+  assert.equal(ui.managementInstalledJobs(true).length, 0);
+  assert.equal(JSON.stringify(ui.installedJobs), before);
+});
+
+test('120391 stops updating immediately after the first upgrade despite an old-tag receipt without hashes', () => {
+  const f=fixture(), bundle='com.tonghongxiang.quietstart', latest=app(1,bundle,120391);
+  Object.assign(latest.latestAsset,{versionName:'1.2.2-beta',releaseName:'轻启 1.2.2-beta（120391）',
+    releaseTag:'v1.2.2-beta-120391'});
+  f.ui.installedJobs=[{...local(),appId:1,bundleName:bundle,versionCode:120391,versionName:'1.2.2-beta',
+    releaseTag:'v1.2.2-beta-120375',releaseName:'轻启 1.2.2-beta（120375）'}];
+  f.ui.apps=[latest];f.ui.updateCatalog=[latest];f.ui.updateCatalogReady=true;f.observedName='1.2.2-beta';
+  f.actual=120375;f.ui.checkInstalledUpdates();assert.equal(f.ui.updates.length,1);
+  f.actual=120391;f.ui.checkInstalledUpdates();
+  assert.equal(f.ui.installedVersionOf(1),120391);
+  assert.equal(f.ui.updates.length,0);assert.equal(f.ui.updateForApp(1),undefined);
+  assert.equal(f.ui.updatableInstalledJobs().length,0);
 });
 test('Management displays the HDC-detected external update while preserving installation history', () => {
   const f = fixture(), old = { ...local(), versionCode: 110003, versionName: '1.1.0' };
@@ -181,15 +299,31 @@ test('an unchanged background update check keeps the existing catalog objects', 
   f.fetch = async () => ({ items: [app()], total: 1, pageSize: 100 });
   await f.ui.loadUpdateCatalog();
   assert.equal(f.ui.updateCatalog, previous); assert.equal(f.ui.updateCatalog[0], previous[0]);
+  assert.equal(f.recognitions.length, 0, 'unchanged background metadata does not repeat the device scan');
   assert.equal(f.ui.updateCatalogBusy, false); assert.equal(f.ui.updateCatalogError, '');
 });
-test('installed local and linked rows open installed information; updates still enqueue the catalog asset', async () => {
+
+test('background metadata changes reuse confirmed versions and only newly introduced bundles are probed', async () => {
+  const f = fixture(); f.ui.updateCatalogReady = true; f.ui.updateCatalog = [app()];
+  f.fetch = async () => ({ items: [app(7, 'com.example.app', 3)], total: 1, pageSize: 100 });
+  await f.ui.loadUpdateCatalog();
+  assert.equal(f.ui.updateFor('com.example.app').versionCode, 3);
+  assert.equal(f.recognitions.length, 0);
+  f.fetch = async () => ({ items: [app(7, 'com.example.app', 3), app(8, 'com.example.new')], total: 2, pageSize: 100 });
+  await f.ui.loadUpdateCatalog();
+  assert.equal(f.recognitions.length, 1);
+  assert.deepEqual(Array.from(f.recognitions[0].added, a => a.id), [8]);
+  assert.equal(f.recognitions[0].rescan, false);
+});
+test('linked cards open store details; local-only cards keep information on the separate swipe action', async () => {
   const f = fixture(); const { ui } = f; ui.updateCatalog = [app()]; ui.updateCatalogReady = true;
-  ui.openJobDetails(ui.installedJobs[0]); assert.equal(f.routes[0].url,'pages/InstalledDetail');assert.equal(JSON.parse(f.routes[0].params.selection).appId,7);
+  ui.openJobDetails(ui.installedJobs[0]); assert.equal(f.routes[0].url,'pages/Detail');assert.equal(f.routes[0].params.id,7);
+  ui.openInstalledInformation(ui.installedJobs[0]); assert.equal(f.routes[1].url,'pages/InstalledDetail');assert.equal(JSON.parse(f.routes[1].params.selection).appId,7);
   ui.checkInstalledUpdates(); await ui.startUpdate(ui.installedJobs[0], ui.updates[0]);
   assert.equal(f.enqueues[0][0], 7); assert.equal(f.enqueues[0][2], app().latestAsset.url);
   assert.equal(f.downloads.length, 1); assert.equal(f.continued.appId, 7);
-  ui.updateCatalog = []; ui.openJobDetails(ui.installedJobs[0]); assert.equal(f.routes.length, 2);assert.equal(JSON.parse(f.routes[1].params.selection).appId,0);
+  ui.updateCatalog = []; ui.openJobDetails(ui.installedJobs[0]); assert.equal(f.routes.length, 2);
+  ui.openInstalledInformation(ui.installedJobs[0]); assert.equal(f.routes.length,3);assert.equal(JSON.parse(f.routes[2].params.selection).appId,0);
 });
 test('after online update only one installed row remains while local history survives', () => {
   const { ui } = fixture(); const original = ui.installedJobs[0];
@@ -252,7 +386,7 @@ test('same-code LNGA release updates are shared and enqueue a durable explicit r
   await ui.installFromCatalog(latest);
   assert.equal(f.enqueues[0][8],'1.2.6');assert.equal(f.enqueues[0][10],true);
   ui.installedJobs=[{...old,releaseTag:'1.2.6',expectedSha256:'b'.repeat(64),
-    stageHistory:[{stage:'INSTALLED',at:200}]}];ui.checkInstalledUpdates();
+    stageHistory:[{stage:'INSTALLED',at:200}]}];f.updateTime=200;ui.checkInstalledUpdates();
   assert.equal(ui.installedActionLabel(ui.installedJobs[0]),'打开');
   assert.equal(ui.updateForApp(26),undefined);assert.equal(ui.versionLabel(ui.installedJobs[0]),'1.2.6');
 });
@@ -331,16 +465,20 @@ test('a stale empty Discover row uses the current catalog package for installati
   assert.equal(f.ui.catalogInstallable(7), true);
 });
 
-test('Management pins updates without disturbing stable order or the other bundle from the same repository', () => {
+test('Management sorts by latest release time and retains distinct packages from one repository', () => {
   const { ui } = fixture();
   const a = { ...local(), id: 'a', bundleName: 'com.example.a' };
   const b = { ...local(), id: 'b', bundleName: 'com.example.b', appId: 12 };
   const c = { ...local(), id: 'c', bundleName: 'com.example.c', appId: 12 };
   ui.allInstalledJobs = () => [a, b, c];
-  ui.updateCatalog = [app(10, a.bundleName), app(12, b.bundleName), app(13, c.bundleName)];
+  const multiPackage = app(12, b.bundleName);
+  multiPackage.latestAssets = [multiPackage.latestAsset, app(12, c.bundleName).latestAsset];
+  ui.managementSort='updated';ui.managementDirection='desc';
+  multiPackage.latestPublishedAt='2026-10-23T00:00:00Z';
+  ui.updateCatalog = [{...app(10, a.bundleName),latestPublishedAt:'2026-10-22T00:00:00Z'}, multiPackage];
   ui.updateCatalogReady = true; ui.pendingJobs = []; ui.installedLocalOnly = false;
   ui.updates = [{ bundleName: c.bundleName }];
-  assert.deepEqual(Array.from(ui.managementInstalledJobs(), job => job.id), ['c', 'a', 'b']);
+  assert.deepEqual(Array.from(ui.managementInstalledJobs(), job => job.id), ['b', 'c', 'a']);
   ui.pendingJobs = [{ appId: 12, bundleName: b.bundleName, catalogBundleName: b.bundleName }];
   assert.deepEqual(Array.from(ui.managementInstalledJobs(), job => job.id), ['c', 'a']);
 });
@@ -367,6 +505,73 @@ test('bulk enqueue retains failures while continuing other apps and requires log
   let calls = 0; ui.startUpdate = async () => { calls++; if (calls === 1) throw Error('来源暂不可用'); };
   await ui.updateAllInstalled(); assert.equal(calls, 2); assert.match(ui.jobsError, /来源暂不可用/);
   ui.signedIn = false; await ui.updateAllInstalled(); assert.equal(calls, 2); assert.match(ui.jobsError, /登录/);
+});
+
+test('pending policy restore and stopped bundles hide every automatic update action, then restore without changing receipts', async () => {
+  const f = fixture(), ui = f.ui, bundle = local().bundleName;
+  ui.updateCatalog = [app()]; ui.updateCatalogReady = true;
+  const receipt = JSON.stringify(ui.installedJobs);
+  ui.updatePolicyReady = false; ui.checkInstalledUpdates();
+  assert.equal(ui.updateForApp(7), undefined); assert.equal(ui.updateFor(bundle), undefined);
+  assert.equal(ui.hasInstalledUpdates(), false); assert.equal(ui.updatableInstalledJobs().length, 0);
+  ui.updatePolicyReady = true; ui.checkInstalledUpdates();
+  assert.equal(ui.hasInstalledUpdates(), true);
+  f.disabled.add(bundle);
+  assert.equal(ui.updateFor(bundle), undefined, 'a stale cached update map cannot bypass the saved policy');
+  assert.equal(ui.hasInstalledUpdates(), false);
+  await ui.startUpdate(ui.installedJobs[0], ui.updates[0]); assert.equal(f.enqueues.length, 0);
+  ui.checkInstalledUpdates(); assert.equal(ui.updates.length, 0);
+  assert.equal(ui.updateForApp(7), undefined); assert.equal(ui.installedActionLabel(ui.installedJobs[0]), '打开');
+  await ui.performInstalledAction(ui.installedJobs[0]); assert.equal(f.opened.bundleName, bundle);
+  await ui.updateAllInstalled(); assert.equal(f.enqueues.length, 0);
+  f.disabled.delete(bundle); ui.checkInstalledUpdates();
+  assert.equal(ui.updateForApp(7).versionCode, 2); assert.equal(ui.installedActionLabel(ui.installedJobs[0]), '更新');
+  assert.equal(ui.hasInstalledUpdates(), true);
+  assert.equal(JSON.stringify(ui.installedJobs), receipt);
+});
+
+test('stopping one bundle preserves another package from the same repository without changing explicit time sorting', () => {
+  const f = fixture(), ui = f.ui;
+  const a = { ...local(), id: 'a', bundleName: 'com.example.a', appId: 12 };
+  const b = { ...local(), id: 'b', bundleName: 'com.example.b', appId: 12 };
+  ui.allInstalledJobs = () => [a, b];
+  const multi = app(12, a.bundleName); multi.latestAssets = [multi.latestAsset, app(12, b.bundleName).latestAsset];
+  ui.updateCatalog = [multi]; ui.updateCatalogReady = true; ui.pendingJobs = [];
+  ui.checkInstalledUpdates(); assert.equal(ui.updates.length, 2);
+  f.disabled.add(a.bundleName); ui.checkInstalledUpdates();
+  assert.equal(ui.updateFor(a.bundleName), undefined); assert.equal(ui.updateFor(b.bundleName).appId, 12);
+  assert.deepEqual(Array.from(ui.managementInstalledJobs(false), job => job.id), ['a', 'b']);
+});
+
+test('a policy saved while the journal opens prevents both known and UNKNOWN installed updates from enqueueing', async () => {
+  for (const actual of [1, -1]) {
+    const f = fixture(), ui = f.ui; f.actual = actual;
+    ui.updateCatalog = [app()]; ui.updateCatalogReady = true;
+    let release; f.storeWait = new Promise(done => release = done);
+    const pending = ui.startUpdate(ui.installedJobs[0], { appId: 7, bundleName: local().bundleName, assetName: 'app.hap' });
+    await new Promise(setImmediate); f.disabled.add(local().bundleName); release(); await pending;
+    assert.equal(f.enqueues.length, 0); assert.equal(f.downloads.length, 0);
+    assert.equal(ui.enqueuingAppIds.length, 0);
+  }
+});
+
+test('confirmed external uninstall still permits a fresh Discover installation under the retained policy', async () => {
+  const f = fixture(), ui = f.ui; f.actual = 0; f.disabled.add(local().bundleName);
+  ui.updateCatalog = [app()]; ui.updateCatalogReady = true;
+  await ui.installFromCatalog(app()); assert.equal(f.enqueues.length, 1);
+});
+
+test('bulk update rechecks saved policies each iteration and leaves an already accepted package running', async () => {
+  const f = fixture(), ui = f.ui;
+  const installed = ['a', 'b'].map((key, i) => ({ ...local(), id: key, bundleName: 'com.example.' + key, appId: i + 1 }));
+  ui.allInstalledJobs = () => installed; ui.updateCatalog = installed.map((job, i) => app(i + 1, job.bundleName));
+  ui.updateCatalogReady = true;
+  let release; const queued = [];
+  ui.startUpdate = async job => { queued.push(job.id); if (job.id === 'a') await new Promise(done => release = done); };
+  const work = ui.updateAllInstalled(); await new Promise(setImmediate);
+  f.disabled.add(installed[0].bundleName); f.disabled.add(installed[1].bundleName);
+  release(); await work;
+  assert.deepEqual(queued, ['a']); assert.equal(ui.bulkUpdating, false);
 });
 
 

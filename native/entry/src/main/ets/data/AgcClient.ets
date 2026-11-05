@@ -4,6 +4,8 @@ import { AccountService } from './AccountService';
 import { ServiceFailure, ClassifiedFailure } from './ServiceFailure';
 import { FailureKind } from '../jobs/InstallJob';
 import { certificateQuotaFailure } from './CertificateQuota';
+import { PrivacyConsent } from './PrivacyConsent';
+import { I18n } from './I18n';
 
 const AGC_API = 'https://connect-api.cloud.huawei.com/api';
 
@@ -49,6 +51,7 @@ export class AgcClient {
   private async request(path: string, body?: Object,
     method?: http.RequestMethod, retried: boolean = false, appId: string = '',
     form?: string): Promise<Record<string, Object>> {
+    PrivacyConsent.assertBusinessAllowed();
     const request = http.createHttp();
     const startedAt = Date.now();
     const verb = method ?? (body ? http.RequestMethod.POST : http.RequestMethod.GET);
@@ -70,6 +73,7 @@ export class AgcClient {
       if (body) options.extraData = JSON.stringify(body);
       if (form !== undefined) options.extraData = form;
       const response = await request.request(AGC_API + path, options);
+      PrivacyConsent.assertBusinessAllowed();
       if (response.responseCode === 401 && !retried) {
         await AccountService.refresh(this.account, true);
         return this.request(path, body, method, true, appId, form);
@@ -78,8 +82,8 @@ export class AgcClient {
         const code = response.responseCode;
         throw new ServiceFailure(code === 401 ? FailureKind.ACCOUNT :
           code === 403 ? FailureKind.INTERNAL : FailureKind.NETWORK,
-          code === 401 ? '登录已过期，请重新登录' : code === 403 ? 'AGC 权限不足，请检查开发者账号授权' :
-            code === 429 ? 'AGC 请求过于频繁，请稍后重试' : 'AGC 暂时无法完成请求（HTTP ' + code + '）', code);
+          code === 401 ? I18n.t('登录已过期，请重新登录') : code === 403 ? I18n.t('AGC 权限不足，请检查开发者账号授权') :
+            code === 429 ? I18n.t('AGC 请求过于频繁，请稍后重试') : I18n.t('AGC 暂时无法完成请求（HTTP ') + code + I18n.t('）'), code);
       }
       const data = JSON.parse(response.result) as Record<string, Object>;
       const ret = data['ret'] as Record<string, Object> | undefined;
@@ -90,7 +94,7 @@ export class AgcClient {
           return this.request(path, body, method, true, appId, form);
         }
         throw new ServiceFailure(code === 401 ? FailureKind.ACCOUNT : FailureKind.INTERNAL,
-          'AGC 拒绝请求：' + String(ret['msg'] ?? ret['code']), code);
+          I18n.t('AGC 拒绝请求：') + String(ret['msg'] ?? ret['code']), code);
       }
       return data;
     } catch (error) {
@@ -103,6 +107,7 @@ export class AgcClient {
   }
 
   async download(url: string): Promise<ArrayBuffer> {
+    PrivacyConsent.assertBusinessAllowed();
     if (!/^https:\/\/[^/@\s]+\//.test(url)) throw new Error('AGC 下载地址无效');
     const request = http.createHttp();
     try {
@@ -113,6 +118,7 @@ export class AgcClient {
         readTimeout: 15000,
         maxLimit: 2 * 1024 * 1024
       });
+      PrivacyConsent.assertBusinessAllowed();
       if (response.responseCode !== 200 || !(response.result instanceof ArrayBuffer) ||
         response.result.byteLength < 100 || response.result.byteLength > 2 * 1024 * 1024) {
         throw new Error('AGC 文件下载失败');
@@ -148,14 +154,14 @@ export class AgcClient {
     const created = data['harmonyCert'] as Record<string, Object> | undefined;
     if (!created || String(created['id'] ?? '').length === 0) {
       const ret = data['ret'] as Record<string, Object> | undefined;
-      throw new Error('AGC 未返回新证书：' + String(ret?.['msg'] ?? '原因未知'));
+      throw new Error(I18n.t('AGC 未返回新证书：') + String(ret?.['msg'] ?? I18n.t('原因未知')));
     }
     return created;
   }
 
   /** 删除调试证书。接口形态与 Flutter 版 agc_service.deleteCertList 一致。 */
   async deleteCertificates(certIds: string[]): Promise<void> {
-    if (certIds.length === 0) throw new Error('没有要删除的证书');
+    if (certIds.length === 0) throw new Error(I18n.t('没有要删除的证书'));
     const body = new DeleteCertsBody();
     body.certIds = certIds;
     await this.request('/cps/harmony-cert-manage/v1/cert/delete', body,
@@ -212,7 +218,7 @@ export class AgcClient {
   }
 
   async deleteProfile(id: string): Promise<void> {
-    if (!/^[A-Za-z0-9_-]{1,32}$/.test(id)) throw new Error('AGC 授权记录编号无效');
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(id)) throw new Error(I18n.t('AGC 授权记录编号无效'));
     await this.request('/cps/provision-manage/v1/provision/delete?id=' + encodeURIComponent(id),
       undefined, http.RequestMethod.DELETE);
   }
@@ -233,7 +239,7 @@ export class AgcClient {
       rows.push(...part);
       if (part.length < 100 || rows.length >= Number(data['totalCount'] ?? Infinity)) return rows;
     }
-    throw new Error('AGC 项目过多，无法完整核对已有签名项目');
+    throw new Error(I18n.t('AGC 项目过多，无法完整核对已有签名项目'));
   }
 
   async createSigningProject(): Promise<string> {
@@ -249,7 +255,7 @@ export class AgcClient {
 
   async createSigningApp(projectId: string, bundleName: string): Promise<string> {
     const form = 'teamId=' + encodeURIComponent(this.account.teamId) + '&projectId=' +
-      encodeURIComponent(projectId) + '&appName=' + encodeURIComponent(('轻启-' + bundleName).substring(0, 64)) +
+      encodeURIComponent(projectId) + '&appName=' + encodeURIComponent((I18n.t('轻启-') + bundleName).substring(0, 64)) +
       '&packageName=' + encodeURIComponent(bundleName) + '&parentType=13&installationFree=0';
     const data = await this.request('/publish/v3/app', undefined, http.RequestMethod.POST, false, '', form);
     return AgcClient.cloudId(data['appId']);
@@ -258,7 +264,7 @@ export class AgcClient {
   static cloudId(value: Object | undefined): string {
     if (typeof value === 'string' && /^\d{1,64}$/.test(value)) return value;
     if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return String(value);
-    throw new Error('AGC 未返回有效的云端记录编号');
+    throw new Error(I18n.t('AGC 未返回有效的云端记录编号'));
   }
 
   async managedProfiles(appId: string): Promise<Array<Record<string, Object>>> {
@@ -266,7 +272,7 @@ export class AgcClient {
       '/cps/provision-manage/v1/provision/list?encodeFlag=0&start=1&pageSize=100&certTypes=1',
       undefined, undefined, false, appId);
     const rows = data['list'] as Array<Record<string, Object>> ?? [];
-    if (Number(data['totalCount'] ?? rows.length) > 100) throw new Error('AGC 授权列表未完整返回');
+    if (Number(data['totalCount'] ?? rows.length) > 100) throw new Error(I18n.t('AGC 授权列表未完整返回'));
     return rows;
   }
 
@@ -274,8 +280,12 @@ export class AgcClient {
     const data = await this.request('/cps/provision-manage/v1/user/permission',
       undefined, undefined, false, appId);
     const user = data['userPermission'] as Record<string, Object> | undefined;
-    return String(user?.['aclPermissionList'] ?? '').split(',').map((acl: string) => acl.trim())
-      .filter((acl: string) => acl.length > 0);
+    // AGC has returned this field both as a comma-joined string and as a JSON
+    // array. Never let a missing field become a literal "undefined" permission.
+    const raw = user?.['aclPermissionList'];
+    const names = Array.isArray(raw) ? raw.map((row: Object) => String(row)) :
+      typeof raw === 'string' ? raw.split(',') : [];
+    return names.map((acl: string) => acl.trim()).filter((acl: string) => acl.length > 0);
   }
 
   async createManagedProfile(name: string, appId: string, certId: string, deviceIds: string[],

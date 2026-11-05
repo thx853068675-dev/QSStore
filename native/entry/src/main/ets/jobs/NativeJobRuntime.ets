@@ -3,6 +3,7 @@ import { isMissingCertificate } from '../data/CertificateRejection';
 import { StorageBudget } from './StorageBudget';
 import { PackageArchive } from './PackageArchive';
 import { LocalBundles } from './LocalBundles';
+import { SelfInstallRecovery } from './SelfInstallRecovery';
 import { common } from '@kit.AbilityKit';
 import { fileIo, hash } from '@kit.CoreFileKit';
 import { hasSigningBlock, signHap, verifyHap } from 'libhap_core.so';
@@ -10,9 +11,11 @@ import { AgcProfile, ProfileRefreshOptions } from '../data/AgcProfile';
 import { DeveloperAccount } from '../data/DeveloperAccount';
 import { StoreClient } from '../data/StoreClient';
 import { LocalSigningIdentity, SigningIdentityRecovery } from '../data/SigningIdentity';
+import { CloudBackupConsent } from '../data/CloudBackupConsent';
+import { PrivacyConsent } from '../data/PrivacyConsent';
 import { AssetDownload } from './AssetDownload';
 import { FailureKind, InstallJob, InstallStage, RecoveryEvidence } from './InstallJob';
-import { JobFailure, JobPaths, JobRuntime, PackageIdentity } from './JobRunner';
+import { JobFailure, JobSkip, JobPaths, JobRuntime, PackageIdentity } from './JobRunner';
 import { JobStore } from './JobStore';
 import { InstalledAppRegistry, InstalledSigningIdentity } from './InstalledAppRegistry';
 import { checkCatalogIdentity, inspectPackage, PackageInspectError, PackageIdentity as InspectedIdentity, requestedPermissions } from './PackageInspector';
@@ -20,13 +23,20 @@ import { JobCancellation } from './JobCancellation';
 import { InstallTaskState } from './InstallTaskState';
 import { InstalledSigningExpiry } from './InstalledSigningExpiry';
 import { ReleaseUpdate } from './ReleaseUpdate';
+import { InstallDeviceCompatibility } from './InstallDeviceCompatibility';
+import { InstallPreflight } from './InstallPreflight';
+import { UpdatePolicy } from '../data/UpdatePolicy';
+import { I18n } from '../data/I18n';
 
 // A concrete adapter must query the device after reconnecting. Installed
 // version is the final proof; a successful HDC command alone is insufficient.
 export interface NativeDeviceBridge {
+  readonly isLocalDevice?: boolean;
+  targetSnapshot?():string;
   connected(): Promise<boolean>;
   udid(): Promise<string>;
   installedVersion(bundleName: string): Promise<number>;
+  installedState?(bundleName:string):Promise<InstalledSigningIdentity>;
   installedSigningIdentity(bundleName: string): Promise<InstalledSigningIdentity | undefined>;
   install(signedHapPath: string,
     onProgress?: (phase: string, sent: number, total: number) => void): Promise<void>;
@@ -46,8 +56,14 @@ export class NativeJobRuntime implements JobRuntime {
   // These proofs live only for this runner invocation. A resumed job must
   // recheck its files, but the same private HAP need not be read twice here.
   private selectedPackagePath: string = '';
+  private selectedPackageKey: string = '';
   private verifiedCachePath: string = '';
   private verifiedCacheSha256: string = '';
+  private inspectedSourcePath: string = '';
+  private inspectedSourceCacheSha256: string = '';
+  private inspectedSourceSha256: string = '';
+  private inspectedSourceSelection: string = '';
+  private inspectedIdentity: InspectedIdentity | undefined;
   private freshlySignedPath: string = '';
   private freshlySignedProfileSha256: string = '';
   private confirmedSubmission: string = '';
@@ -62,12 +78,22 @@ export class NativeJobRuntime implements JobRuntime {
   }
 
   private async packagePath(job: InstallJob): Promise<string> {
-    if (!job.sourceUrl.includes('#qingqi-package=')) return job.cachePath;
-    const entry = PackageArchive.selectedEntry(job.sourceUrl);
-    if (!entry) return job.cachePath;
-    if (this.selectedPackagePath.length > 0) return this.selectedPackagePath;
-    const output = job.cachePath + '.package' + PackageArchive.extension(entry);
-    this.selectedPackagePath = await PackageArchive.extractSelected(job.cachePath, entry, output);
+    const entry = job.sourceUrl.includes('#qingqi-package=') ? PackageArchive.selectedEntry(job.sourceUrl) : '';
+    const key = JSON.stringify([job.cachePath, (job.expectedSha256 ?? '').toLowerCase(), entry]);
+    if (this.selectedPackagePath.length > 0 && this.selectedPackageKey === key) return this.selectedPackagePath;
+    let path = job.cachePath;
+    if (entry) {
+      const output = job.cachePath + '.package' + PackageArchive.extension(entry);
+      path = await PackageArchive.extractSelected(job.cachePath, entry, output);
+    }
+    path = await PackageArchive.installablePath(path, job.cachePath + '.package.app', entry ? '' : job.expectedSha256);
+    // The native signer and transport dispatch by canonical extension, too.
+    if (path.endsWith('.app') && job.signedPath.length > 0 && !job.signedPath.endsWith('.app')) {
+      job.signedPath = job.signedPath.replace(/\.(hap|app)$/i, '') + '.app';
+      await this.store.save(job);
+    }
+    this.selectedPackagePath = path;
+    this.selectedPackageKey = key;
     return this.selectedPackagePath;
   }
 
@@ -76,20 +102,55 @@ export class NativeJobRuntime implements JobRuntime {
   }
 
   async planPaths(job: InstallJob): Promise<JobPaths> {
-    new AssetDownload(this.context, this.store).planPaths(job);
+    await new AssetDownload(this.context, this.store).planPaths(job);
     const paths = new JobPaths();
     paths.cachePath = job.cachePath;
     paths.signedPath = job.signedPath;
     return paths;
   }
 
+  async preflight(job:InstallJob,verified:boolean):Promise<string>{
+    if(job.renewalRequestedAt>0)return '';
+    const bundle=job.bundleName||job.catalogBundleName,version=job.versionCode||job.catalogVersionCode;
+    if(!bundle||!(version>0)||(!verified&&!/^[a-f0-9]{64}$/i.test(job.catalogSha256||'')))return '';
+    if(!this.device.installedState)return '';
+    let state:InstalledSigningIdentity;
+    try{state=await this.device.installedState(bundle);}
+    catch(error){throw new JobFailure(FailureKind.DEVICE,String(error));}
+    const view=InstallJob.displayCopy(job);view.bundleName=bundle;view.versionCode=version;
+    if(job.approvedInstallProof&&job.approvedInstallProof!==InstallPreflight.packageProof(job)){
+      job.forceInstall=false;job.allowDataLoss=false;view.forceInstall=false;
+    }
+    if(state.versionCode>0&&job.appId>0&&!job.forceInstall){
+      await UpdatePolicy.restore(this.context);
+      if(UpdatePolicy.disabled(bundle,InstallPreflight.device(job)))return 'skip-paused';
+    }
+    const records=[...await this.store.listAll(true),...await this.store.deviceReceipts(job)];
+    const decision=InstallPreflight.decide(view,state,records,verified);
+    if(decision.startsWith('skip-')){job.bundleName=bundle;job.versionCode=version;return decision;}
+    if(decision==='confirm-source'){
+      job.reinstallRequired=true;
+      InstallPreflight.wait(job,'source',state);
+      throw new JobFailure(FailureKind.CONFIRMATION,I18n.t('已安装相同内部编号，需确认是否替换现有应用'));
+    }
+    if(verified&&decision==='update'&&state.versionCode===version)job.reinstallRequired=true;
+    return '';
+  }
+
   async inspectEvidence(job: InstallJob): Promise<RecoveryEvidence> {
     const evidence = new RecoveryEvidence();
+    if(this.device.isLocalDevice!==false&&!job.installTarget&&SelfInstallRecovery.attemptedAt(job)&&LocalBundles.isSelfBundle(job.bundleName)){
+      const own=LocalBundles.selfInstalledIdentity(job.bundleName);
+      if(own&&await SelfInstallRecovery.confirmed(job,own)){
+        evidence.installedVersionCode=own.versionCode;evidence.replacementConfirmed=true;
+        job.installedUpdateTime=own.updateTime;job.installedFingerprint=own.fingerprint;return evidence;
+      }
+    }
     // The installed bundle is stronger completion evidence than a cached HAP.
     // Reopening an already completed local job need not hash and verify two
     // whole packages before it can show "installed".
     if (job.bundleName.length > 0 && job.versionCode > 0) {
-      const local = LocalBundles.liveInstalledVersion(job.bundleName);
+      const local = this.device.isLocalDevice === false ? -1 : LocalBundles.liveInstalledVersion(job.bundleName);
       if (local > 0) evidence.installedVersionCode = local;
       if (job.appId > 0 && !job.reinstallRequired && job.stage !== InstallStage.INSTALLED && local === job.versionCode &&
         ReleaseUpdate.available(ReleaseUpdate.forJob(job), local,
@@ -108,11 +169,17 @@ export class NativeJobRuntime implements JobRuntime {
         try { evidence.replacementConfirmed = await this.confirmReplacement(job); } catch (_) {}
         if (evidence.replacementConfirmed) return evidence;
       }
-      if (local === job.versionCode && !job.reinstallRequired) return evidence;
+      if (local === job.versionCode && !job.reinstallRequired &&
+        job.stage !== InstallStage.WAITING_COMPATIBILITY) return evidence;
     }
     evidence.verifiedCache = await new AssetDownload(this.context, this.store)
       .verifiedFileExists(job);
-    if (evidence.verifiedCache) this.rememberVerifiedCache(job);
+    if (evidence.verifiedCache) {
+      this.rememberVerifiedCache(job);
+      // Recovery can otherwise jump straight to a retained profile/signature.
+      // Prompt from the actual source before recovery performs any AGC work.
+      await this.inspectPackage(job);
+    }
     // An old valid Profile is not proof that this renewal request was prepared.
     if (job.renewalRequestedAt > 0 && job.renewalPreparedAt !== job.renewalRequestedAt) return evidence;
     if (evidence.verifiedCache && this.usesOriginalInstaller(job)) {
@@ -141,7 +208,7 @@ export class NativeJobRuntime implements JobRuntime {
           AgcProfile.valid(job.profilePath, job.bundleName, job.deviceUdid,
             identity.certificatePath,
             AgcProfile.effectiveAcls(await PackageArchive.permissions(await this.packagePath(job))));
-        if (evidence.validProfile && LocalBundles.isSelfBundle(job.bundleName)) {
+        if (evidence.validProfile && (this.device.isLocalDevice !== false && LocalBundles.isSelfBundle(job.bundleName))) {
           evidence.validProfile = await this.profileMatchesInstalledInstaller(job.profilePath);
         }
         if (evidence.validProfile) await this.assertCompatibleUpdate(job);
@@ -172,9 +239,10 @@ export class NativeJobRuntime implements JobRuntime {
   }
 
   async downloadAndVerify(job: InstallJob): Promise<void> {
+    PrivacyConsent.assertBusinessAllowed();
     if (job.sourceUrl === 'local') {
       if (!await new AssetDownload(this.context, this.store).verifiedFileExists(job)) {
-        throw new JobFailure(FailureKind.INVALID_PACKAGE, '本地 HAP 完整性已改变');
+        throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('本地 HAP 完整性已改变'));
       }
       this.rememberVerifiedCache(job);
       return;
@@ -193,9 +261,37 @@ export class NativeJobRuntime implements JobRuntime {
   }
 
   async inspectPackage(job: InstallJob): Promise<PackageIdentity> {
+    PrivacyConsent.assertBusinessAllowed();
     try {
-      const parsed = await this.packageIdentity(await this.packagePath(job));
+      const sourcePath = await this.packagePath(job);
+      const parsed = await this.packageIdentity(sourcePath);
       checkCatalogIdentity(job.catalogBundleName, job.catalogVersionCode, parsed);
+      JobCancellation.assertActive(job.id);
+      const cacheDigest = (job.expectedSha256 ?? '').toLowerCase();
+      const selection = sourcePath === job.cachePath ? '' : PackageArchive.selectedEntry(job.sourceUrl);
+      let sourceDigest: string;
+      if (sourcePath === job.cachePath && /^[a-f0-9]{64}$/.test(cacheDigest)) {
+        // The completed download or local import already hashed this exact HAP/APP.
+        sourceDigest = cacheDigest;
+      } else if (this.inspectedSourcePath === sourcePath &&
+        this.inspectedSourceSelection === selection &&
+        this.inspectedSourceCacheSha256 === cacheDigest && /^[a-f0-9]{64}$/.test(this.inspectedSourceSha256)) {
+        sourceDigest = this.inspectedSourceSha256;
+      } else {
+        // ZIP digest belongs to its container; hash the extracted HAP/APP itself.
+        // An APP stays whole here, never substituting one of its module HAPs.
+        sourceDigest = (await hash.hash(sourcePath, 'sha256')).toLowerCase();
+      }
+      PrivacyConsent.assertBusinessAllowed();
+      JobCancellation.assertActive(job.id);
+      if (!/^[a-f0-9]{64}$/.test(sourceDigest)) throw new Error(I18n.t('安装原包摘要无效'));
+      this.inspectedSourcePath = sourcePath;
+      this.inspectedSourceCacheSha256 = cacheDigest;
+      this.inspectedSourceSha256 = sourceDigest;
+      this.inspectedSourceSelection = selection;
+      job.packageSourceSha256 = sourceDigest;
+      await this.assertPackageDeviceCompatibility(job, parsed);
+      this.inspectedIdentity = parsed;
       const result = new PackageIdentity();
       result.bundleName = parsed.bundleName;
       result.versionCode = parsed.versionCode;
@@ -204,6 +300,7 @@ export class NativeJobRuntime implements JobRuntime {
       result.mainAbility = parsed.mainAbility;
       return result;
     } catch (error) {
+      if (error instanceof JobFailure) throw error;
       if (error instanceof PackageInspectError) {
         throw new JobFailure(FailureKind.INVALID_PACKAGE, error.message);
       }
@@ -212,25 +309,30 @@ export class NativeJobRuntime implements JobRuntime {
   }
 
   async ensureProfile(job: InstallJob): Promise<void> {
+    PrivacyConsent.assertBusinessAllowed();
     JobCancellation.assertActive(job.id);
+    await this.assertSourceDeviceCompatibility(job);
     if (job.renewalRequestedAt > 0) {
-      if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, '请先登录华为开发者账号');
+      if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, I18n.t('请先登录华为开发者账号'));
       // Recovery may skip the normal inspection stage for a retained source.
       // Validate actual bytes against the renewal target before any AGC work.
       const parsed = await this.inspectPackage(job);
       if (parsed.bundleName !== job.bundleName || parsed.versionCode !== job.versionCode) {
-        throw new JobFailure(FailureKind.INVALID_PACKAGE, '续签原包与已安装应用的包名或内部版本号不一致');
+        throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('续签原包与已安装应用的包名或内部版本号不一致'));
       }
       job.moduleName = parsed.moduleName; job.mainAbility = parsed.mainAbility;
       let installed: InstalledSigningIdentity | undefined;
       try { installed = await this.device.installedSigningIdentity(job.bundleName); }
-      catch (error) { throw new JobFailure(FailureKind.DEVICE, '请连接无线调试，核对待续签应用后继续：' + String(error)); }
+      catch (error) {
+        PrivacyConsent.assertBusinessAllowed();
+        throw new JobFailure(FailureKind.DEVICE, I18n.t('请连接无线调试，核对待续签应用后继续：') + String(error));
+      }
       this.assertRenewalTarget(job, installed);
       await this.ensureAccountProfile(job,
         await SigningIdentityRecovery.ensureForInstall(this.context, this.account));
       return;
     }
-    if (LocalBundles.isSelfBundle(job.bundleName)) {
+    if ((this.device.isLocalDevice !== false && LocalBundles.isSelfBundle(job.bundleName))) {
       await this.verifyOriginalInstaller(job);
       const installed = LocalBundles.selfSigningFingerprint();
       const appIdentifier = LocalBundles.selfAppIdentifier();
@@ -247,6 +349,7 @@ export class NativeJobRuntime implements JobRuntime {
           if (job.allowDataLoss || this.unsignedInstallerAsset(job) ||
             await this.profileMatchesInstalledInstaller(job.profilePath)) return;
         } catch (error) {
+          PrivacyConsent.assertBusinessAllowed();
           if (job.allowDataLoss || this.unsignedInstallerAsset(job)) {
             throw error instanceof Error ? error : new Error(String(error));
           }
@@ -254,7 +357,7 @@ export class NativeJobRuntime implements JobRuntime {
       }
       if (job.allowDataLoss || this.unsignedInstallerAsset(job)) {
         throw new JobFailure(FailureKind.ACCOUNT,
-          '未找到可用的本机签名身份，无法安全地准备安装器更新包');
+          I18n.t('未找到可用的本机签名身份，无法安全地准备安装器更新包'));
       }
       // 已签名的旧版制品仍可沿用原签名；系统安装器负责最终核验。
       job.profilePath = '';
@@ -263,32 +366,39 @@ export class NativeJobRuntime implements JobRuntime {
       await this.store.save(job);
       return;
     }
-    if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, '请先登录华为开发者账号');
+    if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, I18n.t('请先登录华为开发者账号'));
     const identity = await SigningIdentityRecovery.ensureForInstall(this.context, this.account);
     JobCancellation.assertActive(job.id);
     await this.ensureAccountProfile(job, identity);
   }
 
   private async ensureAccountProfile(job: InstallJob, identity: LocalSigningIdentity): Promise<void> {
-    if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, '请先登录华为开发者账号');
+    PrivacyConsent.assertBusinessAllowed();
+    if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, I18n.t('请先登录华为开发者账号'));
     JobCancellation.assertActive(job.id);
     let udid = '';
-    try { udid = await this.device.udid(); }
-    catch (_) { throw new JobFailure(FailureKind.DEVICE, '请重新连接无线调试后继续'); }
+    try { udid = await this.device.udid();
+      if(job.installTarget&&this.device.targetSnapshot)job.installTarget=this.device.targetSnapshot();
+    }
+    catch (_) {
+      PrivacyConsent.assertBusinessAllowed();
+      throw new JobFailure(FailureKind.DEVICE, I18n.t('请重新连接无线调试后继续'));
+    }
     if (udid.length === 0) {
-      throw new JobFailure(FailureKind.DEVICE, '设备 UDID 尚未可用');
+      throw new JobFailure(FailureKind.DEVICE, I18n.t('设备 UDID 尚未可用'));
     }
     let selected = identity;
     let renewalInstalled: InstalledSigningIdentity | undefined;
-    let fingerprint = LocalBundles.isSelfBundle(job.bundleName) ?
+    let fingerprint = (this.device.isLocalDevice !== false && LocalBundles.isSelfBundle(job.bundleName)) ?
       LocalBundles.selfSigningFingerprint() : '';
     try {
       const installed = await this.device.installedSigningIdentity(job.bundleName);
       renewalInstalled = installed;
       if (installed?.fingerprint.length === 64) fingerprint = installed.fingerprint;
     } catch (error) {
+      PrivacyConsent.assertBusinessAllowed();
       if (job.renewalRequestedAt > 0) throw new JobFailure(FailureKind.DEVICE,
-        '请连接无线调试，核对待续签应用后继续：' + String(error));
+        I18n.t('请连接无线调试，核对待续签应用后继续：') + String(error));
       /* 普通安装的身份查询失败由系统安装器最终裁决。 */
     }
     if (job.renewalRequestedAt > 0) {
@@ -319,7 +429,7 @@ export class NativeJobRuntime implements JobRuntime {
       } catch (error) {
         // AGC 列表或下载失败是“未知”，不能当成找不到匹配证书。
         throw new JobFailure((error as ClassifiedFailure).failureKind ?? FailureKind.ACCOUNT,
-          '暂时无法核实可复用证书，已暂停更新以保护应用数据：' + String(error));
+          I18n.t('暂时无法核实可复用证书，已暂停更新以保护应用数据：') + String(error));
       }
     }
     if (job.renewalRequestedAt > 0 && selected.certExpiry <= minimumExpiry) {
@@ -372,30 +482,32 @@ export class NativeJobRuntime implements JobRuntime {
       job.renewalInstallBaseline > 0 && (job.approvedInstalledFingerprint.length === 64 ||
         job.approvedInstalledAppIdentifier.length > 0)) return;
     if (!installed || installed.versionCode <= 0) {
-      throw new JobFailure(FailureKind.INVALID_PACKAGE, '本机未安装该应用，无法续签，请使用普通签装');
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('本机未安装该应用，无法续签，请使用普通签装'));
     }
     if (installed.versionCode !== job.versionCode) {
-      throw new JobFailure(FailureKind.INVALID_PACKAGE, '续签需要与已安装应用相同版本的安装包，请重新选择');
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('续签需要与已安装应用相同版本的安装包，请重新选择'));
     }
     if (installed.fingerprint.length !== 64 && !installed.appIdentifier) {
-      throw new JobFailure(FailureKind.INVALID_PACKAGE, '无法核对已安装应用的签名身份，已保留旧应用');
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('无法核对已安装应用的签名身份，已保留旧应用'));
     }
     if (!Number.isFinite(installed.updateTime) || installed.updateTime <= 0) {
-      throw new JobFailure(FailureKind.INVALID_PACKAGE, '无法核对应用安装时间，请刷新应用信息后再续签');
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('无法核对应用安装时间，请刷新应用信息后再续签'));
     }
   }
 
   private async assertCompatibleUpdate(job: InstallJob): Promise<void> {
+    PrivacyConsent.assertBusinessAllowed();
     // 对外部侧载的旧版本也一样：本机证书可覆盖的条件是 appId（同证书）或
     // appIdentifier 相同。提前发现冲突，避免重签、传包后才卡在安装阶段。
     let installed: InstalledSigningIdentity | undefined;
     try { installed = await this.device.installedSigningIdentity(job.bundleName); }
     catch (error) {
+      PrivacyConsent.assertBusinessAllowed();
       if (job.renewalRequestedAt > 0) throw new JobFailure(FailureKind.DEVICE,
-        '无线调试连接不可用，无法核对续签身份：' + String(error));
+        I18n.t('无线调试连接不可用，无法核对续签身份：') + String(error));
       /* 普通安装无法读取时仍交给系统安装器作最终校验。 */
     }
-    if (installed === undefined && LocalBundles.isSelfBundle(job.bundleName)) {
+    if (installed === undefined && (this.device.isLocalDevice !== false && LocalBundles.isSelfBundle(job.bundleName))) {
       installed = new InstalledSigningIdentity();
       installed.fingerprint = LocalBundles.selfSigningFingerprint();
       installed.appIdentifier = LocalBundles.selfAppIdentifier();
@@ -407,37 +519,42 @@ export class NativeJobRuntime implements JobRuntime {
         candidateFingerprint === installed.fingerprint;
       const sameApp = installed.appIdentifier.length > 0 &&
         candidateIdentifier.length > 0 && candidateIdentifier === installed.appIdentifier;
-      const approved = job.allowDataLoss && installed.versionCode === job.approvedInstalledVersion &&
-        installed.fingerprint === job.approvedInstalledFingerprint &&
-        installed.appIdentifier === job.approvedInstalledAppIdentifier;
+      const approved = job.allowDataLoss && InstallPreflight.approved(job,installed);
       if (!sameCertificate && !sameApp && !approved) {
+        InstallPreflight.wait(job,'signature',installed);
         if (job.allowDataLoss) { job.allowDataLoss = false; await this.store.save(job); }
         if (job.renewalRequestedAt > 0) throw new JobFailure(FailureKind.CONFIRMATION,
-          '当前签名身份无法保留数据续签。继续会卸载重装，清除该应用的缓存、设置和登录状态。');
+          I18n.t('当前签名身份无法保留数据续签。继续会卸载重装，清除该应用的缓存、设置和登录状态。'));
         throw new JobFailure(FailureKind.CONFIRMATION,
-          '未找到可保留数据的签名身份。卸载旧版再安装会清除该应用的缓存和登录状态。');
+          I18n.t('未找到可保留数据的签名身份。卸载旧版再安装会清除该应用的缓存和登录状态。'));
       }
     }
   }
 
   async sign(job: InstallJob): Promise<void> {
-    if (this.usesOriginalInstaller(job)) return;
-    if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, '请先登录华为开发者账号');
+    PrivacyConsent.assertBusinessAllowed();
+    JobCancellation.assertActive(job.id);
     if (!this.cacheVerifiedInThisRun(job) &&
       !await new AssetDownload(this.context, this.store).verifiedFileExists(job)) {
-      throw new JobFailure(FailureKind.INVALID_PACKAGE, '原始 HAP 的 SHA-256 已改变');
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('原始 HAP 的 SHA-256 已改变'));
     }
+    this.rememberVerifiedCache(job);
+    await this.assertSourceDeviceCompatibility(job);
+    if (this.usesOriginalInstaller(job)) return;
+    if (!this.account) throw new JobFailure(FailureKind.ACCOUNT, I18n.t('请先登录华为开发者账号'));
     const identity = await SigningIdentityRecovery.forJob(this.context, this.account,
       job.signingCertId);
     if (!identity || job.profilePath.length === 0 || job.profileSha256.length === 0 ||
       (await hash.hash(job.profilePath, 'sha256')).toLowerCase() !== job.profileSha256) {
-      throw new JobFailure(FailureKind.ACCOUNT, '签名材料已改变，请重新准备设备授权');
+      throw new JobFailure(FailureKind.ACCOUNT, I18n.t('签名材料已改变，请重新准备设备授权'));
     }
     const path = await this.packagePath(job);
     await StorageBudget.require(this.context.filesDir, PackageArchive.workingBytes(path));
     try {
+      PrivacyConsent.assertBusinessAllowed();
       await signHap(path, job.signedPath, identity.privateKeyPath, identity.certificatePath, job.profilePath);
     } finally { PackageArchive.release(path); }
+    PrivacyConsent.assertBusinessAllowed();
     // The native signer verifies the complete pending HAP before atomically
     // moving it to signedPath. Repeating verifyHap immediately is another full
     // package read; recovery in a later invocation still verifies normally.
@@ -460,7 +577,7 @@ export class NativeJobRuntime implements JobRuntime {
     PackageArchive.release(job.signedPath);
     if (signed.bundleName !== job.bundleName || signed.versionCode !== job.versionCode ||
       job.signedProfileSha256 !== job.profileSha256) {
-      throw new JobFailure(FailureKind.INVALID_PACKAGE, '签名包与原始 HAP 或设备授权不一致');
+      throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('签名包与原始 HAP 或设备授权不一致'));
     }
   }
 
@@ -468,15 +585,15 @@ export class NativeJobRuntime implements JobRuntime {
     try {
       if (!this.cacheVerifiedInThisRun(job) &&
         !await new AssetDownload(this.context, this.store).verifiedFileExists(job)) {
-        throw new Error('更新包的下载摘要已改变');
+        throw new Error(I18n.t('更新包的下载摘要已改变'));
       }
       const original = await this.packageIdentity(await this.packagePath(job));
       if (original.bundleName !== job.bundleName || original.versionCode !== job.versionCode) {
-        throw new Error('更新包的应用身份与目录不一致');
+        throw new Error(I18n.t('更新包的应用身份与目录不一致'));
       }
     } catch (error) {
       throw new JobFailure(FailureKind.INVALID_PACKAGE,
-        '安装器更新包的内容或应用身份无效：' + String(error));
+        I18n.t('安装器更新包的内容或应用身份无效：') + String(error));
     }
   }
 
@@ -485,7 +602,7 @@ export class NativeJobRuntime implements JobRuntime {
   }
 
   private usesOriginalInstaller(job: InstallJob): boolean {
-    return LocalBundles.isSelfBundle(job.bundleName) &&
+    return (this.device.isLocalDevice !== false && LocalBundles.isSelfBundle(job.bundleName)) &&
       !(job.renewalRequestedAt > 0) && !job.allowDataLoss &&
       !this.unsignedInstallerAsset(job) && job.profilePath.length === 0;
   }
@@ -505,16 +622,70 @@ export class NativeJobRuntime implements JobRuntime {
     this.verifiedCacheSha256 = job.expectedSha256;
   }
 
+  private async assertSourceDeviceCompatibility(job: InstallJob): Promise<void> {
+    if (this.inspectedIdentity !== undefined && this.inspectedSourcePath.length > 0 &&
+      this.inspectedSourcePath === await this.packagePath(job) &&
+      this.inspectedSourceSelection === (job.sourceUrl.includes('#qingqi-package=') ?
+        PackageArchive.selectedEntry(job.sourceUrl) : '') &&
+      this.inspectedSourceCacheSha256 === (job.expectedSha256 ?? '').toLowerCase()) {
+      await this.assertPackageDeviceCompatibility(job, this.inspectedIdentity);
+      return;
+    }
+    await this.inspectPackage(job);
+  }
+
+  private async assertPackageDeviceCompatibility(job: InstallJob, parsed: InspectedIdentity): Promise<void> {
+    if (!(parsed.deviceTypes?.length > 0)) return;
+    if (!this.cacheVerifiedInThisRun(job)) {
+      if (!await new AssetDownload(this.context, this.store).verifiedFileExists(job)) {
+        throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('原始安装包的 SHA-256 已改变'));
+      }
+      this.rememberVerifiedCache(job);
+    }
+    const previous = job.deviceCompatibilityFingerprint ?? '';
+    const title=parsed.displayName||job.assetName||parsed.bundleName;
+    let pending='';
+    if(job.batchId)pending=InstallDeviceCompatibility.pendingPackageConsent(job,parsed.deviceTypes,title);
+    else if(!await InstallDeviceCompatibility.confirmPackage(job,parsed.deviceTypes,title)){
+      job.reinstallRequired=true;
+      throw new JobFailure(FailureKind.COMPATIBILITY,'设备适配确认已取消，点击继续安装可重新确认');
+    }
+    PrivacyConsent.assertBusinessAllowed();
+    JobCancellation.assertActive(job.id);
+    if (pending) {
+      // A paused request is not completion evidence for an already installed
+      // build, and must never resume merely because account/device state changed.
+      job.reinstallRequired = true;
+      job.conflictKind='compatibility';job.conflictState=pending;
+      throw new JobFailure(FailureKind.CONFIRMATION, I18n.t('等待确认此设备是否继续安装'));
+    }
+    if (job.deviceCompatibilityFingerprint !== previous) await this.store.save(job);
+  }
+
   private cacheVerifiedInThisRun(job: InstallJob): boolean {
     return this.verifiedCachePath.length > 0 &&
       this.verifiedCachePath === job.cachePath &&
       this.verifiedCacheSha256 === job.expectedSha256;
   }
 
-  ensureDevice(): Promise<boolean> { return this.device.connected(); }
+  async ensureDevice(): Promise<boolean> {
+    PrivacyConsent.assertBusinessAllowed();
+    const connected = await this.device.connected();
+    PrivacyConsent.assertBusinessAllowed();
+    return connected;
+  }
 
   async install(job: InstallJob): Promise<void> {
+    PrivacyConsent.assertBusinessAllowed();
     JobCancellation.assertActive(job.id);
+    await this.assertSourceDeviceCompatibility(job);
+    if(this.device.isLocalDevice!==false&&!job.installTarget&&LocalBundles.isSelfBundle(job.bundleName)&&
+      !(job.renewalRequestedAt>0)&&!(job.replacementInstallBaseline>0)){
+      // Persist before the platform can kill this process, including appId=0
+      // imports. The next process can prove a same-code replacement locally.
+      const own=LocalBundles.selfInstalledIdentity(job.bundleName);
+      if(own&&own.updateTime>0){job.replacementInstallBaseline=own.updateTime;await this.store.save(job);}
+    }
     if (job.renewalRequestedAt > 0) {
       // A timeout/navigation/restart may hide the system's success response.
       // Reconcile the original baseline before submitting the same renewal again.
@@ -523,7 +694,7 @@ export class NativeJobRuntime implements JobRuntime {
       this.assertRenewalTarget(job, installed);
       if (job.renewalPreparedAt !== job.renewalRequestedAt ||
         job.renewalExpiresAt <= Date.now() / 1000 + 3600) {
-        throw new JobFailure(FailureKind.INVALID_PACKAGE, '续签授权尚未核对或已失效，旧应用已保留');
+        throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('续签授权尚未核对或已失效，旧应用已保留'));
       }
       await this.assertCompatibleUpdate(job);
       if (job.renewalInstallBaseline <= 0) job.renewalInstallBaseline = installed?.updateTime ?? 0;
@@ -531,8 +702,8 @@ export class NativeJobRuntime implements JobRuntime {
     }
     // 排队期间本机可能已通过其他来源升级。用解析出的内部编号复核，
     // 在线更新不能因签名不兼容而误走卸载后降级的路线。
-    if (job.appId > 0 && await this.installedVersion(job.bundleName) > job.versionCode) {
-      throw new JobFailure(FailureKind.INVALID_PACKAGE, '所选版本低于已安装版本，无法降级安装');
+    if (!(job.renewalRequestedAt>0) && await this.installedVersion(job.bundleName) > job.versionCode) {
+      throw new JobSkip('skip-newer', I18n.t('所选版本低于已安装版本，无法降级安装，已跳过此设备'));
     }
     if (job.appId > 0 && job.reinstallRequired && !(job.renewalRequestedAt > 0)) {
       if (job.replacementInstallBaseline > 0 && await this.confirmReplacement(job)) return;
@@ -549,7 +720,7 @@ export class NativeJobRuntime implements JobRuntime {
     }
     if ((job.stagedTicket ?? '').length > 0) {
       if (!await this.device.discardStaged(job.stagedTicket)) {
-        throw new JobFailure(FailureKind.DEVICE, '请连接无线调试，清理上次传输后继续安装');
+        throw new JobFailure(FailureKind.DEVICE, I18n.t('请连接无线调试，清理上次传输后继续安装'));
       }
       job.stagedTicket = '';
       await this.store.save(job);
@@ -560,14 +731,12 @@ export class NativeJobRuntime implements JobRuntime {
     if (job.allowDataLoss) {
       const installed = await this.device.installedSigningIdentity(job.bundleName);
       if (installed !== undefined) {
-        const sameApprovedIdentity = installed.versionCode === job.approvedInstalledVersion &&
-          installed.fingerprint === job.approvedInstalledFingerprint &&
-          installed.appIdentifier === job.approvedInstalledAppIdentifier;
+        const sameApprovedIdentity = InstallPreflight.approved(job,installed);
         if (!sameApprovedIdentity) {
           job.allowDataLoss = false;
           await this.store.save(job);
           throw new JobFailure(FailureKind.CONFIRMATION,
-            '已安装应用的版本或签名身份发生变化，请重新确认是否清除数据');
+            I18n.t('已安装应用的版本或签名身份发生变化，请重新确认是否清除数据'));
         }
         if (job.profilePath.length > 0) {
           const sameCertificate = installed.fingerprint.length === 64 &&
@@ -581,22 +750,29 @@ export class NativeJobRuntime implements JobRuntime {
         }
       } else if (await this.device.installedVersion(job.bundleName) > 0) {
         throw new JobFailure(FailureKind.DEVICE,
-          '无法核对已安装应用的签名身份，已暂停以避免误卸载');
+          I18n.t('无法核对已安装应用的签名身份，已暂停以避免误卸载'));
       }
     }
     if (job.allowDataLoss) {
       JobCancellation.assertActive(job.id);
-      if (LocalBundles.isSelfBundle(job.bundleName)) {
+      if ((this.device.isLocalDevice !== false && LocalBundles.isSelfBundle(job.bundleName))) {
         // 卸载会结束本进程，预先把完整 HAP 放到设备临时目录并校验摘要，
         // 再由与本进程分离的设备 shell 完成卸载和安装。应用数据会随卸载清除，
         // 因而新进程没有旧任务日志，只能按设备实际版本重新建立状态。
         if (!this.account) throw new JobFailure(FailureKind.ACCOUNT,
-          '请先登录华为开发者账号，备份签名身份后再重装安装器');
+          I18n.t('请先登录华为开发者账号，备份签名身份后再重装安装器'));
+        if (!await CloudBackupConsent.allowed(this.context, this.account)) {
+          throw new JobFailure(FailureKind.ACCOUNT,
+            I18n.t('卸载安装器会删除本机私钥。请在设置中明确启用云备份并完成备份后再继续；当前应用与材料已保留'));
+        }
         const current = await SigningIdentityRecovery.load(this.context, this.account);
         if (!current) throw new JobFailure(FailureKind.ACCOUNT,
-          '本机签名身份不可用，已停止自更新以免丢失私钥');
-        await new StoreClient(this.context).publishSigningIdentity(current.certId,
+          I18n.t('本机签名身份不可用，已停止自更新以免丢失私钥'));
+        const backedUp = await new StoreClient(this.context).publishSigningIdentity(current.certId,
           fileIo.readTextSync(current.privateKeyPath), this.account);
+        if (!backedUp || !await CloudBackupConsent.allowed(this.context, this.account)) {
+          throw new JobFailure(FailureKind.ACCOUNT, I18n.t('云备份已停用，已暂停自更新以保护本机私钥'));
+        }
         JobCancellation.assertActive(job.id);
         await this.device.installSelfAfterUninstall(path);
         return;
@@ -609,7 +785,7 @@ export class NativeJobRuntime implements JobRuntime {
             InstallTaskState.installProgress(job.id, phase, sent, total));
         } catch (error) {
           if (!await this.device.connected()) throw new JobFailure(FailureKind.DEVICE,
-            '预传包时无线调试已断开，旧应用仍保留，重连后继续');
+            I18n.t('预传包时无线调试已断开，旧应用仍保留，重连后继续'));
           throw error as Error;
         }
         job.stagedTicket = staged;
@@ -618,13 +794,11 @@ export class NativeJobRuntime implements JobRuntime {
           JobCancellation.assertActive(job.id);
           // Large transfers can take minutes; consent must still refer to the same installed app.
           const current = await this.device.installedSigningIdentity(job.bundleName);
-          if (!current || current.versionCode !== job.approvedInstalledVersion ||
-            current.fingerprint !== job.approvedInstalledFingerprint ||
-            current.appIdentifier !== job.approvedInstalledAppIdentifier) {
+          if (!current || !InstallPreflight.approved(job,current)) {
             job.allowDataLoss = false;
             await this.store.save(job);
             throw new JobFailure(FailureKind.CONFIRMATION,
-              '传输期间已安装应用发生变化，请重新确认是否清除数据');
+              I18n.t('传输期间已安装应用发生变化，请重新确认是否清除数据'));
           }
           replacing = true;
         } catch (error) {
@@ -646,20 +820,23 @@ export class NativeJobRuntime implements JobRuntime {
       InstallTaskState.installProgress(job.id, 'verifying', 0, 0);
     }
     catch (error) {
+      PrivacyConsent.assertBusinessAllowed();
       // 自更新可能先让 HDC 宿主断开，随后才把成功响应送回来。系统版本
       // 已经是目标版本时直接让 JobRunner 完成，不再要求用户重新配对。
       if (!job.reinstallRequired &&
-        LocalBundles.liveInstalledVersion(job.bundleName) === job.versionCode) return;
+        (this.device.isLocalDevice !== false && LocalBundles.liveInstalledVersion(job.bundleName) === job.versionCode)) return;
       const reason = String(error);
       if (!job.allowDataLoss && /9568264/.test(reason)) {
+        const installed=await this.device.installedSigningIdentity(job.bundleName);
+        if(installed)InstallPreflight.wait(job,'signature',installed);
         if (job.renewalRequestedAt > 0) throw new JobFailure(FailureKind.CONFIRMATION,
-          '系统拒绝保留数据续签。继续会卸载重装，清除该应用的缓存、设置和登录状态。');
+          I18n.t('系统拒绝保留数据续签。继续会卸载重装，清除该应用的缓存、设置和登录状态。'));
         throw new JobFailure(FailureKind.CONFIRMATION,
-          '系统拒绝覆盖安装：签名身份不一致。卸载旧版再安装会清除该应用的缓存和登录状态。');
+          I18n.t('系统拒绝覆盖安装：签名身份不一致。卸载旧版再安装会清除该应用的缓存和登录状态。'));
       }
       if (!await this.device.connected()) {
         throw new JobFailure(FailureKind.DEVICE,
-          '无线调试已断开，安装结果尚未确认：' + String(error));
+          I18n.t('无线调试已断开，安装结果尚未确认：') + String(error));
       }
       throw new Error(String(error));
     } finally {
@@ -688,6 +865,7 @@ export class NativeJobRuntime implements JobRuntime {
         await this.device.install(path, progress);
         return;
       } catch (error) {
+        PrivacyConsent.assertBusinessAllowed();
         JobCancellation.assertActive(job.id);
         // A real signature, authorization, storage or package rejection cannot
         // be repaired by resubmitting the same bytes. Unknown errors stay visible.
@@ -740,7 +918,8 @@ export class NativeJobRuntime implements JobRuntime {
   }
 
   async installedVersion(bundleName: string): Promise<number> {
-    const local = LocalBundles.liveInstalledVersion(bundleName);
+    PrivacyConsent.assertBusinessAllowed();
+    const local = this.device.isLocalDevice === false ? -1 : LocalBundles.liveInstalledVersion(bundleName);
     if (LocalBundles.isKnown(local)) {
       await InstalledAppRegistry.load(this.context);
       const name = LocalBundles.installedVersionName(bundleName, local);
@@ -752,8 +931,9 @@ export class NativeJobRuntime implements JobRuntime {
     }
     try { return await this.device.installedVersion(bundleName); }
     catch (error) {
+      PrivacyConsent.assertBusinessAllowed();
       if (!await this.device.connected()) {
-        throw new JobFailure(FailureKind.DEVICE, '无线调试已断开，请重新连接后继续');
+        throw new JobFailure(FailureKind.DEVICE, I18n.t('无线调试已断开，请重新连接后继续'));
       }
       throw new Error(String(error));
     }
@@ -761,8 +941,9 @@ export class NativeJobRuntime implements JobRuntime {
 
   async confirmRenewal(job: InstallJob): Promise<boolean> {
     let installed: InstalledSigningIdentity | undefined;
-    try { installed = await this.device.installedSigningIdentity(job.bundleName); }
-    catch (error) { throw new JobFailure(FailureKind.DEVICE, '无线调试连接不可用，续签结果尚未核实：' + String(error)); }
+    try { installed = this.device.isLocalDevice!==false&&!job.installTarget&&LocalBundles.isSelfBundle(job.bundleName)?
+      LocalBundles.selfInstalledIdentity(job.bundleName):await this.device.installedSigningIdentity(job.bundleName); }
+    catch (error) { throw new JobFailure(FailureKind.DEVICE, I18n.t('无线调试连接不可用，续签结果尚未核实：') + String(error)); }
     const confirmed = installed !== undefined && installed.versionCode === job.versionCode &&
       job.renewalInstallBaseline > 0 && installed.updateTime > job.renewalInstallBaseline &&
       installed.fingerprint === await AgcProfile.signingFingerprint(job.profilePath);
@@ -773,10 +954,11 @@ export class NativeJobRuntime implements JobRuntime {
   /** 同内部编号的新发行包，必须确认覆盖发生；旧版本号本身不是成功证据。 */
   async confirmReplacement(job: InstallJob): Promise<boolean> {
     let installed: InstalledSigningIdentity | undefined;
-    try { installed = await this.device.installedSigningIdentity(job.bundleName); }
+    try { installed = this.device.isLocalDevice!==false&&!job.installTarget&&LocalBundles.isSelfBundle(job.bundleName)?
+      LocalBundles.selfInstalledIdentity(job.bundleName):await this.device.installedSigningIdentity(job.bundleName); }
     catch (error) {
       if (this.confirmedSubmission === job.id) return await this.installedVersion(job.bundleName) === job.versionCode;
-      throw new JobFailure(FailureKind.DEVICE, '相同编号更新结果尚未核实，请连接无线调试后继续：' + String(error));
+      throw new JobFailure(FailureKind.DEVICE, I18n.t('相同编号更新结果尚未核实，请连接无线调试后继续：') + String(error));
     }
     if (installed === undefined || installed.updateTime <= 0 || !(job.replacementInstallBaseline > 0)) {
       return this.confirmedSubmission === job.id && await this.installedVersion(job.bundleName) === job.versionCode;
@@ -791,7 +973,13 @@ export class NativeJobRuntime implements JobRuntime {
   }
 
   async rememberInstalledAuthorization(job: InstallJob): Promise<void> {
-    if (!job.profilePath) return;
+    if(this.confirmedSubmission===job.id&&this.device.installedState){
+      try{
+        const state=await this.device.installedState(job.bundleName);
+        if(state.versionCode===job.versionCode){job.installedUpdateTime=state.updateTime;job.installedFingerprint=state.fingerprint;}
+      }catch(_){ /* Display metadata must not turn a confirmed install into failure. */ }
+    }
+    if (!job.profilePath || this.device.isLocalDevice === false) return;
     if (job.renewalRequestedAt > 0 && this.confirmedRenewalIdentity !== undefined) {
       // confirmRenewal already obtained fresh system evidence. Its timestamp
       // can precede the retry's INSTALLING mark; that does not erase success.

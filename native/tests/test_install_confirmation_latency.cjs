@@ -40,6 +40,21 @@ test('an installation that becomes visible after 250 ms finishes without waiting
   assert.equal(f.job.stage, f.stages.INSTALLED); assert.equal(f.installs, 1);
   assert.deepEqual(f.waits, [250]);
 });
+
+test('the first 120391 upgrade finishes once and stays current before its receipt is loaded by another page', async () => {
+  const f=fixture(250);
+  Object.assign(f.job,{appId:1,bundleName:'com.tonghongxiang.quietstart',versionCode:120391,
+    versionName:'1.2.2-beta',releaseTag:'v1.2.2-beta-120375',releaseName:'轻启 1.2.2-beta（120391）',
+    expectedSha256:'b'.repeat(64),catalogSha256:'b'.repeat(64),catalogVersionCode:120391});
+  f.runtime.installedVersion=async()=>f.installedAt && f.now-f.installedAt>=250 ? 120391 : 120375;
+  await f.runner.run('job');
+  assert.equal(f.installs,1);assert.equal(f.job.stage,f.stages.INSTALLED);
+  const Update=require('./release_update_fixture.cjs').releaseUpdate();
+  const asset=Update.forJob(f.job);asset.releaseTag='v1.2.2-beta-120391';
+  for(const records of [[],[f.job]])
+    assert.equal(Update.available(asset,120391,'1.2.2-beta',records),false);
+  assert.equal(Update.available(asset,120375,'1.2.2-beta',[]),true);
+});
 test('slow confirmation backs off, respects its total bound, and does not reinstall', async () => {
   const f = fixture(Infinity); await f.runner.run('job');
   assert.equal(f.job.stage, f.stages.RETRYABLE_ERROR); assert.equal(f.installs, 1);

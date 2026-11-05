@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
@@ -8,7 +9,7 @@ function method(name) {
 }
 function fixture(identity) {
   const f = { restore: undefined, calls: [], backup: [] }, now = 1800000000000;
-  const box = { getContext: () => ({}), Date: class extends Date { static now() { return now; } },
+  const box = { PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent, getContext: () => ({}), Date: class extends Date { static now() { return now; } },
     errorText: e => e.message, AgcClient: class { async certificates() { return []; } },
     SigningIdentityRecovery: { restore: async () => f.restore, load: async (_ctx, _account, allowExpired) => {
       f.calls.push(allowExpired); return identity;

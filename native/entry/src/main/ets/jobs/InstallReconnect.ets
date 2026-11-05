@@ -5,6 +5,9 @@ export class InstallReconnect {
   private static nextId: number = 0;
   private static listeners: Map<number, (jobId: string) => void> = new Map();
 
+  static isOwner(id:number):boolean{return InstallReconnect.owner===id;}
+  static isRequested(id:string):boolean{return InstallReconnect.requestId===id;}
+
   static subscribe(listener: (jobId: string) => void): number {
     const id = ++InstallReconnect.nextId;
     InstallReconnect.listeners.set(id, listener);

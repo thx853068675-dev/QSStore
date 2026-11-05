@@ -11,8 +11,10 @@ export enum InstallStage {
   WAITING_CERTIFICATE = 'waiting_certificate',
   WAITING_DEVICE = 'waiting_device',
   WAITING_CONFIRMATION = 'waiting_confirmation',
+  WAITING_COMPATIBILITY = 'waiting_compatibility',
   INSTALLING = 'installing',
   INSTALLED = 'installed',
+  SKIPPED = 'skipped',
   RETRYABLE_ERROR = 'retryable_error',
   TERMINAL_ERROR = 'terminal_error'
 }
@@ -25,10 +27,15 @@ export class StageMark {
 
 export class InstallJob {
   id: string = '';
+  /** Immutable authenticated device snapshot; empty means this phone. */
+  installTarget: string = '';
+  batchId: string = '';
   appId: number = 0;
   assetName: string = '';
   sourceUrl: string = '';
   mirrorUrls: string[] = [];
+  /** Exact user-selected prefix, so a later new transfer can retire this route safely. */
+  customMirrorPrefix: string = '';
   /** 本机缓存的实际摘要；在线任务下载前可为空，不要求匹配商店元数据。 */
   expectedSha256: string = '';
   /** 目录声明的身份，仅用于核对下载的 HAP；空值表示旧任务或本地导入。 */
@@ -38,6 +45,15 @@ export class InstallJob {
   releaseName: string = '';
   /** 目录摘要仅用于版本识别，不作为下载准入条件。 */
   catalogSha256: string = '';
+  /** Original catalog URL, independent of changing download mirror routes. */
+  catalogSourceUrl: string = '';
+  /** Explicit approval bound to verified bytes, source URL, device and manifest targets. */
+  deviceCompatibilityFingerprint: string = '';
+  /** Actual original package of a locally verified name/icon edit; never a claimed remote digest. */
+  editedSourceSha256: string = '';
+  editedSourceAssetName: string = '';
+  /** Actual HAP/APP selected from a downloaded container, before editing or signing. */
+  packageSourceSha256: string = '';
   /** 相同内部编号覆盖前的设备安装时间，恢复时不能把旧包当成新包。 */
   replacementInstallBaseline: number = 0;
   bundleName: string = '';
@@ -82,6 +98,13 @@ export class InstallJob {
   transferTaskId: string = '';
   /** Generated device workspace retained until confirmed cleanup. */
   stagedTicket: string = '';
+  /** Per-target decisions never imply an installation receipt. */
+  forceInstall: boolean = false;
+  skipReason: string = '';
+  conflictKind: string = '';
+  conflictState: string = '';
+  approvedInstallProof: string = '';
+  approvedInstalledUpdateTime: number = 0;
   attempt: number = 0;
   lastError: string = '';
   updatedAt: number = 0;
@@ -90,16 +113,24 @@ export class InstallJob {
   static displayCopy(job: InstallJob): InstallJob {
     const copy = new InstallJob();
     copy.id = job.id;
+    copy.installTarget = job.installTarget ?? "";
+    copy.batchId = job.batchId ?? "";
     copy.appId = job.appId;
     copy.assetName = job.assetName;
     copy.sourceUrl = job.sourceUrl;
     copy.mirrorUrls = job.mirrorUrls;
+    copy.customMirrorPrefix = job.customMirrorPrefix ?? '';
     copy.expectedSha256 = job.expectedSha256;
     copy.catalogBundleName = job.catalogBundleName;
     copy.catalogVersionCode = job.catalogVersionCode;
     copy.releaseTag = job.releaseTag;
     copy.releaseName = job.releaseName;
     copy.catalogSha256 = job.catalogSha256;
+    copy.catalogSourceUrl = job.catalogSourceUrl ?? '';
+    copy.deviceCompatibilityFingerprint = job.deviceCompatibilityFingerprint ?? '';
+    copy.editedSourceSha256 = job.editedSourceSha256 ?? '';
+    copy.editedSourceAssetName = job.editedSourceAssetName ?? '';
+    copy.packageSourceSha256 = job.packageSourceSha256 ?? '';
     copy.replacementInstallBaseline = job.replacementInstallBaseline;
     copy.bundleName = job.bundleName;
     copy.versionCode = job.versionCode;
@@ -130,6 +161,12 @@ export class InstallJob {
     copy.approvedInstalledAppIdentifier = job.approvedInstalledAppIdentifier;
     copy.transferTaskId = job.transferTaskId;
     copy.stagedTicket = job.stagedTicket;
+    copy.forceInstall = job.forceInstall ?? false;
+    copy.skipReason = job.skipReason ?? '';
+    copy.conflictKind = job.conflictKind ?? '';
+    copy.conflictState = job.conflictState ?? '';
+    copy.approvedInstallProof = job.approvedInstallProof ?? '';
+    copy.approvedInstalledUpdateTime = job.approvedInstalledUpdateTime ?? 0;
     copy.attempt = job.attempt;
     copy.lastError = job.lastError;
     copy.updatedAt = job.updatedAt;
@@ -164,6 +201,7 @@ export enum FailureKind {
   CERTIFICATE_LIMIT = 'certificate_limit',
   DEVICE = 'device',
   CONFIRMATION = 'confirmation',
+  COMPATIBILITY = 'compatibility',
   TRANSIENT = 'transient',
   INTERNAL = 'internal',
   INVALID_PACKAGE = 'invalid_package'

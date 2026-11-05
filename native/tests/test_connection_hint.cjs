@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -9,7 +10,7 @@ function load(file, mocks = {}, globals = {}) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, file + '.ets'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
-  }).outputText, { exports, require: name => mocks[name] || {}, console, ...globals });
+  }).outputText, { exports, require: name => mocks[name] || publicConsentModule(name), console, ...globals });
   return exports;
 }
 const { ConnectionHint } = load('jobs/ConnectionHint');
@@ -20,6 +21,10 @@ test('closed, occupied, trust and timeout failures have distinct actionable hint
   assert.match(ConnectionHint.message('TCP authentication timeout'), /端口可以访问/);
   assert.match(ConnectionHint.message('HDC command timed out'), /连接超时/);
   assert.doesNotMatch(ConnectionHint.message('Unexpected EOF'), /已被占用/);
+  for (const failure of ['peer shutdown', 'peer closed', 'session not found']) {
+    assert.match(ConnectionHint.message(failure), /链路已中断/);
+    assert.doesNotMatch(ConnectionHint.message(failure), /已被占用/);
+  }
   assert.doesNotMatch(ConnectionHint.message('unknown failure'), /已被占用/);
 });
 test('explicit connection refusal stops retries; the last successful port is retained', async () => {
@@ -30,7 +35,7 @@ test('explicit connection refusal stops retries; the last successful port is ret
       put: async () => written++, flush: async () => {} }) } }
   });
   const bridge = new HdcDeviceBridge({ filesDir: '/sandbox' });
-  bridge.command = async () => { attempts++; return '[Fail]Connection refused (os error 111)'; };
+  bridge.command = async op => { if(op===23)return '1';attempts++; return '[Fail]Connection refused (os error 111)'; };
   assert.equal(await bridge.savedPort(), 45678);
   assert.equal(await bridge.connect(45679), false);
   assert.equal(attempts, 1); assert.equal(written, 0);

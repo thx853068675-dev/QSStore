@@ -1,3 +1,4 @@
+import { DeviceInstallTarget } from './DeviceInstallTarget';
 import { InstallTaskState } from './InstallTaskState';
 import { common } from '@kit.AbilityKit';
 import { request, BusinessError } from '@kit.BasicServicesKit';
@@ -5,6 +6,12 @@ import { fileIo, hash } from '@kit.CoreFileKit';
 import { InstallJob } from './InstallJob';
 import { JobCancellation } from './JobCancellation';
 import { DownloadRoutes } from './DownloadRoutes';
+import { DownloadLibrary } from './DownloadLibrary';
+import { PrivacyConsent } from '../data/PrivacyConsent';
+import { GitHubMirrorPreferences } from '../data/GitHubMirrorPreferences';
+import { DownloadProxyPreferences } from '../data/DownloadProxyPreferences';
+import { SocksDownload } from './SocksDownload';
+import { I18n } from '../data/I18n';
 
 // A stalled source is abandoned and the next mirror takes over. New transfers
 // with alternatives also have a short startup budget. Once meaningful data has
@@ -19,9 +26,17 @@ export interface DownloadJournal {
   save(job: InstallJob): Promise<void>;
 }
 
+class SharedDownload {
+  owner: InstallJob;
+  work: Promise<void>;
+  listeners: Map<string, (received: number, total: number) => void> = new Map();
+  constructor(owner: InstallJob, work: Promise<void>) { this.owner=owner; this.work=work; }
+}
+
 // The system transfer agent owns the partial download. Its task ID is stored
 // before start(), so a process restart can reattach instead of starting over.
 export class AssetDownload {
+  private static shared: Map<string, SharedDownload> = new Map();
   private context: common.UIAbilityContext;
   private store: DownloadJournal;
 
@@ -30,11 +45,15 @@ export class AssetDownload {
     this.store = store;
   }
 
-  planPaths(job: InstallJob): void {
+  async planPaths(job: InstallJob): Promise<void> {
+    await DownloadLibrary.directory(this.context);
+    PrivacyConsent.assertBusinessAllowed();
+    JobCancellation.assertActive(job.id);
     const dir = this.context.filesDir + '/install-jobs';
     if (!fileIo.accessSync(dir)) fileIo.mkdirSync(dir, true);
     // 没有商店摘要时使用一次性的短路径；任务记录会持久化该路径。
-    const stem = job.appId + '-' + (job.expectedSha256.length > 0 ? job.expectedSha256 :
+    const deviceSuffix = job.installTarget ? '-device-' + DeviceInstallTarget.parse(job.installTarget).key : '';
+    const stem = deviceSuffix + job.appId + '-' + (job.expectedSha256.length > 0 ? job.expectedSha256 :
       'download-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1000000));
     const extension = (job.assetName.toLowerCase().endsWith('.app') ? '.app' : '.hap');
     job.cachePath = dir + '/' + stem + extension;
@@ -70,11 +89,38 @@ export class AssetDownload {
   async downloadAndVerify(job: InstallJob,
     onProgress?: (received: number, total: number) => void,
     validate?: () => Promise<void>): Promise<void> {
+    PrivacyConsent.assertBusinessAllowed();JobCancellation.assertActive(job.id);
+    if (!job.cachePath) { await this.planPaths(job); await this.store.save(job); }
+    const path=job.cachePath;
+    const previous=AssetDownload.shared.get(path);
+    if (previous) {
+      previous.listeners.set(job.id,(received,total)=>{InstallTaskState.downloadProgress(job.id,received,total);onProgress?.(received,total);});
+      try {
+        try { await previous.work; } catch (_) { JobCancellation.assertActive(job.id); return this.downloadAndVerify(job,onProgress,validate); }
+        JobCancellation.assertActive(job.id);
+        job.expectedSha256=previous.owner.expectedSha256; await this.store.save(job);
+        if (!await this.verifiedFileExists(job)) throw new Error('共享安装包校验失败');
+        if (validate) await validate();
+        return;
+      } finally { previous.listeners.delete(job.id); }
+    }
+    let record: SharedDownload;
+    const work=Promise.resolve().then(()=>this.downloadOnce(job,(received,total)=>{
+      onProgress?.(received,total);record.listeners.forEach((listener)=>{try{listener(received,total);}catch(_){}});
+    },validate)).finally(()=>{if(AssetDownload.shared.get(path)===record)AssetDownload.shared.delete(path);});
+    record=new SharedDownload(job,work);AssetDownload.shared.set(path,record);
+    return work;
+  }
+
+  private async downloadOnce(job: InstallJob,
+    onProgress?: (received: number, total: number) => void,
+    validate?: () => Promise<void>): Promise<void> {
+    PrivacyConsent.assertBusinessAllowed();
     if (!/^https:\/\//.test(job.sourceUrl)) {
-      throw new Error('下载地址不是 HTTPS');
+      throw new Error(I18n.t('下载地址不是 HTTPS'));
     }
     if (job.cachePath.length === 0) {
-      this.planPaths(job);
+      await this.planPaths(job);
       await this.store.save(job);
     }
     if (await this.verifiedFileExists(job)) {
@@ -82,19 +128,55 @@ export class AssetDownload {
       catch (_) { await this.discardInvalidPackage(job); }
     }
 
+    let retainedDigest = '';
+    try { retainedDigest = await DownloadLibrary.restore(this.context, job); }
+    catch (_) { /* Library access must not prevent a normal online install. */ }
+    PrivacyConsent.assertBusinessAllowed();
+    JobCancellation.assertActive(job.id);
+    if (retainedDigest) {
+      job.expectedSha256 = retainedDigest;
+      await this.store.save(job);
+      try {
+        if (validate) await validate();
+        // Retire an old partial transfer only after the retained original is usable.
+        await this.discardTransfer(job);
+        return;
+      } catch (_) { await this.discardInvalidPackage(job); }
+    }
+
     // 只调整新任务。已存在的系统任务继续接管，保留断点，不为重新排序整包重下。
-    const vpn = job.transferTaskId.length === 0 && job.mirrorUrls.length > 0 &&
+    const newTransfer = job.transferTaskId.length === 0;
+    let customMirror = '';
+    if (newTransfer) {
+      try {
+        const setting = await GitHubMirrorPreferences.load(this.context);
+        if (setting.enabled && setting.address.length > 0) customMirror = setting.address;
+      } catch (_) {} // 设置不可读时沿用默认线路，不阻断安装。
+    }
+    const vpn = newTransfer && job.mirrorUrls.length > 0 &&
       await DownloadRoutes.vpnEnabled();
-    const candidates = DownloadRoutes.order(job.sourceUrl, job.mirrorUrls, vpn);
+    const candidates = DownloadRoutes.order(job.sourceUrl, job.mirrorUrls, vpn, customMirror,
+      newTransfer ? (job.customMirrorPrefix ?? '') : '');
+    PrivacyConsent.assertBusinessAllowed();
     console.info('AssetDownload VPN: enabled=' + vpn + ' candidates=' + candidates.length);
     JobCancellation.assertActive(job.id);
-    if (candidates.length > 0 && job.sourceUrl !== candidates[0]) {
+    const sourceChanged = candidates.length > 0 && job.sourceUrl !== candidates[0];
+    const prefix = customMirror.length > 0 ? (customMirror.endsWith('/') ? customMirror : customMirror + '/') : '';
+    const nextPrefix = prefix.length > 0 && candidates.length > 0 && candidates[0].startsWith(prefix) &&
+      /^https:\/\/github\.com\//i.test(candidates[0].substring(prefix.length)) ? prefix : '';
+    const prefixChanged = newTransfer && (job.customMirrorPrefix ?? '') !== nextPrefix;
+    const routesChanged = sourceChanged || (newTransfer && candidates.length > 0 &&
+      (job.mirrorUrls.length !== candidates.length - 1 ||
+        job.mirrorUrls.some((url: string, index: number) => url !== candidates[index + 1])));
+    if (routesChanged) {
       job.sourceUrl = candidates[0];
       job.mirrorUrls = candidates.slice(1);
-      await this.store.save(job);
     }
-    let lastError: Error = new Error('没有可用下载地址');
+    if (prefixChanged) job.customMirrorPrefix = nextPrefix;
+    if (routesChanged || prefixChanged) await this.store.save(job);
+    let lastError: Error = new Error(I18n.t('没有可用下载地址'));
     for (let i = 0; i < candidates.length; i++) {
+      PrivacyConsent.assertBusinessAllowed();
       JobCancellation.assertActive(job.id);
       let downloaded = false;
       try {
@@ -107,6 +189,9 @@ export class AssetDownload {
         return;
       } catch (error) {
         JobCancellation.assertActive(job.id);
+        // Revocation pauses the same source, preserving its agent ID and partial file.
+        // It must not be interpreted as a bad package or a reason to try a mirror.
+        PrivacyConsent.assertBusinessAllowed();
         lastError = error as Error;
         if (downloaded) await this.discardInvalidPackage(job);
         if (i + 1 >= candidates.length) break;
@@ -131,16 +216,32 @@ export class AssetDownload {
     }
     // Actual digest belongs to this response, never to the next mirror.
     job.expectedSha256 = '';
+    job.packageSourceSha256 = '';
     await this.store.save(job);
   }
 
   private async downloadCurrentSource(job: InstallJob,
     onProgress?: (received: number, total: number) => void,
     hasAlternative: boolean = false): Promise<void> {
+    PrivacyConsent.assertBusinessAllowed();
     const partPath = job.cachePath + '.part';
     const startedAt = Date.now();
+    const proxy = await DownloadProxyPreferences.load(this.context);
+    if (job.transferTaskId.length === 0) {
+      if (proxy.enabled && /^socks5:\/\//i.test(proxy.address)) {
+        await SocksDownload.run(job.sourceUrl, partPath, proxy.address, job.id, onProgress);
+        const actual = (await hash.hash(partPath, 'sha256')).toLowerCase();
+        if (fileIo.accessSync(job.cachePath)) fileIo.unlinkSync(job.cachePath);
+        fileIo.renameSync(partPath, job.cachePath);
+        job.expectedSha256 = actual;
+        await this.store.save(job);
+        return;
+      }
+    }
     let task: request.agent.Task | undefined;
     let resumed = false;
+    let privacySubscription: number = -1;
+    try {
     if (job.transferTaskId.length > 0) {
       try {
         task = await request.agent.getTask(this.context, job.transferTaskId);
@@ -149,11 +250,11 @@ export class AssetDownload {
         // ID is stale, so it must not be reused for a different URL later.
         await this.discardTransfer(job);
         if ((error as BusinessError).code !== 21900006) {
-          throw new Error('无法重新接管后台下载：' + String(error));
+          throw new Error(I18n.t('无法重新接管后台下载：') + String(error));
         }
       }
       if (task && (task.config.url !== job.sourceUrl || task.config.saveas !== partPath)) {
-        throw new Error('下载任务身份与安装任务不匹配');
+        throw new Error(I18n.t('下载任务身份与安装任务不匹配'));
       }
       resumed = task !== undefined;
     }
@@ -169,18 +270,20 @@ export class AssetDownload {
         }
         fileIo.unlinkSync(partPath);
       }
+      PrivacyConsent.assertBusinessAllowed();
       task = await request.agent.create(this.context, {
         action: request.agent.Action.DOWNLOAD,
         url: job.sourceUrl,
         mode: request.agent.Mode.BACKGROUND,
         metered: true,
         title: job.assetName,
-        description: '下载应用安装包',
+        description: I18n.t('下载应用安装包'),
         gauge: true,
         saveas: partPath,
         overwrite: false,
         retry: true,
         redirect: true,
+        proxy: proxy.enabled ? proxy.address : '',
         // Only an idle connection is cut off; the transfer itself may take as
         // long as the link needs.
         timeout: { connectionTimeout: (hasAlternative ? INITIAL_CONNECTION_MS : STALL_TIMEOUT_MS) / 1000 }
@@ -189,11 +292,21 @@ export class AssetDownload {
       await this.store.save(job);
     }
 
+    const observedTask = task;
+    if (PrivacyConsent.isManaged()) privacySubscription = PrivacyConsent.subscribe(() => {
+      if (!PrivacyConsent.isBusinessAllowed()) observedTask.pause().catch(() => {});
+    });
+    if (!PrivacyConsent.isBusinessAllowed()) {
+      try { await task.pause(); } catch (_) {}
+      PrivacyConsent.assertBusinessAllowed();
+    }
+
     let info = await request.agent.show(task.tid);
     if (info.progress.state === request.agent.State.INITIALIZED ||
       info.progress.state === request.agent.State.FAILED ||
       info.progress.state === request.agent.State.PAUSED ||
       info.progress.state === request.agent.State.STOPPED) {
+      PrivacyConsent.assertBusinessAllowed();
       await task.start();
     }
     // Keep the full stall budget for established/resumed transfers. Fresh
@@ -208,6 +321,10 @@ export class AssetDownload {
     let carriedTotal = info.progress.sizes.length > 0 ? info.progress.sizes[0] : 0;
     for (;;) {
       JobCancellation.assertActive(job.id);
+      if (!PrivacyConsent.isBusinessAllowed()) {
+        try { await task.pause(); } catch (_) {}
+        PrivacyConsent.assertBusinessAllowed();
+      }
       info = await request.agent.show(task.tid);
       const now = Date.now();
       // 先读取系统任务再判断超时。进程被挂起时下载代理仍在工作，完成结果优先。
@@ -230,13 +347,13 @@ export class AssetDownload {
       if (hasAlternative && !resumed && (info.progress.state === request.agent.State.RUNNING ||
         info.progress.state === request.agent.State.RETRYING)) {
         if (lastProcessed === 0 && now - lastGrowthAt >= INITIAL_CONNECTION_MS) {
-          throw new Error('下载线路连接超时，切换备用线路');
+          throw new Error(I18n.t('下载线路连接超时，切换备用线路'));
         }
         // 只放弃首段仍极慢的下载，避免已下载的大文件因短暂降速被从头重下。
         // 已下载至少四分之一的小包继续完成；大包首段低于约 32 KiB/s 时试下一条线路。
         const startupBytes = carriedTotal > 0 ? Math.min(INITIAL_MIN_BYTES, carriedTotal / 4) : INITIAL_MIN_BYTES;
         if (now - speedWindowAt >= INITIAL_SPEED_WINDOW_MS && lastProcessed < startupBytes) {
-          throw new Error('下载线路初始速度过低，切换备用线路');
+          throw new Error(I18n.t('下载线路初始速度过低，切换备用线路'));
         }
       }
       if (now - lastGrowthAt >= STALL_TIMEOUT_MS) break;
@@ -246,7 +363,7 @@ export class AssetDownload {
       // Leave the partial file in place for the next mirror, but stop the agent
       // from competing with it for bandwidth.
       await this.discardTransfer(job);
-      throw new Error('下载连接停滞，可稍后继续');
+      throw new Error(I18n.t('下载连接停滞，可稍后继续'));
     }
     if (!fileIo.accessSync(partPath)) throw new Error('下载完成但附件不存在');
     console.info('AssetDownload complete: host=' + job.sourceUrl.split('/')[2] +
@@ -260,5 +377,6 @@ export class AssetDownload {
     await request.agent.remove(task.tid);
     job.transferTaskId = '';
     await this.store.save(job);
+    } finally { PrivacyConsent.unsubscribe(privacySubscription); }
   }
 }

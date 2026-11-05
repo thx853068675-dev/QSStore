@@ -29,7 +29,7 @@ test('prefetch starts before the page boundary and cannot loop on busy, empty, f
   assert.equal(shouldPrefetchCatalog(0, 90, 0, 30, 0, false, false), false);
 });
 
-test('complete category filtering ranks all high-star apps first and then follows server update time and id ordering', () => {
+test('complete category filtering defaults to star count and uses id for tied counts', () => {
   const rows = [
     { id: 1, category: '工具', stars: 5, updatedAt: '2026-10-07T10:00:00Z' },
     { id: 2, category: '工具', stars: 100, updatedAt: '2026-10-07T12:00:00Z' },
@@ -38,6 +38,6 @@ test('complete category filtering ranks all high-star apps first and then follow
     { id: 5, category: '工具', stars: 300, updatedAt: '2026-10-07T00:00:00Z' },
     { id: 6, category: '工具', stars: 3, updatedAt: '2026-10-07T12:00:00Z' }
   ];
-  assert.deepEqual(ids(filterCatalogCategory(rows, '工具')), [5, 3, 6, 2, 1]);
+  assert.deepEqual(ids(filterCatalogCategory(rows, '工具')), [5, 3, 2, 1, 6]);
   assert.deepEqual(ids(rows), [1, 2, 3, 4, 5, 6]);
 });

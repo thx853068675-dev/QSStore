@@ -11,6 +11,7 @@ export class CatalogApp {
   stars: number = 0;
   updatedAt: string = '';
   createdAt: number = 0;
+  latestPublishedAt:string='';
   /** -1: not collected; GitHub Release attachment downloads, not store installs. */
   githubDownloads: number = -1;
   iconUrl: string = '';
@@ -34,7 +35,7 @@ export class CatalogApp {
     copy.secondaryRepo = app.secondaryRepo;
     copy.summary = app.summary; copy.category = app.category; copy.publisherName = app.publisherName;
     copy.stars = app.stars; copy.updatedAt = app.updatedAt;
-    copy.createdAt = app.createdAt;
+    copy.createdAt = app.createdAt; copy.latestPublishedAt=app.latestPublishedAt??'';
     copy.iconUrl = app.iconUrl; copy.iconRev = app.iconRev;
     copy.githubDownloads = app.githubDownloads;
     copy.latestName = app.latestName; copy.latestAsset = app.latestAsset; copy.latestAssets = app.latestAssets;
@@ -60,6 +61,7 @@ export class CatalogApp {
     app.iconRev = String(row['icon_rev'] ?? '');
     const latest = row['latest'] as Record<string, Object> | undefined;
     app.latestName = latest ? String(latest['name'] ?? '') : '';
+    app.latestPublishedAt=latest?String(latest['published_at']??''):'';
     const rating = row['rating'] as Record<string, Object> | undefined;
     app.ratingAverage = rating ? Number(rating['average'] ?? 0) : 0;
     app.ratingCount = rating ? Number(rating['count'] ?? 0) : 0;

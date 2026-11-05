@@ -4,6 +4,7 @@ import { util } from '@kit.ArkTS';
 import { AgcClient } from './AgcClient';
 import { DeveloperAccount } from './DeveloperAccount';
 import { SigningIdentityRecovery } from './SigningIdentity';
+import { I18n } from './I18n';
 
 class ProfileLease {
   id: string = '';
@@ -22,11 +23,11 @@ export class AgcProfileLease {
     if (!fileIo.accessSync(path)) return [];
     // Do not silently discard damaged receipts and leak more cloud records.
     const rows = JSON.parse(fileIo.readTextSync(path)) as ProfileLease[];
-    if (!Array.isArray(rows) || rows.length > 200) throw new Error('授权回收记录损坏，请重试');
+    if (!Array.isArray(rows) || rows.length > 200) throw new Error(I18n.t('授权回收记录损坏，请重试'));
     if (rows.some((row: ProfileLease) => !row || typeof row.id !== 'string' ||
       !/^[A-Za-z0-9_-]{1,32}$/.test(row.id) || typeof row.accountId !== 'string' ||
       row.accountId.length === 0 || typeof row.teamId !== 'string' || row.teamId.length === 0)) {
-      throw new Error('授权回收记录损坏，请重试');
+      throw new Error(I18n.t('授权回收记录损坏，请重试'));
     }
     return rows;
   }
@@ -40,12 +41,12 @@ export class AgcProfileLease {
 
   static remember(context: common.UIAbilityContext, account: DeveloperAccount, id: string): void {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(id) || !account.userId || !account.teamId) {
-      throw new Error('授权回收记录无效，已停止申请');
+      throw new Error(I18n.t('授权回收记录无效，已停止申请'));
     }
     const rows = AgcProfileLease.read(context);
     if (rows.some((row: ProfileLease) => row.id === id && row.accountId === account.userId &&
       row.teamId === account.teamId)) return;
-    if (rows.length >= 200) throw new Error('待回收的授权记录过多，请恢复网络后重试');
+    if (rows.length >= 200) throw new Error(I18n.t('待回收的授权记录过多，请恢复网络后重试'));
     const row = new ProfileLease();
     row.id = id; row.accountId = account.userId; row.teamId = account.teamId;
     rows.push(row); AgcProfileLease.save(context, rows);

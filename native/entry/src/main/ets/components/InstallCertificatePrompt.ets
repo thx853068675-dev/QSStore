@@ -5,6 +5,7 @@ import { InstallCertificateSlots } from '../jobs/InstallCertificateSlots';
 import { errorText } from '../jobs/ErrorText';
 import { Palette } from '../theme/Palette';
 import { StoreIconButton, StoreLayout } from '../theme/StoreDesign';
+import { I18n } from '../data/I18n';
 
 @Component
 export struct InstallCertificatePrompt {
@@ -53,10 +54,10 @@ export struct InstallCertificatePrompt {
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const account = await AccountService.current(context);
-      if (!account) throw new Error('请先登录华为开发者账号');
+      if (!account) throw new Error(I18n.t('请先登录华为开发者账号'));
       const scope = InstallCertificateSlots.scope(id);
       if (scope && scope !== JSON.stringify([account.userId, account.teamId])) {
-        throw new Error('开发者账号已改变，请关闭窗口后重新安装');
+        throw new Error(I18n.t('开发者账号已改变，请关闭窗口后重新安装'));
       }
       const rows = await CertificateSlotRecovery.list(context, account.userId, account.teamId);
       if (!this.current(id, revision)) return;
@@ -79,10 +80,10 @@ export struct InstallCertificatePrompt {
     finally { if (this.current(id, revision)) { this.working = false; this.confirmId = ''; } }
   }
   private expiry(row: CertificateSlotRow): string {
-    if (!row.expiresAt) return '到期时间未返回';
+    if (!row.expiresAt) return I18n.t('到期时间未返回');
     const date = new Date(row.expiresAt * 1000);
     return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' +
-      String(date.getDate()).padStart(2, '0') + (row.expiresAt * 1000 <= Date.now() ? ' · 已到期' : '');
+      String(date.getDate()).padStart(2, '0') + (row.expiresAt * 1000 <= Date.now() ? I18n.t(' · 已到期') : '');
   }
   build() {
     if (this.showing) {
@@ -90,10 +91,10 @@ export struct InstallCertificatePrompt {
         Column().width('100%').height('100%').backgroundColor(this.colors().scrim).onClick(() => this.close())
         Column({ space: 14 }) {
           Row({ space: 12 }) {
-            Text('释放证书名额').fontSize(21).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1)
-            StoreIconButton({ label: '关闭证书窗口', active: !this.working, action: () => this.close() })
+            Text(I18n.t('释放证书名额')).fontSize(21).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1)
+            StoreIconButton({ label: I18n.t('关闭证书窗口'), active: !this.working, action: () => this.close() })
           }.width('100%')
-          Text('安装包已保留。请选择一张不再使用的调试证书，删除后自动继续安装。')
+          Text(I18n.t('安装包已保留。请选择一张不再使用的调试证书，删除后自动继续安装。'))
             .fontSize(12).fontColor(this.colors().textSecondary).width('100%')
           if (this.accountLabel) { Text(this.accountLabel).fontSize(12).fontColor(this.colors().textTertiary).width('100%') }
           if (this.loading) { LoadingProgress().width(28).height(28).color(this.colors().accent) }
@@ -104,9 +105,9 @@ export struct InstallCertificatePrompt {
                   Row({ space: 12 }) {
                     Column({ space: 5 }) {
                       Text(row.name).fontSize(14).fontWeight(FontWeight.Medium).fontColor(this.colors().text).maxLines(2)
-                      Text(this.expiry(row) + (row.inUse ? ' · 本机在用' : '')).fontSize(11).fontColor(this.colors().textTertiary)
+                      Text(this.expiry(row) + (row.inUse ? I18n.t(' · 本机在用') : '')).fontSize(11).fontColor(this.colors().textTertiary)
                     }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-                    Button('删除').height(36).fontSize(12).fontColor(this.colors().danger).backgroundColor(this.colors().dangerSoft)
+                    Button(I18n.t('删除')).height(36).fontSize(12).fontColor(this.colors().danger).backgroundColor(this.colors().dangerSoft)
                       .borderRadius(10).enabled(!this.working).onClick(() => { this.confirmId = row.id; this.message = ''; })
                   }.width('100%').padding(12).backgroundColor(this.colors().fill).borderRadius(15)
                 }
@@ -114,18 +115,18 @@ export struct InstallCertificatePrompt {
             }.width('100%').height(Math.min(300, this.rows.length * 84)).scrollBar(BarState.Off)
           }
           if (this.confirmId) {
-            Text('确定删除「' + (this.rows.find((row: CertificateSlotRow) => row.id === this.confirmId)?.name ?? '') +
-              '」？删除不可撤销，关联的 Profile 会失效，可能影响其他工具和应用的签装。')
+            Text(I18n.t('确定删除「') + (this.rows.find((row: CertificateSlotRow) => row.id === this.confirmId)?.name ?? '') +
+              I18n.t('」？删除不可撤销，关联的 Profile 会失效，可能影响其他工具和应用的签装。'))
               .fontSize(12).fontColor(this.colors().danger).width('100%')
             Row({ space: 12 }) {
-              Button('返回').layoutWeight(1).height(42).fontColor(this.colors().text).backgroundColor(this.colors().fill)
+              Button(I18n.t('返回')).layoutWeight(1).height(42).fontColor(this.colors().text).backgroundColor(this.colors().fill)
                 .enabled(!this.working).onClick(() => this.confirmId = '')
-              Button(this.working ? '删除中…' : '删除并继续').layoutWeight(1).height(42)
+              Button(this.working ? I18n.t('删除中…') : I18n.t('删除并继续')).layoutWeight(1).height(42)
                 .fontColor(this.colors().onAccent).backgroundColor(this.colors().danger).enabled(!this.working)
                 .onClick(() => this.proceed(this.confirmId))
             }.width('100%')
           } else {
-            Button('已在其他工具释放名额，继续安装').width('100%').height(42).fontSize(12)
+            Button(I18n.t('已在其他工具释放名额，继续安装')).width('100%').height(42).fontSize(12)
               .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft).enabled(!this.loading && !this.working && !!this.userId)
               .onClick(() => this.proceed())
           }

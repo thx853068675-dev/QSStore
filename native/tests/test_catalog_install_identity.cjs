@@ -20,6 +20,12 @@ function fixture() {
   const { InstallJob, InstallStage } = load('jobs/InstallJob');
   const { CatalogInstallIdentity } = load('jobs/CatalogInstallIdentity');
   const { InstallTaskState } = load('jobs/InstallTaskState');
+  const ReleaseUpdate = load('jobs/ReleaseUpdate').ReleaseUpdate;
+  const { CatalogPackageVariant } = load('data/CatalogPackageVariant');
+  const { CatalogInstallTarget } = require('./load_ets.cjs').loadEts('jobs/CatalogInstallTarget', {
+    '../data/CatalogPackageVariant': { CatalogPackageVariant }, './ReleaseUpdate': { ReleaseUpdate },
+    './InstallJob': { InstallJob, InstallStage }
+  });
   const f = { actual: -1, probes: [], identity: CatalogInstallIdentity, stage: InstallStage, state: InstallTaskState };
   f.record = Object.assign(new InstallJob(), { id: 'xhs-installed', appId: 41,
     bundleName: 'com.hmos.collection', assetName: 'collection-1.21.0-unsigned.hap',
@@ -32,15 +38,16 @@ function fixture() {
     const start = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
     assert.ok(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
   });
-  const box = { InstallJob, InstallStage, CatalogInstallIdentity, InstallTaskState,
-    ReleaseUpdate: load('jobs/ReleaseUpdate').ReleaseUpdate,
-    InstalledAppRegistry: { versionName: () => '', signingIdentity: () => undefined },
+  const box = { InstallJob, InstallStage, CatalogInstallIdentity, CatalogInstallTarget, InstallTaskState,
+    ReleaseUpdate, UpdatePolicy: { disabled: () => false },
+    InstalledAppRegistry: { isAppGallery: () => false, hasApplicationOrigin: () => true, persist: async () => {}, versionName: () => '', signingIdentity: () => undefined },
     LocalBundles: { installedVersion: () => f.actual, isKnown: v => v >= 0 },
     isPending: load('jobs/RecoveryPlanner').isPending };
   vm.runInNewContext(ts.transpileModule(`class Page { ${methods.join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
-  f.ui = Object.assign(new box.Page(), { app: { id: 41 }, detailAppId: 41,
+  f.ui = Object.assign(new box.Page(), { updatePolicyReady: true, updatesPaused: false,
+    app: { id: 41 }, detailAppId: 41,
     selectedAsset: { name: f.record.assetName, bundleName: '', versionCode: 1000022, sha256: '' },
     installedJobs: [f.record], installTasks: [], installedVersion: 0, installedUnknown: false,
     releases: [], showPreviewReleases: false, downloadBusy: false, installSubscription: -1,

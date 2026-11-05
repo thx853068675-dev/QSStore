@@ -5,6 +5,7 @@ export class ForegroundIdle {
   private static timer: number = -1;
   private static serial: number = 0;
   private static work: Map<string, () => void> = new Map();
+  private static priorities: Map<string, () => boolean> = new Map();
 
   static onForeground(): void {
     ForegroundIdle.foreground = true;
@@ -31,13 +32,36 @@ export class ForegroundIdle {
 
   static cancel(key: string): void {
     ForegroundIdle.work.delete(key);
+    ForegroundIdle.priorities.delete(key);
   }
 
   /** Only display scans wait here. Signing, downloads and user actions do not. */
-  static wait(): Promise<void> {
+  static wait(interactive?: () => boolean): Promise<void> {
     return new Promise<void>((resolve: () => void) => {
-      ForegroundIdle.defer('scan-' + (++ForegroundIdle.serial), resolve);
+      if (ForegroundIdle.foreground && interactive?.() === true) { setTimeout(resolve, 0); return; }
+      const key = 'scan-' + (++ForegroundIdle.serial);
+      if (interactive !== undefined) ForegroundIdle.priorities.set(key, interactive);
+      ForegroundIdle.defer(key, () => {
+        ForegroundIdle.priorities.delete(key);
+        resolve();
+      });
     });
+  }
+
+  /** 手动刷新可提升已合并的自动扫描，保留同一个完成信号且不重复发起查询。 */
+  static promote(): void {
+    if (!ForegroundIdle.foreground) return;
+    for (const key of ForegroundIdle.priorities.keys()) {
+      if (ForegroundIdle.priorities.get(key)?.() !== true) continue;
+      const action = ForegroundIdle.work.get(key);
+      ForegroundIdle.work.delete(key);
+      ForegroundIdle.priorities.delete(key);
+      if (action !== undefined) setTimeout(action, 0);
+    }
+    if (ForegroundIdle.work.size === 0 && ForegroundIdle.timer !== -1) {
+      clearTimeout(ForegroundIdle.timer);
+      ForegroundIdle.timer = -1;
+    }
   }
 
   private static arm(): void {

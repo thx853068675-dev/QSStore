@@ -6,6 +6,7 @@ import { JobStore } from '../jobs/JobStore';
 import { JobScheduler } from '../jobs/JobScheduler';
 import { InstallTaskState } from '../jobs/InstallTaskState';
 import { isPending } from '../jobs/RecoveryPlanner';
+import { I18n } from './I18n';
 
 export class LocalProfileGroup {
   key: string = '';
@@ -96,7 +97,7 @@ export class LocalProfileStore {
     if (!group) return 0;
     const jobs = await (await JobStore.open(context)).listAll();
     if (LocalProfileStore.inUse(context, group, jobs)) {
-      throw new Error('此应用有未完成的安装任务，请先完成或清理任务后再删除');
+      throw new Error(I18n.t('此应用有未完成的安装任务，请先完成或清理任务后再删除'));
     }
     // No await from the final live-task check through unlink: a new runner cannot acquire these files in between.
     let deleted = 0;
@@ -104,7 +105,7 @@ export class LocalProfileStore {
       const path = LocalProfileStore.directory(context) + '/' + name;
       if (!fileIo.accessSync(path)) continue;
       if (!LocalProfileStore.regular(path) || LocalProfileStore.describe(context, name).key !== key) {
-        throw new Error('Profile 已发生变化，请刷新列表后重试');
+        throw new Error(I18n.t('Profile 已发生变化，请刷新列表后重试'));
       }
       try { fileIo.unlinkSync(path); deleted++; }
       catch (_) { throw new Error('已删除 ' + deleted + ' 份 Profile，其余文件删除失败，请重试'); }

@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 // Run: node --test native/tests/test_recovery.cjs
 // Executes the production ArkTS service classes with deterministic SDK adapters.
 const { test } = require('node:test');
@@ -14,12 +15,12 @@ function load(file, mocks = {}, globals = {}) {
   const code = ts.transpileModule(fs.readFileSync(path.join(root, file), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText;
-  vm.runInNewContext(code, { exports, require: n => mocks[n] || (n === './InstallTaskState' ?
+  vm.runInNewContext(code, { exports, require: n => mocks[n] || (n === './JobStore' ? {JobStore:{setExecutionGuard(){}}} : n === './InstallTaskState' ?
     load('jobs/InstallTaskState.ets', { './InstallJob': load('jobs/InstallJob.ets') }) :
     n === './ServiceFailure' ? load('data/ServiceFailure.ets') :
     n === '../jobs/InstallJob' ? load('jobs/InstallJob.ets') :
     n === './JobCancellation' ? load('jobs/JobCancellation.ets') :
-    n === './BackgroundInstallTask' ? load('jobs/BackgroundInstallTask.ets') : {}),
+    n === './BackgroundInstallTask' ? load('jobs/BackgroundInstallTask.ets') : publicConsentModule(n)),
     setTimeout, clearTimeout, console, AppStorage: { get: () => 0, setOrCreate() {} }, ...globals });
   return exports;
 }
@@ -53,13 +54,17 @@ async function fixture({ expiry = 1, backup = true, key = true,
     copyFile: async (a, b) => { if (!files.has(a)) throw Error('missing source'); files.set(b, files.get(a)); },
     renameSync: (a, b) => { if (!files.has(a)) throw Error('missing source'); files.set(b, files.get(a)); files.delete(a); } };
   class StoreClient {
-    async signingIdentity(_account, certId = '') { state.cloudReads++; state.requestedCert = certId;
+    async signingIdentity(_account, certId = '') {
+      if (state.cloudAllowed === false) return undefined;
+      state.cloudReads++; state.requestedCert = certId;
       if (state.cloudError) throw Error('offline'); if (state.cloudGate) await state.cloudGate;
       return !certId || state.backup?.certId === certId ? state.backup : undefined; }
     async rememberSigningIdentity(_account, data) { state.acknowledged.push(data.revision); }
-    async publishSigningIdentity(certId, pem) { state.published.push(certId);
+    async publishSigningIdentity(certId, pem) {
+      if (state.cloudAllowed === false) return false;
+      state.published.push(certId);
       if (state.publishErrorAt === certId) throw Error('backup unavailable');
-      state.backup = { certId, privateKeyPem: pem, revision: 1 }; }
+      state.backup = { certId, privateKeyPem: pem, revision: 1 }; return true; }
   }
   class AgcClient {
     async certificates() { if(state.listError)throw state.listError;return state.rows; }
@@ -76,6 +81,7 @@ async function fixture({ expiry = 1, backup = true, key = true,
     }
   }
   const { SigningIdentityRecovery: R, EnrollmentOptions } = load('data/SigningIdentity.ets', {
+    './CloudBackupConsent': { CloudBackupConsent: { allowed: async () => state.cloudAllowed !== false } },
     '@kit.ArkData': { preferences: prefs }, '@kit.CoreFileKit': { fileIo: io },
     'libhap_core.so': { certificateFingerprint: cert => {
       const value = String(files.get(cert) || '');
@@ -200,6 +206,28 @@ test('reset: valid local identity refreshes through AGC without cloud backup', a
   assert.equal(f.files.get(f.keyPath), KEY);
   assert.deepEqual(f.state.acknowledged, []);
   assert.equal(f.state.cloudReads, 0);
+});
+
+test('declining optional cloud backup preserves ordinary signing and expired-certificate recovery', async () => {
+  for (const expiry of [4102444800, 1]) {
+    const f = await fixture({ expiry }); f.state.cloudAllowed = false; f.state.cloudError = true;
+    const prepared = await f.R.ensureForInstall(f.context, f.account);
+    assert.equal(prepared.certId, expiry > Date.now() / 1000 ? '100' : '102');
+    assert.equal(f.files.get(f.keyPath), KEY); assert.equal(f.state.generated, 0);
+    assert.equal(f.state.cloudReads, 0); assert.deepEqual(f.state.published, []);
+    assert.equal(await f.R.synchronizeBackup(f.context, f.account), false);
+  }
+});
+
+test('declining backup permits local certificate selection and reset without changing the private key', async () => {
+  const f = await fixture({ expiry: 4102444800 }); f.state.cloudAllowed = false;
+  f.state.rows.push({ id: '101', certType: 1, expireTime: 4102444800, certObjectId: 'cert101' });
+  const alternate = await f.R.matchingInstalledCertificate(f.context, f.account, 'B'.repeat(64));
+  await f.R.activate(f.context, f.account, alternate.certId);
+  await f.R.reset(f.context, f.account);
+  assert.equal((await f.R.load(f.context, f.account)).certId, '101');
+  assert.equal(f.files.get(f.keyPath), KEY); assert.equal(f.state.generated, 0);
+  assert.equal(f.state.cloudReads, 0); assert.deepEqual(f.state.published, []);
 });
 test('reset: another device cloud key never changes the local certificate or key', async () => {
   const f = await fixture({ expiry: 4102444800 });

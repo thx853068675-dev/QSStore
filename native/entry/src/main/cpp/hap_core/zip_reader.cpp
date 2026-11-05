@@ -221,7 +221,7 @@ std::ifstream OpenHap(const std::string& hap_path, uint64_t& file_size) {
 
 namespace {
 constexpr uint64_t kPackageLimit = 2ULL * 1024 * 1024 * 1024;
-bool PackageName(const std::string& name) {
+bool PackageName(const std::string& name, bool include_shared) {
   if (name.empty() || name.size() > 1024 || name.front() == '/' ||
       name.find('\\') != std::string::npos || name.find('\0') != std::string::npos ||
       name.find(':') != std::string::npos) return false;
@@ -236,11 +236,12 @@ bool PackageName(const std::string& name) {
   auto lower = name;
   std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
   return lower.size() >= 4 && (lower.compare(lower.size() - 4, 4, ".hap") == 0 ||
-                               lower.compare(lower.size() - 4, 4, ".app") == 0);
+                               lower.compare(lower.size() - 4, 4, ".app") == 0 ||
+                               (include_shared && lower.compare(lower.size() - 4, 4, ".hsp") == 0));
 }
 }
 
-std::vector<ArchiveEntry> ListPackageEntries(const std::string& archive_path) {
+std::vector<ArchiveEntry> ListPackageEntries(const std::string& archive_path, bool include_shared) {
   uint64_t size = 0, central = 0;
   auto in = OpenHap(archive_path, size);
   if (size > kPackageLimit) throw std::runtime_error("Archive exceeds 2 GB limit");
@@ -248,7 +249,7 @@ std::vector<ArchiveEntry> ListPackageEntries(const std::string& archive_path) {
   std::vector<ArchiveEntry> result;
   uint64_t total = 0;
   for (const auto& entry : entries) {
-    if (!PackageName(entry.name)) continue;
+    if (!PackageName(entry.name, include_shared)) continue;
     if ((entry.flags & 1) || (entry.method != 0 && entry.method != 8) ||
         !entry.unpacked || entry.unpacked > kPackageLimit || !entry.packed ||
         entry.unpacked / entry.packed > 200) throw std::runtime_error("Unsafe package archive entry");
@@ -286,7 +287,7 @@ std::vector<ArchiveEntry> ListProfileEntries(const std::string& archive_path) {
 
 void ExtractPackageEntry(const std::string& archive_path, const std::string& name,
                          const std::string& output) {
-  const auto allowed = ListPackageEntries(archive_path);
+  const auto allowed = ListPackageEntries(archive_path, true);
   if (output == archive_path || std::none_of(allowed.begin(), allowed.end(),
       [&](const auto& entry) { return entry.name == name; })) throw std::runtime_error("Invalid archive package selection");
   uint64_t size = 0, central = 0;

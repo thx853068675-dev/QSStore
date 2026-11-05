@@ -2,6 +2,7 @@ import { HomeVisibility } from '../theme/HomeVisibility';
 import { StoreImmersiveIconButton } from '../theme/StoreDesign';
 import { CatalogAppTitle } from './CatalogAppTitle';
 import { InstallCertificatePrompt } from './InstallCertificatePrompt';
+import { InstallAccountPrompt } from './InstallAccountPrompt';
 
 /** Lifecycle changes pause only mounted title animations, not the list owner. */
 @Component
@@ -50,6 +51,17 @@ export struct HomeCertificatePrompt {
 
   build() {
     InstallCertificatePrompt({ active: this.homeVisibility.visible, showing: this.showing,
+      dismissRequest: this.dismissRequest })
+  }
+}
+
+@Component
+export struct HomeAccountPrompt {
+  @ObjectLink homeVisibility: HomeVisibility;
+  @Link showing: boolean;
+  @Prop dismissRequest: number = 0;
+  build() {
+    InstallAccountPrompt({ active: this.homeVisibility.visible, showing: this.showing,
       dismissRequest: this.dismissRequest })
   }
 }

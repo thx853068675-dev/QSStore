@@ -2,10 +2,11 @@ import { DiscoverCategorySlice } from './DiscoverCategorySlice';
 import { DiscoverSortControl } from './DiscoverSortControl';
 import { afterPaint } from '../theme/AfterPaint';
 import { HomeVisibility } from '../theme/HomeVisibility';
-import { AnimatorOptions, AnimatorResult, PathShape, uiMaterial } from '@kit.ArkUI';
-import { deviceInfo } from '@kit.BasicServicesKit';
+import { AnimatorOptions, AnimatorResult, PathShape } from '@kit.ArkUI';
 import { Palette } from '../theme/Palette';
 import { StoreLayout, StoreImmersiveAction } from '../theme/StoreDesign';
+import { StoreMaterial } from '../theme/StoreMaterial';
+import { I18n } from '../data/I18n';
 
 /** Search resizing and category reveal share one timing curve. */
 export class DiscoverToolbarMotion {
@@ -15,6 +16,15 @@ export class DiscoverToolbarMotion {
   static options(begin: number, end: number): AnimatorOptions {
     return { duration: 420, easing: 'cubic-bezier(0.32, 0.08, 0.2, 1)', begin: begin, end: end,
       delay: 0, fill: 'forwards', direction: 'normal', iterations: 1 };
+  }
+  static searchControlWidth(width: number, landscape: boolean, progress: number): number {
+    if (landscape) return Math.max(44, width / 4);
+    const full = Math.max(44, width - 108);
+    return full + (44 - full) * progress;
+  }
+  static categoryControlWidth(width: number, landscape: boolean, progress: number): number {
+    if (landscape) return Math.max(44, width - DiscoverToolbarMotion.searchControlWidth(width, true, 1) - 64);
+    return 44 + (Math.max(44, width - 108) - 44) * progress;
   }
 }
 
@@ -72,6 +82,7 @@ export class DiscoverMotion {
 /** Native light material is mounted inside the fixed rounded NavDestination viewport. */
 @Component
 struct DiscoverGlassButton {
+  @StorageProp('materialMode') private materialMode: string = 'adaptive';
   @StorageProp('routeTransitioning') private routeTransitioning: boolean = false;
   @ObjectLink slice: DiscoverCategorySlice;
   @Prop darkMode: boolean = false;
@@ -87,6 +98,7 @@ struct DiscoverGlassButton {
   controlId: string = '';
   accessibilityLabel: string = '';
   action: () => void = () => {};
+  backAction: () => void = () => {};
   relayHorizontalDrag: boolean = false;
   dragStart: () => void = () => {};
   dragUpdate: (offset: number) => void = () => {};
@@ -98,16 +110,21 @@ struct DiscoverGlassButton {
     return '#' + alpha.toString(16).padStart(2, '0') + Palette.forMode(this.darkMode).selectionRose.substring(1);
   }
 
-  private contentColor(): string {
+  private contentColor(): ResourceColor {
     return this.selected && (!this.morphing || this.morphProgress > 0.5) ? '#FFFFFF' :
-      Palette.forMode(this.darkMode).text;
+      StoreMaterial.foreground(this.darkMode,false,this.materialMode);
+  }
+
+  private contentIconColor(): ResourceColor {
+    return this.selected && (!this.morphing || this.morphProgress > 0.5) ? '#FFFFFF' :
+      StoreMaterial.icon(this.darkMode,this.materialMode);
   }
 
   @Builder
   private buttonContents() {
     if (this.morphing) {
       Stack() {
-        SymbolGlyph(this.symbol).fontSize(17).fontColor([this.contentColor()])
+        SymbolGlyph(this.symbol).fontSize(17).fontColor([this.contentIconColor()])
           .opacity(1 - this.morphProgress).scale({ x: 1 - 0.12 * this.morphProgress, y: 1 - 0.12 * this.morphProgress })
           .rotate({ angle: 45 * this.morphProgress }).accessibilityLevel('no')
         Text(this.label).fontSize(14).fontWeight(FontWeight.Bold).fontColor(this.contentColor())
@@ -118,7 +135,7 @@ struct DiscoverGlassButton {
     } else {
       Row({ space: 7 }) {
         if (this.symbol !== undefined) {
-          SymbolGlyph(this.symbol).fontSize(17).fontColor([this.contentColor()])
+          SymbolGlyph(this.symbol).fontSize(17).fontColor([this.contentIconColor()])
         }
         Text(this.label).fontSize(14).fontWeight(this.selected ? FontWeight.Bold : FontWeight.Medium)
           .fontColor(this.contentColor()).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -129,7 +146,7 @@ struct DiscoverGlassButton {
   @Styles
   private controlLayout() {
     .width(this.controlWidth).height(this.controlHeight).borderRadius(this.controlHeight / 2)
-      .padding({ left: 12, right: 12 }).opacity(this.controlOpacity)
+      .padding(0).opacity(this.controlOpacity)
       .accessibilitySelected(this.selected && (!this.morphing || this.morphProgress > 0.5))
       .id(this.controlId).accessibilityText(this.accessibilityLabel || this.label)
       .enabled(this.active && !this.routeTransitioning).onClick(() => this.action())
@@ -137,10 +154,21 @@ struct DiscoverGlassButton {
 
   @Builder
   private actionContents(immersive: boolean) {
-    Button({ type: ButtonType.Normal }) { this.buttonContents() }
+    Button({ type: ButtonType.Normal }) {
+      Stack() {
+        // The fallback tint belongs above the blur, not behind its opaque light
+        // material. At morphProgress=0 only the circular glass base remains.
+        if (!immersive && this.selected) {
+          Row().width('100%').height('100%').borderRadius(this.controlHeight / 2)
+            .backgroundColor(this.selectedFill()).hitTestBehavior(HitTestMode.None)
+            .accessibilityLevel('no-hide-descendants')
+        }
+        Stack() { this.buttonContents() }.width('100%').height('100%').padding({ left: 12, right: 12 })
+      }.width('100%').height('100%')
+    }
       .controlLayout().stateEffect(true)
-      .backgroundColor(immersive ? Color.Transparent : this.selected ? this.selectedFill() : Color.Transparent)
-      .backgroundBlurStyle(immersive ? BlurStyle.NONE : BlurStyle.COMPONENT_THIN,
+      .backgroundColor(Color.Transparent)
+      .backgroundBlurStyle(immersive ? BlurStyle.NONE : StoreMaterial.blurStyle(this.materialMode),
         { colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT })
       .parallelGesture(PanGesture({direction:this.relayHorizontalDrag&&immersive?PanDirection.Horizontal:PanDirection.None})
         .onActionStart(()=>this.dragStart()).onActionUpdate((event:GestureEvent)=>this.dragUpdate(event.offsetX))
@@ -153,6 +181,7 @@ struct DiscoverGlassButton {
       controlRadius: this.controlHeight / 2, followsTarget: true, anchorAtStart: true,
       colored: this.selected, tint: this.selected ? Palette.forMode(this.darkMode).selectionRose :
         Palette.forMode(this.darkMode).surface, tintStrength: this.morphing ? this.morphProgress : 1,
+      backAction: this.backAction,
       content: (immersive: boolean) => { this.actionContents(immersive); } })
       .width(this.controlWidth).height(this.controlHeight)
   }
@@ -161,18 +190,26 @@ struct DiscoverGlassButton {
 
 @Component
 export struct DiscoverHeader {
+  @StorageProp('windowWidth') @Watch('onViewportChanged') private windowWidth: number = 0;
+  @StorageProp('windowHeight') @Watch('onViewportChanged') private windowHeight: number = 0;
+  @StorageProp('installTargetCount') private installTargetCount:number=1;
+  @StorageProp('installTargetName') private installTargetName:string='';
+  @StorageProp('materialMode') @Watch('onMaterialChanged') private materialMode: string = 'adaptive';
   @StorageProp('routeTransitioning') @Watch('refreshPopup') private routeTransitioning:boolean=false;
   @ObjectLink motion: DiscoverMotion;
   @ObjectLink @Watch('refreshPopup') homeVisibility: HomeVisibility;
   @Prop darkMode: boolean = false;
+  @Prop starfield: boolean = false;
   @Prop statusInset: number = 0;
   @Prop inset: number = 20;
   @Prop titleHeight: number = 68;
   @Prop @Watch('refreshPopup') active: boolean = true;
   @Prop @Watch('onCategoriesChanged') categories: string[] = [];
   @Prop selectedCategory: string = '';
-  @Prop sortKey: string = 'discover';
+  @Prop sortKey: string = 'stars';
   @Prop sortDirection: string = 'desc';
+  @Prop layoutMode: string = 'normal';
+  onLayoutChange: (layout: string) => void = () => {};
   @Prop sortLoading: boolean = false;
   onSort: (key: string) => void = () => {};
   onReverseSort: () => void = () => {};
@@ -184,6 +221,7 @@ export struct DiscoverHeader {
   onOpenSearch: () => void = () => {};
   onMotionStateChanged: (moving: boolean) => void = () => {};
   onCategory: (category: string) => void = () => {};
+  backAction: () => void = () => {};
   private categoryScroller: Scroller = new Scroller();
   private categoryOffset: number = 0;
   private categoryDragOffset: number = 0;
@@ -194,13 +232,13 @@ export struct DiscoverHeader {
   private toolbarAnimator: AnimatorResult | undefined = undefined;
   private disposed: boolean = false;
   @State @Watch('refreshCategorySlices') private searchWidth: number = 0;
-  private immersiveSupported: boolean = deviceInfo.sdkApiVersion >= 26 && uiMaterial.isImmersiveMaterialSupported();
+  @State private immersiveSupported: boolean = StoreMaterial.supported(this.materialMode);
   onTitleSize: (height: number) => void = () => {};
 
 
   aboutToAppear(): void {
     this.disposed = false;
-    this.categoriesOpen = this.categoriesExpanded;
+    this.categoriesOpen = this.isLandscape() || this.categoriesExpanded;
     this.toolbarProgress = this.categoriesOpen ? 1 : 0;
     if (!this.categoriesOpen) this.categoryOffset = 0;
     this.refreshCategorySlices();
@@ -217,10 +255,11 @@ export struct DiscoverHeader {
   }
 
   private onToolbarModeChanged(): void {
-    if (this.categoriesOpen === this.categoriesExpanded) return;
+    const expanded = this.isLandscape() || this.categoriesExpanded;
+    if (this.categoriesOpen === expanded) return;
     const generation = ++this.toolbarMotionGeneration;
     this.toolbarAnimator?.cancel();
-    this.categoriesOpen = this.categoriesExpanded;
+    this.categoriesOpen = expanded;
     const target = this.categoriesOpen ? 1 : 0;
     const startProgress = this.toolbarProgress;
     const startOffset = this.categoryOffset;
@@ -251,12 +290,32 @@ export struct DiscoverHeader {
   }
 
   private searchControlWidth(): number {
-    const fullWidth = Math.max(44, this.searchWidth - 108);
-    return fullWidth + (44 - fullWidth) * this.toolbarProgress;
+    return DiscoverToolbarMotion.searchControlWidth(this.searchWidth, this.isLandscape(), this.toolbarProgress);
   }
 
   private categoryControlWidth(): number {
-    return 44 + (Math.max(44, this.searchWidth - 108) - 44) * this.toolbarProgress;
+    return DiscoverToolbarMotion.categoryControlWidth(this.searchWidth, this.isLandscape(), this.toolbarProgress);
+  }
+
+  private isLandscape(): boolean { return this.windowWidth > this.windowHeight && this.windowHeight > 0; }
+
+  private onViewportChanged(): void {
+    if (this.disposed) return;
+    this.toolbarMotionGeneration++;
+    this.toolbarAnimator?.cancel(); this.toolbarAnimator = undefined;
+    this.categoriesOpen = this.isLandscape() || this.categoriesExpanded;
+    this.toolbarProgress = this.categoriesOpen ? 1 : 0;
+    this.refreshCategorySlices();
+    // A rotation changes popup coordinates as well as width. Retire old hit regions before remounting.
+    this.popupGeneration++; this.popupReady = false; this.refreshPopup();
+    this.onMotionStateChanged(false);
+  }
+
+  private onMaterialChanged(): void {
+    if(this.disposed)return;
+    this.popupGeneration++;this.popupReady=false;
+    this.immersiveSupported=StoreMaterial.supported(this.materialMode);
+    this.refreshPopup();
   }
 
   private refreshPopup(): void {
@@ -274,12 +333,12 @@ export struct DiscoverHeader {
   @Builder
   private floatingSearch() {
     Stack({ alignContent: Alignment.Start }) {
-      if (this.categoriesOpen) {
+      if (this.categoriesOpen && !this.isLandscape()) {
         Button({ type: ButtonType.Circle }) {
           SymbolGlyph($r('sys.symbol.magnifyingglass')).fontSize(17)
-            .fontColor([Palette.forMode(this.darkMode).text])
+            .fontColor([StoreMaterial.icon(this.darkMode,this.materialMode)])
         }.width(44).height(44).backgroundColor(Color.Transparent)
-          .id('discover-search-button').accessibilityText('搜索应用').onClick(this.onOpenSearch)
+          .id('discover-search-button').accessibilityText(I18n.t('搜索应用')).onClick(this.onOpenSearch)
       } else { this.searchContent() }
     }.width('100%').height(44).clip(false)
   }
@@ -292,17 +351,18 @@ export struct DiscoverHeader {
           builder: this.floatingSearch, width: this.searchControlWidth(), radius: 22,
           placement: Placement.BottomLeft, targetSpace: 0, offset: { x: 0, y: -44 },
           enableArrow: false, autoCancel: false, focusable: false, mask: false, followTransformOfTarget: true,
-          transition: TransitionEffect.IDENTITY, onWillDismiss: false,
-          systemMaterial: new uiMaterial.ImmersiveMaterial({
-            style: uiMaterial.ImmersiveStyle.THIN, colorInvert: true, applyShadow: true, interactive: true,
-            lightEffect: { color: Palette.forMode(this.darkMode).surface }
-          })
+          transition: TransitionEffect.IDENTITY,
+          onWillDismiss: (action: DismissPopupAction) => {
+            if (action.reason === DismissReason.PRESS_BACK && this.active &&
+              this.homeVisibility.visible && !this.routeTransitioning) this.backAction();
+          },
+          systemMaterial: StoreMaterial.glass(this.materialMode, this.darkMode)
         })
     } else {
       Stack() { this.floatingSearch() }.width('100%').height(44).borderRadius(22).clip(true)
-        .backgroundBlurStyle(BlurStyle.COMPONENT_THIN, {
+        .backgroundBlurStyle(StoreMaterial.blurStyle(this.materialMode), {
           colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT
-        })
+        }).backgroundColor(StoreMaterial.fallbackFill(this.darkMode))
     }
   }
 
@@ -317,13 +377,14 @@ export struct DiscoverHeader {
           Row({ space: 10 }) {
             DiscoverGlassButton({ slice: this.sliceFor(''), darkMode: this.darkMode,
               active: this.active && this.popupReady && this.searchWidth > 0,
-              controlWidth: this.mainCategoryWidth(), label: '全部', morphing: true, morphProgress: this.toolbarProgress,
+              controlWidth: this.mainCategoryWidth(), label: I18n.t('全部'), morphing: true, morphProgress: this.toolbarProgress,
               symbol: $r('sys.symbol.square_grid_2x2'), selected: this.selectedCategory.length === 0,
               relayHorizontalDrag: this.categoriesOpen,
               dragStart:()=>{this.categoryDragOffset=this.categoryScroller.currentOffset().xOffset;},
               dragUpdate:(offset:number)=>{this.categoryScroller.scrollTo({xOffset:Math.max(0,this.categoryDragOffset-offset),yOffset:0,animation:false});},
               dragEnd:(velocity:number)=>{this.categoryScroller.fling(velocity);},
-              controlId: 'discover-category-button', accessibilityLabel: this.categoriesOpen ? '全部分类' : '展开分类',
+              controlId: 'discover-category-button', accessibilityLabel: this.categoriesOpen ? I18n.t('全部分类') : I18n.t('展开分类'),
+              backAction: this.backAction,
               action: () => { if (this.categoriesOpen) this.onCategory(''); else this.onToggleCategories(); } })
             ForEach(this.categories, (category: string) => { this.categoryPill(category) }, (category: string) => category)
           }.height(DiscoverToolbarMotion.paintHeight)
@@ -345,7 +406,8 @@ export struct DiscoverHeader {
           this.getUIContext().vp2px(DiscoverToolbarMotion.feedbackInset))))
       DiscoverSortControl({ active: this.active && this.popupReady, foreground: this.homeVisibility.visible,
         darkMode: this.darkMode, sortKey: this.sortKey, sortDirection: this.sortDirection,
-        loading: this.sortLoading, onSort: this.onSort, onReverse: this.onReverseSort })
+        loading: this.sortLoading, onSort: this.onSort, onReverse: this.onReverseSort,
+        layoutMode: this.layoutMode, onLayoutChange: this.onLayoutChange, backAction: this.backAction })
     }.width('100%').height(DiscoverToolbarMotion.paintHeight)
   }
 
@@ -378,21 +440,28 @@ export struct DiscoverHeader {
   private categoryPill(category: string) {
     DiscoverGlassButton({ slice: this.sliceFor(category), darkMode: this.darkMode,
       active: this.active && this.popupReady && this.searchWidth > 0,
-      controlWidth: Math.max(64, category.length * 14 + 32), label: category, controlOpacity: this.toolbarProgress,
+      controlWidth: Math.max(64, I18n.category(category).length * 14 + 32), label: I18n.category(category), controlOpacity: this.toolbarProgress,
       selected: this.selectedCategory === category,
       relayHorizontalDrag: true,
       dragStart:()=>{this.categoryDragOffset=this.categoryScroller.currentOffset().xOffset;},
       dragUpdate:(offset:number)=>{this.categoryScroller.scrollTo({xOffset:Math.max(0,this.categoryDragOffset-offset),yOffset:0,animation:false});},
       dragEnd:(velocity:number)=>{this.categoryScroller.fling(velocity);},
-      controlId: 'discover-category-' + category, action: () => this.onCategory(category) })
+      controlId: 'discover-category-' + category, backAction: this.backAction,
+      action: () => this.onCategory(category) })
   }
 
   build() {
     Column() {
+      if (this.layoutMode !== 'sidebar') {
       Column() {
         Column() {
-          Text('发现').fontSize(30).fontWeight(FontWeight.Bold)
-            .fontColor(Palette.forMode(this.darkMode).text)
+          Row({ space: 9 }) {
+            Text(I18n.t('发现')).fontSize(30).fontWeight(FontWeight.Bold)
+              .fontColor(Palette.forMode(this.darkMode || this.starfield).text)
+            Text(this.installTargetCount>1?I18n.t('安装到 ')+this.installTargetCount+I18n.t(' 台设备'):this.installTargetName?I18n.t('安装到 ')+this.installTargetName:I18n.t('值得安装的应用')).fontSize(12)
+              .fontColor(Palette.forMode(this.darkMode || this.starfield).textSecondary).padding({ bottom: 5 })
+              .maxLines(1).textOverflow({overflow:TextOverflow.Ellipsis}).id('discover-heading-subtitle')
+          }.alignItems(VerticalAlign.Bottom)
         }.alignItems(HorizontalAlign.Start).width('100%')
           // 外层只裁切视口；标题保留完整高度，避免收起时的尺寸回调缩小自然高度。
           .constraintSize({ maxWidth: StoreLayout.contentWidth, minHeight: this.titleHeight })
@@ -401,6 +470,7 @@ export struct DiscoverHeader {
           .onSizeChange((_old: SizeOptions, size: SizeOptions) => this.onTitleSize(Number(size.height)))
       }.width('100%').height(Math.max(0, this.titleHeight - this.motion.scrollOffset))
         .padding({ left: this.inset, right: this.inset }).clip(true)
+      }
       Column({ space: 0 }) {
         Stack({ alignContent: Alignment.TopStart }) {
           Row() { this.floatingToolbar() }.width('100%').height(DiscoverToolbarMotion.paintHeight)
@@ -425,7 +495,7 @@ export struct DiscoverRefreshIndicator {
   build() {
     Row() {
       LoadingProgress().width(24).height(24).color(Palette.forMode(this.darkMode).accent)
-        .accessibilityText('正在刷新应用')
+        .accessibilityText(I18n.t('正在刷新应用'))
     }.width('100%').height(24).justifyContent(FlexAlign.Center)
       .position({ x: 0, y: this.statusInset + this.titleHeight + 70 + this.motion.pullOffset / 2 - 12 })
       .opacity(this.refreshing ? 1 : Math.min(1, this.motion.pullOffset / 24))

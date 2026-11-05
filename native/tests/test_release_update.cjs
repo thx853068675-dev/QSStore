@@ -5,6 +5,42 @@ const { releaseUpdate } = require('./release_update_fixture.cjs');
 const { InstallJob, InstallStage } = loadEts('jobs/InstallJob');
 const { HapAsset } = loadEts('data/ReleaseInfo');
 const Update = releaseUpdate();
+
+test('a fixed preview tag with a new actual build upgrades once and preserves the tag identity', () => {
+  const next=Object.assign(new HapAsset(), {bundleName:'com.tonghongxiang.quietstart',versionCode:120391,
+    versionName:'1.2.2-beta',releaseTag:'v1.2.2-beta-120375',releaseName:'轻启 1.2.2-beta（120391）',
+    sha256:'b'.repeat(64)});
+  assert.equal(Update.version(next),'1.2.2-beta-120391');
+  assert.equal(Update.available(next,120375,'1.2.2-beta',[]),true);
+  assert.equal(Update.available(next,120391,'1.2.2-beta',[]),false);
+  assert.equal(Update.available(next,120392,'1.2.2-beta',[]),false);
+  assert.equal(next.releaseTag,'v1.2.2-beta-120375');
+  const completed=Object.assign(new InstallJob(),{bundleName:next.bundleName,versionCode:next.versionCode,
+    versionName:next.versionName,releaseTag:next.releaseTag,releaseName:next.releaseName,
+    expectedSha256:next.sha256,stage:InstallStage.INSTALLED,updatedAt:4000});
+  assert.equal(Update.available(next,120391,'1.2.2-beta',[completed]),false);
+});
+
+test('120391 stays current after a tag rename even with incomplete or unavailable first-install receipts', () => {
+  const next=Object.assign(new HapAsset(),{bundleName:'com.tonghongxiang.quietstart',versionCode:120391,
+    versionName:'1.2.2-beta',releaseTag:'v1.2.2-beta-120391',releaseName:'轻启 1.2.2-beta（120391）',
+    sha256:'b'.repeat(64)});
+  const legacy=Object.assign(new InstallJob(),{bundleName:next.bundleName,versionCode:120391,
+    versionName:'1.2.2-beta',releaseTag:'v1.2.2-beta-120375',releaseName:'轻启 1.2.2-beta（120375）',
+    stage:InstallStage.INSTALLED,updatedAt:4000});
+  for(const [jobs,time,name] of [[[],0,'1.2.2-beta'],[[legacy],0,'1.2.2-beta'],
+    [[legacy],0,''],[[{...legacy,installedUpdateTime:3000}],5000,'1.2.2-beta']]) {
+    assert.equal(Update.available(next,120391,name,jobs,time),false);
+    assert.equal(Update.older(next,120391,name,jobs,time),false);
+  }
+  // Same-number changed bytes remain eligible when a confirmed receipt proves the change.
+  const changed={...legacy,expectedSha256:'a'.repeat(64)};
+  assert.equal(Update.available(next,120391,'1.2.2-beta',[changed]),true);
+  changed.catalogSha256=next.sha256;
+  assert.equal(Update.available(next,120391,'1.2.2-beta',[changed]),false);
+  assert.equal(Update.available(next,120390,'1.2.2-beta',[legacy]),true);
+  assert.equal(Update.available(next,120392,'1.2.2-beta',[legacy]),false);
+});
 function asset(tag='1.2.6', sha='b'.repeat(64), code=1000000) {
   const a=HapAsset.fromJson({name:'entry-default-unsigned.hap',bundle_name:'com.example.nga_oh',
     version_code:code,version_name:'1.0.0',sha256:sha,

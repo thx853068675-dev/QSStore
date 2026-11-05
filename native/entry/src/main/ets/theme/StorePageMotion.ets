@@ -1,5 +1,6 @@
 import { router, UIContext } from '@kit.ArkUI';
 import { ForegroundIdle } from '../jobs/ForegroundIdle';
+import { DeviceOrbGestureGuard } from '../jobs/DeviceOrbGestureGuard';
 
 /** Opaque native cover. Floating material is hidden before either page starts moving. */
 export class StorePageMotion {
@@ -11,6 +12,11 @@ export class StorePageMotion {
   private static pushPending: boolean = false;
   private static revealReady: boolean = false;
   private static waiting: Array<() => void> = [];
+  static dismissDevicePanel():boolean{
+    if(DeviceOrbGestureGuard.blocksBack())return true;
+    if(!AppStorage.get<boolean>('deviceOrbOpened'))return false;
+    AppStorage.setOrCreate('deviceOrbOpened',false);return true;
+  }
   static options(type: RouteType): PageTransitionOptions {
     return { type: type, duration: StorePageMotion.duration, curve: Curve.EaseOut };
   }
@@ -20,6 +26,7 @@ export class StorePageMotion {
   /** Only real page transitions invalidate a cached page's native popup ownership. */
   static routeRevision(): number { return StorePageMotion.revision; }
   static prepare(): void {
+    AppStorage.setOrCreate('deviceOrbOpened',false);
     const revision = ++StorePageMotion.revision;
     StorePageMotion.revealReady = false;
     if (StorePageMotion.revealTimer !== -1) clearTimeout(StorePageMotion.revealTimer);

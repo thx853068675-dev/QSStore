@@ -7,6 +7,13 @@
 mod auth;
 mod client;
 mod net_discover;
+pub mod local_discover;
+mod local_diag;
+mod local_tcp;
+pub mod lan_scan;
+mod lan_sweep;
+mod lan_neighbors;
+pub use local_discover::{discover_local_port, discover_lan_port, discover_lan_devices};
 mod parser;
 mod server;
 mod transfer;
@@ -20,47 +27,45 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+static START_LOCK: Mutex<()> = Mutex::new(());
 static ACTIVE_PORT: Mutex<Option<u16>> = Mutex::new(None);
 
 // Read-only UI observations never issue another HDC command or wait for the
 // install queue. Bytes count successful host transport writes, not bm work.
-static INSTALL_PROGRESS: Mutex<Option<(String, &'static str, u64, u64)>> = Mutex::new(None);
-
-pub fn reset_install_progress(path: &str) {
-    if let Ok(mut row) = INSTALL_PROGRESS.lock() {
-        *row = Some((path.into(), "waiting", 0, 0));
+static INSTALL_PROGRESS: Mutex<Option<std::collections::HashMap<String, (&'static str, u64, u64, Instant)>>> = Mutex::new(None);
+fn set_install_progress(path: &str, phase: &'static str, sent: u64, total: u64) {
+    if let Ok(mut rows) = INSTALL_PROGRESS.lock() {
+        let rows=rows.get_or_insert_with(std::collections::HashMap::new);
+        if !rows.contains_key(path) && rows.len() >= 128 {
+            if let Some(old)=rows.iter().min_by_key(|(_,row)|row.3).map(|(key,_)|key.clone()) { rows.remove(&old); }
+        }
+        rows.insert(path.into(),(phase,sent.min(total),total,Instant::now()));
     }
 }
-
-pub fn report_install_progress(path: &str, phase: &'static str, sent: u64, total: u64) {
-    if let Ok(mut row) = INSTALL_PROGRESS.lock() {
-        *row = Some((path.into(), phase, sent.min(total), total));
-    }
-}
-
+pub fn reset_install_progress(path: &str) { set_install_progress(path,"waiting",0,0); }
+pub fn report_install_progress(path: &str, phase: &'static str, sent: u64, total: u64) { set_install_progress(path,phase,sent,total); }
 pub fn report_observed_file_progress(path: &str, sent: u64, total: u64) {
-    if let Ok(mut row) = INSTALL_PROGRESS.lock() {
-        if let Some((current, phase, received, size)) = row.as_mut() {
-            if current == path {
-                *phase = "transfer";
-                *received = sent.min(total);
-                *size = total;
-            }
-        }
+    if let Ok(mut rows)=INSTALL_PROGRESS.lock() {
+        if let Some(row)=rows.as_mut().and_then(|rows|rows.get_mut(path)) { *row=("transfer",sent.min(total),total,Instant::now()); }
     }
 }
-
-pub fn install_progress(path: &str) -> (&'static str, u64, u64) {
-    if let Ok(row) = INSTALL_PROGRESS.lock() {
-        if let Some((current, phase, sent, total)) = row.as_ref() {
-            if current == path { return (*phase, *sent, *total); }
-        }
-    }
-    ("waiting", 0, 0)
+pub fn install_progress(path: &str) -> (&'static str,u64,u64) {
+    INSTALL_PROGRESS.lock().ok().and_then(|rows|rows.as_ref().and_then(|rows|rows.get(path).map(|row|(row.0,row.1,row.2)))).unwrap_or(("waiting",0,0))
 }
 
 #[cfg(test)]
 mod progress_tests {
+    #[test]
+    fn parallel_install_observations_are_independent() {
+        let a="/sandbox/parallel-a.hap";let b="/sandbox/parallel-b.hap";
+        super::reset_install_progress(a);super::reset_install_progress(b);
+        super::report_install_progress(a,"transfer",50,100);
+        super::report_install_progress(b,"transfer",150,200);
+        assert_eq!(super::install_progress(a),("transfer",50,100));
+        assert_eq!(super::install_progress(b),("transfer",150,200));
+        super::report_observed_file_progress(a,60,100);
+        assert_eq!(super::install_progress(b),("transfer",150,200));
+    }
     #[test]
     fn transfer_observation_is_bound_to_its_file_and_does_not_invent_bm_percent() {
         super::reset_install_progress("/sandbox/one.hap");
@@ -122,6 +127,7 @@ fn choose_free_port(port: u16) -> io::Result<u16> {
 /// Returns the port the server actually listens on: the caller must use that
 /// value for every later `command` call, since it may differ from the request.
 pub fn start(key_root: &Path, port: u16) -> io::Result<u16> {
+    let _start=START_LOCK.lock().map_err(|_| Error::other("HDC startup lock poisoned"))?;
     if port < 1024 || !key_root.is_absolute() {
         return Err(Error::new(ErrorKind::InvalidInput, "invalid HDC port or key root"));
     }
@@ -193,12 +199,22 @@ fn start_on(address: &str, port: u16) -> io::Result<()> {
 /// tools can reach the device. The server keeps listening; the next command
 /// reconnects on its own.
 pub fn disconnect() -> io::Result<usize> {
+    disconnect_matching(None)
+}
+
+/// Reconnecting loopback must leave independently selected LAN peers intact.
+pub fn disconnect_target(target: &str) -> io::Result<usize> {
+    disconnect_matching(Some(target))
+}
+
+fn disconnect_matching(target: Option<&str>) -> io::Result<usize> {
     let Some((connect_map, tcp_map)) = INSTALL_SERVER.get() else {
         return Ok(0);
     };
     let keys = {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        runtime.block_on(connect_map.get_list(true))
+        runtime.block_on(connect_map.keys()).into_iter()
+            .filter(|key| target.map(|value| key == value).unwrap_or(true)).collect::<Vec<_>>()
     };
     if keys.is_empty() {
         return Ok(0);
@@ -209,8 +225,8 @@ pub fn disconnect() -> io::Result<usize> {
         for key in keys {
             if let Some(session_id) = connect_map.get_session_id(&key).await {
                 tcp_map.end_session(session_id).await;
+                connect_map.remove_session(&key,session_id).await;
             }
-            connect_map.remove(&key).await;
         }
     });
     Ok(dropped)

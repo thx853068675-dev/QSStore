@@ -440,7 +440,7 @@ napi_value HdcCommand(napi_env env, napi_callback_info info) {
   std::vector<char> root(length + 1);
   if (napi_get_value_string_utf8(env, args[0], root.data(), root.size(), &length) != napi_ok ||
       napi_get_value_uint32(env, args[1], &state->operation) != napi_ok ||
-      state->operation > 14 ||
+      state->operation > 26 ||
       napi_get_value_string_utf8(env, args[2], nullptr, 0, &length) != napi_ok ||
       length > 4096) {
     delete state;
@@ -500,11 +500,11 @@ napi_value HdcCommand(napi_env env, napi_callback_info info) {
 
 napi_value HdcDisconnect(napi_env env, napi_callback_info info) {
   // 断开是一次性的轻操作，同步做完即可；失败也不抛错，只回报数量，
-  // 界面按「已断开」处理就好 —— 让用户为一个释放动作处理异常没有意义。
+  // 保留负数的暂忙／失败状态，交给生命周期控制器补做释放。
   std::string error(256, '\0');
   const int dropped = qingqi_hdc_disconnect(error.data(), error.size());
   napi_value value = nullptr;
-  napi_create_int32(env, dropped < 0 ? 0 : dropped, &value);
+  napi_create_int32(env, dropped, &value);
   return value;
 }
 
@@ -787,17 +787,19 @@ napi_value Rewrite(napi_env env, napi_callback_info info) {
 }
 
 napi_value ListArchiveEntries(napi_env env, napi_callback_info info, bool profiles) {
-  size_t argc = 1, length = 0;
-  napi_value arg = nullptr;
-  napi_get_cb_info(env, info, &argc, &arg, nullptr, nullptr);
-  if (argc != 1 || napi_get_value_string_utf8(env, arg, nullptr, 0, &length) != napi_ok || !length || length > 4096) {
+  size_t argc = 2, length = 0;
+  napi_value args[2] = {};
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  bool shared = false;
+  if (argc < 1 || napi_get_value_string_utf8(env, args[0], nullptr, 0, &length) != napi_ok || !length || length > 4096 ||
+      (argc > 1 && napi_get_value_bool(env, args[1], &shared) != napi_ok)) {
     napi_throw_type_error(env, nullptr, "Invalid archive path"); return nullptr;
   }
   std::vector<char> path(length + 1);
-  napi_get_value_string_utf8(env, arg, path.data(), path.size(), &length);
+  napi_get_value_string_utf8(env, args[0], path.data(), path.size(), &length);
   try {
     const auto entries = profiles ? qingqi::hap::ListProfileEntries(std::string(path.data(), length)) :
-      qingqi::hap::ListPackageEntries(std::string(path.data(), length));
+      qingqi::hap::ListPackageEntries(std::string(path.data(), length), shared);
     napi_value result = nullptr;
     napi_create_array_with_length(env, entries.size(), &result);
     for (size_t i = 0; i < entries.size(); ++i) {

@@ -7,6 +7,7 @@ import { DeveloperAccount } from './DeveloperAccount';
 import { SigningIdentityRecovery } from './SigningIdentity';
 import { ServiceFailure } from './ServiceFailure';
 import { FailureKind } from '../jobs/InstallJob';
+import { I18n } from './I18n';
 
 /** Ordinary debug Profiles survive in AGC and are never temporary leases. */
 export class AgcManagedProfile {
@@ -35,10 +36,11 @@ export class AgcManagedProfile {
     finally { if (fileIo.accessSync(path + '.part')) fileIo.unlinkSync(path + '.part'); }
   }
 
-  private static async appId(agc: AgcClient, bundleName: string, account: DeveloperAccount): Promise<string> {
+  /** Resolve the AGC application record for a package; shared with the IDE-path scope fallback. */
+  static async appId(agc: AgcClient, bundleName: string, account: DeveloperAccount): Promise<string> {
     const apps = (await agc.registeredApps(bundleName)).filter((row: Record<string, Object>) =>
       String(row['packageName'] ?? '') === bundleName && Number(row['installationFree'] ?? 0) === 0);
-    if (apps.length > 1) throw new Error('AGC 存在多个同包名应用，请先核对应用登记');
+    if (apps.length > 1) throw new Error(I18n.t('AGC 存在多个同包名应用，请先核对应用登记'));
     if (apps.length === 1) return AgcClient.cloudId(apps[0]['appId']);
     const projects = (await agc.signingProjects()).filter((row: Record<string, Object>) =>
       row['name'] === '轻启本地签名' && String(row['teamId'] ?? '') === account.teamId);
@@ -57,8 +59,8 @@ export class AgcManagedProfile {
         String(row['packageName'] ?? '') === bundleName && Number(row['installationFree'] ?? 0) === 0);
       if (existing.length === 1) return AgcClient.cloudId(existing[0]['appId']);
       throw new ServiceFailure(FailureKind.ACCOUNT,
-        '自动签名申请次数已达上限，本机没有此应用可复用的授权。AGC 已占用此包名（' + bundleName +
-        '），当前团队无法申请普通手动授权。需恢复此应用原有的配套签名材料，或等待自动签名额度恢复后继续。安装包已保留。',
+        I18n.t('自动签名申请次数已达上限，本机没有此应用可复用的授权。AGC 已占用此包名（') + bundleName +
+        I18n.t('），当前团队无法申请普通手动授权。需恢复此应用原有的配套签名材料，或等待自动签名额度恢复后继续。安装包已保留。'),
         (error as ServiceFailure).status);
     }
   }
@@ -81,7 +83,7 @@ export class AgcManagedProfile {
   static async obtain(agc: AgcClient, account: DeveloperAccount, certId: string, deviceIds: string[],
     acls: string[], bundleName: string, temporary: string, valid: (path: string) => boolean,
     udid: string = '', renewalRequest: string = ''): Promise<void> {
-    if (renewalRequest && !/^[a-z0-9]{1,24}$/.test(renewalRequest)) throw new Error('续签请求信息无效');
+    if (renewalRequest && !/^[a-z0-9]{1,24}$/.test(renewalRequest)) throw new Error(I18n.t('续签请求信息无效'));
     const appId = await AgcManagedProfile.appId(agc, bundleName, account);
     const name = await AgcManagedProfile.profileName(appId, certId, deviceIds, acls, renewalRequest);
     const profiles = await agc.managedProfiles(appId);
@@ -112,17 +114,17 @@ export class AgcManagedProfile {
       const approved = await agc.approvedAcls(appId);
       const missing = acls.filter((acl: string) => !approved.includes(acl));
       if (missing.length > 0) throw new ServiceFailure(FailureKind.ACCOUNT,
-        '自动签名次数已达上限；官方手动签名尚缺少已批准的 ACL：' + missing.join('、') +
-        '。请在 AGC 为此应用申请权限，现有应用已保留。', 205389941);
+        I18n.t('自动签名次数已达上限；官方手动签名尚缺少已批准的 ACL：') + missing.join(I18n.t('、')) +
+        I18n.t('。请在 AGC 为此应用申请权限，现有应用已保留。'), 205389941);
     }
     await agc.createManagedProfile(name, appId, certId, deviceIds, acls);
     const created = (await agc.managedProfiles(appId)).filter((row: Record<string, Object>) =>
       row['provisionName'] === name && String(row['certId'] ?? '') === certId &&
       Number(row['tempFlag'] ?? 1) === 0 && Number(row['provisionType'] ?? 0) === 1);
-    if (created.length !== 1) throw new Error('AGC 已收到手动签名请求，授权暂未可查询；重试会先查询已有授权');
+    if (created.length !== 1) throw new Error(I18n.t('AGC 已收到手动签名请求，授权暂未可查询；重试会先查询已有授权'));
     const url = await agc.certificateUrl(String(created[0]['provisionObjectId'] ?? ''));
     SigningIdentityRecovery.writeFile(temporary, await agc.download(url));
-    if (!valid(temporary)) throw new Error('AGC 手动签名授权与应用、设备、证书、ACL 或有效期不匹配');
+    if (!valid(temporary)) throw new Error(I18n.t('AGC 手动签名授权与应用、设备、证书、ACL 或有效期不匹配'));
     console.info('AGC Profile source=managed-created');
   }
 }

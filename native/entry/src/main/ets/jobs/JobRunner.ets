@@ -1,9 +1,11 @@
+import { DeviceInstallTarget } from './DeviceInstallTarget';
 import { FailureKind, InstallJob, InstallStage, RecoveryEvidence } from './InstallJob';
 import { ClassifiedFailure } from '../data/ServiceFailure';
 import { JobScheduler } from './JobScheduler';
 import { JobStore } from './JobStore';
 import { recoveryStage } from './RecoveryPlanner';
 import { JobCancellation } from './JobCancellation';
+import { I18n } from '../data/I18n';
 
 export class PackageIdentity {
   bundleName: string = '';
@@ -27,6 +29,12 @@ export class JobFailure extends Error {
   }
 }
 
+/** A changed device can make queued work unnecessary; this is not an install failure. */
+export class JobSkip extends Error {
+  reason:string;
+  constructor(reason:string,message:string){super(message);this.reason=reason;}
+}
+
 /// Platform implementations must verify each result before resolving. The
 /// runner never treats a return from the signer or HDC as installation proof.
 export interface JobRuntime {
@@ -43,6 +51,7 @@ export interface JobRuntime {
   confirmRenewal(job: InstallJob): Promise<boolean>;
   confirmReplacement?(job: InstallJob): Promise<boolean>;
   rememberInstalledAuthorization?(job: InstallJob): Promise<void>;
+  preflight?(job:InstallJob,verified:boolean):Promise<string>;
 }
 
 export class JobRunner {
@@ -61,18 +70,24 @@ export class JobRunner {
     // 一个任务同一时刻只能有一条流水线在跑：页面自己的忙标记挡不住另一个页面。
     // 用 runInstall 而不是默认上限：底层 hdc install 自己允许跑 5 分钟，外层若
     // 先放弃会留下「设备还在装、我们已经报超时」的错位。
-    return JobScheduler.runInstall(id, () => this.runLocked(id));
+    const job = await this.store.get(id);
+    if (!job) throw new Error(I18n.t('安装任务不存在'));
+    const lane = job.installTarget ? DeviceInstallTarget.parse(job.installTarget).key : 'local';
+    return JobScheduler.runInstall(id, () => this.runLocked(id), lane);
   }
 
   private async runLocked(id: string): Promise<InstallJob> {
     const job = await this.store.get(id);
-    if (!job) throw new Error('安装任务不存在');
+    if (!job) throw new Error(I18n.t('安装任务不存在'));
     try {
+      if(job.stage===InstallStage.SKIPPED||job.stage===InstallStage.TERMINAL_ERROR)return job;
+      // Only a confirmed same-package receipt can skip before bytes are inspected.
+      if(job.stage===InstallStage.QUEUED&&await this.skipIfUnneeded(job,false))return job;
       if (job.cachePath.length === 0 || job.signedPath.length === 0) {
         const paths = await this.runtime.planPaths(job);
         if (paths.cachePath.length === 0 || paths.signedPath.length === 0 ||
           paths.cachePath === paths.signedPath) {
-          throw new JobFailure(FailureKind.INTERNAL, '安装工作目录无效');
+          throw new JobFailure(FailureKind.INTERNAL, I18n.t('安装工作目录无效'));
         }
         job.cachePath = paths.cachePath;
         job.signedPath = paths.signedPath;
@@ -97,7 +112,7 @@ export class JobRunner {
       if (job.stage === InstallStage.VERIFIED) {
         const identity = await this.runtime.inspectPackage(job);
         if (identity.bundleName.length === 0 || identity.versionCode <= 0) {
-          throw new JobFailure(FailureKind.INVALID_PACKAGE, '安装包缺少可用的应用身份');
+          throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('安装包缺少可用的应用身份'));
         }
         job.bundleName = identity.bundleName;
         job.versionCode = identity.versionCode;
@@ -106,6 +121,7 @@ export class JobRunner {
         job.mainAbility = identity.mainAbility;
         await this.advance(job, InstallStage.PACKAGE_INSPECTED);
       }
+      if(job.bundleName&&job.versionCode>0&&await this.skipIfUnneeded(job,true))return job;
       if (job.stage === InstallStage.PACKAGE_INSPECTED) {
         await this.runtime.ensureProfile(job);
         await this.advance(job, InstallStage.PROFILE_READY);
@@ -140,6 +156,7 @@ export class JobRunner {
           }
         }
         if (needsInstall) {
+          if(await this.skipIfUnneeded(job,true))return job;
           JobCancellation.assertActive(job.id);
           await this.runtime.install(job);
         }
@@ -153,9 +170,9 @@ export class JobRunner {
           // 可能先完成安装、随后才结束旧进程；这时要求用户反复配对只会重装。
           throw new JobFailure(FailureKind.TRANSIENT,
             job.renewalRequestedAt > 0 ?
-              (job.allowDataLoss ? '重装续签已提交，但尚未确认新授权，请连接无线调试后继续核对' :
-                '续签已提交，但尚未确认授权替换结果。旧应用数据已保留，请连接无线调试后继续核对') :
-              '安装已提交，但新版本尚未生效。请重新打开应用确认；若版本仍旧，再点继续安装');
+              (job.allowDataLoss ? I18n.t('重装续签已提交，但尚未确认新授权，请连接无线调试后继续核对') :
+                I18n.t('续签已提交，但尚未确认授权替换结果。旧应用数据已保留，请连接无线调试后继续核对')) :
+              I18n.t('安装已提交，但新版本尚未生效。请重新打开应用确认；若版本仍旧，再点继续安装'));
         }
         // Auxiliary expiry metadata must never turn a confirmed install into a retry.
         try { await this.runtime.rememberInstalledAuthorization?.(job); } catch (_) {}
@@ -165,11 +182,23 @@ export class JobRunner {
       return job;
     } catch (error) {
       if (JobCancellation.isCancelled(id)) throw new Error('安装任务已取消');
+      if(error instanceof JobSkip){
+        job.skipReason=error.reason;this.clearDataLossApproval(job);
+        await this.advance(job,InstallStage.SKIPPED);return job;
+      }
       const failure = error instanceof JobFailure ? error :
         new JobFailure((error as ClassifiedFailure).failureKind ?? FailureKind.TRANSIENT, String(error));
       await this.store.recordFailure(job, failure.kind, failure.message);
       return job;
     }
+  }
+
+  private async skipIfUnneeded(job:InstallJob,verified:boolean):Promise<boolean>{
+    const reason=await this.runtime.preflight?.(job,verified)??'';
+    if(!reason)return false;
+    job.skipReason=reason;this.clearDataLossApproval(job);
+    await this.advance(job,InstallStage.SKIPPED);
+    return true;
   }
 
   private async advance(job: InstallJob, stage: InstallStage): Promise<void> {
@@ -185,6 +214,8 @@ export class JobRunner {
     job.approvedInstalledVersion = 0;
     job.approvedInstalledFingerprint = '';
     job.approvedInstalledAppIdentifier = '';
+    job.approvedInstallProof = '';job.approvedInstalledUpdateTime = 0;
+    job.forceInstall=false;job.conflictKind='';job.conflictState='';
   }
 
   /**
@@ -213,7 +244,7 @@ export class JobRunner {
         current = await this.runtime.installedVersion(job.bundleName);
       } catch (error) {
         queryFailure = error instanceof JobFailure ? error :
-          new JobFailure(FailureKind.TRANSIENT, '安装结果暂时无法核实：' + String(error));
+          new JobFailure(FailureKind.TRANSIENT, I18n.t('安装结果暂时无法核实：') + String(error));
         // 已提交后的短暂查询故障只重查结果，不重签、不重新传包。
         // 明确断连、身份或权限失败仍立即交给现有恢复入口。
         if (![FailureKind.TRANSIENT, FailureKind.NETWORK].includes(queryFailure.kind) ||

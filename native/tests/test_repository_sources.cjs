@@ -32,16 +32,18 @@ test('source metadata survives catalog copying and release identities distinguis
   const old=release.ReleaseInfo.fromJson({tag:'v1'});assert.equal(old.sourceLabel(),'主仓');
 });
 test('release history labels place the repository marker immediately after the version',()=>{
-  const ui=page('Detail',['currentRelease','currentReleaseLabel','releaseOptions']);
+  const ui=page('Detail',['currentRelease','currentReleaseLabel','releaseOptions','releaseVersionLabel']);
   ui.app={secondaryRepo:'mirror/releases'};
   ui.releases=[row('mirror/releases','secondary'),row('dev/main','primary')];
+  ui.selectedAsset=ui.releases[0].assets[0];
   ui.selectedReleaseIndex=0;ui.releaseTotal=2;
   assert.equal(ui.currentReleaseLabel(),'2 · 子仓  ·  2026-10-03');
   assert.equal(ui.releaseOptions()[1].value,'2 · 主仓  ·  2026-10-03');
 });
 test('a single repository has no source marker in the selected label or history options',()=>{
-  const ui=page('Detail',['currentRelease','currentReleaseLabel','releaseOptions']);
+  const ui=page('Detail',['currentRelease','currentReleaseLabel','releaseOptions','releaseVersionLabel']);
   ui.app={secondaryRepo:''};ui.releases=[row('dev/main','primary')];
+  ui.selectedAsset=ui.releases[0].assets[0];
   ui.selectedReleaseIndex=0;ui.releaseTotal=1;
   assert.equal(ui.currentReleaseLabel(),'2  ·  2026-10-03');
   assert.equal(ui.releaseOptions()[0].value,'2  ·  2026-10-03');

@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -15,7 +16,7 @@ function fixture() {
   f.flushResume = () => { for (const [id, fn] of timers) { timers.delete(id); fn(); } };
   f.timers = timers;
   const storage = new Map(); f.storage = storage;
-  const box = { AppStorage: { setOrCreate: (key, value) => storage.set(key, value) },
+  const box = { DeviceOrbNavigation:{}, PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent, AppStorage: { setOrCreate: (key, value) => storage.set(key, value) },
     afterPaint: (_ui, callback) => f.frames.push(callback),
     StorePageMotion: { routeRevision: () => f.routeRevision }, ForegroundIdle: { onForeground() {}, interaction() {},
     defer: (key, fn) => timers.set(key, fn), cancel: key => timers.delete(key) }, setTimeout: fn => { timers.set(++nextTimer, fn); return nextTimer; },
@@ -28,15 +29,15 @@ function fixture() {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
   box.InstallConfirmation = { deactivate() {} }; box.InstallReconnect = { deactivate() {} };
-  const ui = new box.Page(); Object.assign(ui, { homeVisibility: { visible: false }, pageVisible: false, topActionEpoch: 3,
+  const ui = new box.Page(); Object.assign(ui, { privacyAllowed: true, observePrivacy() {}, initializeBusiness() {}, homeVisibility: { visible: false }, pageVisible: false, topActionEpoch: 3,
     headerRouteRevision: 0, headerRestoreGeneration: 0, getUIContext: () => ({}), resumeMaintenancePending: false,
     currentTab: 0, signedIn: true, account: {}, myApps: [{ id: 1, category: '工具' }], syncManagementIcons() {},
     myAppsLoaded: true, myAppsBusy: false, myAppsRefreshing: false, myAppsMessage: '',
-    apps: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
-    updateCatalog: [{ id: 1, iconRev: 'old' }, { id: 2, iconRev: 'same' }],
+    apps: [{ id: 1, iconRev: 'old', updatedAt: '100' }, { id: 2, iconRev: 'same', updatedAt: '100' }],
+    updateCatalog: [{ id: 1, iconRev: 'old', updatedAt: '100' }, { id: 2, iconRev: 'same', updatedAt: '100' }],
     appIcons: [{ id: 1, rev: 'old', pixels: 'original pixels' }], catalogPage: 4,
     discoverMotion: { showTop: true }, scrollOffset: 1234, activeQuery: 'saved search',
-    syncDeviceIcons() {}, observeReconnect() {}, observeInstallTasks() {}, drainInstallQueue() {}, syncManagementRows() {}, syncDiscoverRows() {},
+    syncFollowing() {}, syncDeviceIcons() {}, observeReconnect() {}, observeInstallTasks() {}, drainInstallQueue() {}, syncManagementRows() {}, syncDiscoverRows() {},
     refreshCatalogInstallState() {}, reconcileInterruptedInstalls: async () => {}, reconcileStuckJobs() {},
     scanDeviceInstalled() { f.scans++; }, loadSigningExpiries() {},
     loadApps() { throw Error('return must not restart paginated network loading'); },
@@ -65,7 +66,7 @@ test('late popup ownership restoration cannot recreate controls after hiding or 
 });
 test('return to Management merges only viewed changes, leaving other rows and old icon pixels until replacement', () => {
   const f = fixture(), ui = f.ui; ui.currentTab = 2;
-  const untouched = ui.apps[1]; f.viewed = [{ id: 1, iconRev: 'new', category: '工具' }];
+  const untouched = ui.apps[1]; f.viewed = [{ id: 1, iconRev: 'new', category: '工具', updatedAt: '200' }];
   ui.onPageShow(); assert.equal(f.scans, 0); f.flushResume(); assert.equal(f.scans, 1); assert.equal(ui.apps.length, 2);
   assert.equal(ui.apps[1], untouched); assert.equal(ui.apps[0].category, '工具');
   assert.equal(ui.updateCatalog[0].iconRev, 'new'); assert.equal(f.icons.length, 1);
@@ -123,16 +124,16 @@ test('installed information closes material popups before returning to Managemen
   const detail = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/InstalledDetail.ets'), 'utf8');
   const start = detail.indexOf('  private back():void{');
   const back = detail.slice(start, detail.indexOf('\n  }', start) + 4);
-  let timer, routed;
-  const box = { StorePageMotion: { prepare() {} }, setTimeout: fn => { timer = fn; return 1; }, router: { back: args => {
-    assert.equal(ui.headerVisible, false); routed = args;
+  let timer, routed, returned=false;
+  const box = { DeviceOrbNavigation:{}, PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent, StorePageMotion: { prepare() {} }, setTimeout: fn => { timer = fn; return 1; }, router: { back: args => {
+    returned=true;assert.equal(ui.headerVisible, false); routed = args;
   } } };
   vm.runInNewContext(ts.transpileModule(`class Page { ${back} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
   const ui = new box.Page(); Object.assign(ui, { disposed: false, returning: false, headerVisible: true });
   ui.back(); assert.equal(ui.headerVisible, false); assert.equal(routed, undefined);
-  timer(); assert.equal(routed.url, 'pages/Index');
+  timer(); assert.equal(routed, undefined);assert(returned);
 });
 for (const file of ['Detail', 'LocalInstall', 'PackageTools']) {
   test(file + ' closes the shared material once before routing, even if popup and page both receive Back', () => {
@@ -141,7 +142,7 @@ for (const file of ['Detail', 'LocalInstall', 'PackageTools']) {
     assert.ok(start >= 0);
     const back = detail.slice(start, detail.indexOf('\n  }', start) + 4);
     const timers = []; let routed = 0;
-    const box = { StorePageMotion: { prepare() {} }, setTimeout: fn => { timers.push(fn); return timers.length; }, router: { back: () => {
+    const box = { DeviceOrbNavigation:{}, PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent, StorePageMotion: { prepare() {} }, setTimeout: fn => { timers.push(fn); return timers.length; }, router: { back: () => {
       assert.equal(ui.headerVisible, false); routed++;
     } } };
     vm.runInNewContext(ts.transpileModule('class Page { ' + back + ' };globalThis.Page=Page;', {
@@ -160,7 +161,7 @@ for (const file of ['LocalInstall', 'PackageTools']) {
     const wrapper = source.match(/tools:\s*(\(\)\s*=>\s*\{\s*this\.headerTools\(\);?\s*\})/);
     assert.ok(wrapper, 'capture the page receiver before passing the tools builder');
     let received;
-    const box = {};
+    const box = { DeviceOrbNavigation:{}, PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent,};
     vm.runInNewContext('globalThis.make = function(){ return ' + wrapper[1] + '; };', box);
     const page = { headerTools() { received = this; } };
     const tools = box.make.call(page);
@@ -168,3 +169,12 @@ for (const file of ['LocalInstall', 'PackageTools']) {
     assert.equal(received, page);
   });
 }
+
+test('route return rejects older or undated detail snapshots without changing current row or icon', () => {
+  const f=fixture(), ui=f.ui; ui.apps[0].updatedAt='200'; ui.updateCatalog[0].updatedAt='200';
+  const before=ui.apps[0];
+  for (const stamp of ['100', '', 'NaN', '0']) {
+    f.viewed=[{id:1, iconRev:'stale', updatedAt:stamp}]; ui.syncViewedCatalog();
+    assert.equal(ui.apps[0],before);assert.equal(ui.updateCatalog[0].iconRev,'old');assert.equal(f.icons.length,0);
+  }
+});

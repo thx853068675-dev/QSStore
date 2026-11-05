@@ -2,8 +2,9 @@ const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const s=fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/pages/Index.ets'),'utf8'),start=s.indexOf('  onBackPress(): boolean');
-const code=s.slice(start,s.indexOf('\n  }',start)+4);
-function fixture(){const cleared=[],box={InstallReconnect:{clear:id=>cleared.push(id)}};
+const helper=s.indexOf('  private closeMultiDevice(');
+const code=s.slice(start,s.indexOf('\n  }',start)+4)+s.slice(helper,s.indexOf('\n',helper));
+function fixture(){const cleared=[],box={StorePageMotion:{dismissDevicePanel:()=>false},InstallReconnect:{clear:id=>cleared.push(id)}};
  vm.runInNewContext(ts.transpileModule('class Page {'+code+'};globalThis.Page=Page;',{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
  const page=new box.Page();Object.assign(page,{animateOverlay:fn=>fn(),dismissCardActions:index=>{page.dismissedAction=index;page.showCardActions=false;},configSourceGeneration:1,removingId:0,submitGeneration:1,submitDraft:{inspectionStatus:'ready'},resumeJobId:'job',completeRefreshConnection:ok=>page.connected=ok});
  return {page,cleared};}
@@ -28,4 +29,10 @@ test('a live reconnect or final submission cannot accidentally exit the applicat
  assert.equal(page.onBackPress(),true);assert.equal(page.showSubmit,true);
  page.submitDraft.inspectionStatus='pending';assert.equal(page.onBackPress(),true);assert.equal(page.showSubmit,false);
  assert.equal(page.submitBusy,false,'canceling inspection must release its busy state');
+});
+
+
+test('dismissing a remote reconnect clears its request so later pages and device discovery stay independent',()=>{
+ const {page,cleared}=fixture();page.showMultiDevice=true;assert.equal(page.onBackPress(),true);
+ assert.equal(page.showMultiDevice,false);assert.equal(page.resumeJobId,'');assert.deepEqual(cleared,['job']);
 });

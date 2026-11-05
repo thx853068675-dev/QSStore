@@ -1,0 +1,53 @@
+[
+  {
+    "name": "HUAWEI Pura 70 Pro",
+    "kind": "phone",
+    "image": "https://consumer.huawei.com/content/dam/huawei-cbg-site/cn/mkt/pdp/phones/ah-pro/admin/list-purples.png",
+    "file": "device_stack_phone.png",
+    "bytes": 149008,
+    "imageSize": [
+      378,
+      480
+    ],
+    "frame": {
+      "x": 0.05695760598503742,
+      "y": -0.06376558603491268,
+      "width": 0.8860847880299251,
+      "height": 1.1251870324189526
+    }
+  },
+  {
+    "name": "HUAWEI MatePad Pro 13.2 英寸",
+    "kind": "tablet",
+    "image": "https://consumer.huawei.com/content/dam/huawei-cbg-site/cn/mkt/pdp/tablets/matepad-pro-13-2-v1/list/list-black.png",
+    "file": "device_stack_tablet.png",
+    "bytes": 106375,
+    "imageSize": [
+      378,
+      480
+    ],
+    "frame": {
+      "x": -0.01947368421052629,
+      "y": -0.1610233918128655,
+      "width": 1.0389473684210526,
+      "height": 1.3192982456140352
+    }
+  },
+  {
+    "name": "HUAWEI MateBook Pro",
+    "kind": "pc",
+    "image": "https://consumer.huawei.com/content/dam/huawei-cbg-site/cn/mkt/pdp/harmonyos-computer/matebook-pro/list/blue.png",
+    "file": "device_stack_pc.png",
+    "bytes": 48432,
+    "imageSize": [
+      378,
+      480
+    ],
+    "frame": {
+      "x": -0.08022801302931593,
+      "y": -0.2363843648208468,
+      "width": 1.1573941368078176,
+      "height": 1.4697068403908793
+    }
+  }
+]

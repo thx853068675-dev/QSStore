@@ -67,6 +67,7 @@ test('system cancellation is respected; foreground recovery only restarts real o
 function schedulerFixture(globals = {}) {
   const f = { acquired: [], released: [], cancelled: false };
   f.scheduler = load('JobScheduler', {
+    './JobStore':{JobStore:{setExecutionGuard(){}}},
     './BackgroundInstallTask': { BackgroundInstallTask: {
       acquire: async id => { f.acquired.push(id); }, release: async id => { f.released.push(id); } } },
     './JobCancellation': { JobCancellation: {

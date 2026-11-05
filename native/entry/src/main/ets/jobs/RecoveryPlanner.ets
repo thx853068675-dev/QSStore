@@ -3,8 +3,8 @@ import { FailureKind, InstallJob, InstallStage, RecoveryEvidence } from './Insta
 /// Returns a safe next stage after checking durable artifacts. A journal row
 /// alone is never proof that an HAP, profile, signature or installation exists.
 export function recoveryStage(job: InstallJob, evidence: RecoveryEvidence): InstallStage {
-  if (job.stage === InstallStage.TERMINAL_ERROR) {
-    return InstallStage.TERMINAL_ERROR;
+  if (job.stage === InstallStage.TERMINAL_ERROR || job.stage === InstallStage.SKIPPED) {
+    return job.stage;
   }
   if ((!job.reinstallRequired || evidence.replacementConfirmed) && job.bundleName.length > 0 && job.versionCode > 0 &&
     evidence.installedVersionCode === job.versionCode) {
@@ -29,7 +29,7 @@ export function recoveryStage(job: InstallJob, evidence: RecoveryEvidence): Inst
 }
 
 export function isPending(stage: InstallStage): boolean {
-  return stage !== InstallStage.INSTALLED && stage !== InstallStage.TERMINAL_ERROR;
+  return stage !== InstallStage.INSTALLED && stage !== InstallStage.SKIPPED && stage !== InstallStage.TERMINAL_ERROR;
 }
 
 export function stageForFailure(kind: FailureKind): InstallStage {
@@ -39,6 +39,7 @@ export function stageForFailure(kind: FailureKind): InstallStage {
     case FailureKind.CERTIFICATE_LIMIT: return InstallStage.WAITING_CERTIFICATE;
     case FailureKind.DEVICE: return InstallStage.WAITING_DEVICE;
     case FailureKind.CONFIRMATION: return InstallStage.WAITING_CONFIRMATION;
+    case FailureKind.COMPATIBILITY: return InstallStage.WAITING_COMPATIBILITY;
     case FailureKind.TRANSIENT: return InstallStage.RETRYABLE_ERROR;
     case FailureKind.INTERNAL: return InstallStage.TERMINAL_ERROR;
     case FailureKind.INVALID_PACKAGE: return InstallStage.TERMINAL_ERROR;

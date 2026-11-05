@@ -32,9 +32,23 @@ add_dependencies(hap_core qingqi_rust_signer)
 target_compile_features(hap_core PRIVATE cxx_std_17)
 target_compile_options(hap_core PRIVATE -Wall -Wextra -ffunction-sections -fdata-sections)
 set_target_properties(hap_core PROPERTIES
+  C_VISIBILITY_PRESET hidden
   CXX_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN ON)
 # NAPI registers through its constructor. Static Rust/archive symbols are
 # implementation details, so they must not keep unused dependency code alive.
 target_link_options(hap_core PRIVATE -Wl,--gc-sections -Wl,--exclude-libs,ALL)
+# Keep debugging builds symbolized. Public HAPs expose only the native module
+# registration ABI; JavaScript methods register via descriptors, not ELF exports.
+set(QINGQI_NATIVE_EXPORTS "${CMAKE_CURRENT_SOURCE_DIR}/hap_core.exports.map")
+set_property(TARGET hap_core APPEND PROPERTY LINK_DEPENDS "${QINGQI_NATIVE_EXPORTS}")
+target_link_options(hap_core PRIVATE
+  "$<$<CONFIG:Release>:-Wl,--version-script,${QINGQI_NATIVE_EXPORTS}>"
+  "$<$<CONFIG:Release>:-Wl,--strip-all>")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  # Rust already performs ThinLTO before producing its static archive. Apply
+  # the same optimization to our C++ objects without changing unwind behavior.
+  target_compile_options(hap_core PRIVATE "$<$<CONFIG:Release>:-flto=thin>")
+  target_link_options(hap_core PRIVATE "$<$<CONFIG:Release>:-flto=thin>")
+endif()
 target_link_libraries(hap_core PRIVATE "${QINGQI_RUST_LIB}" libace_napi.z.so libnative_display_soloist.so z archive_static)

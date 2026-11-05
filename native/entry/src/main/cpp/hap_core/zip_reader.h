@@ -8,7 +8,7 @@
 namespace qingqi::hap {
 
 struct ArchiveEntry { std::string name; uint64_t size; };
-std::vector<ArchiveEntry> ListPackageEntries(const std::string& archive_path);
+std::vector<ArchiveEntry> ListPackageEntries(const std::string& archive_path, bool include_shared = false);
 std::vector<ArchiveEntry> ListProfileEntries(const std::string& archive_path);
 // Streams to a caller-chosen sandbox path; archive names never become paths.
 void ExtractPackageEntry(const std::string& archive_path, const std::string& name,

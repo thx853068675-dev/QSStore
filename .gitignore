@@ -59,3 +59,17 @@ dist/
 *.db-shm
 *.sqlite
 *.sqlite3
+/obfuscation-private/
+.private-obfuscation/
+**/*namecache*.json
+**/*kept-names*.json
+**/*unobfuscation*.json
+
+# Deployment-specific endpoint and generated TLS configuration stay local.
+/native/store.local.json
+/native/entry/src/main/ets/data/StoreBuildConfig.ets
+/native/entry/src/main/resources/rawfile/store-ca.crt
+/native/config/*.local.*
+
+# Local host-test virtual environment.
+/.venv/

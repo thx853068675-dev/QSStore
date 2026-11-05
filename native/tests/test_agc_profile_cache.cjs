@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
+const { SideloadAclPolicy } = require('./load_ets.cjs').loadEts('data/SideloadAclPolicy');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/data/AgcProfile.ets'), 'utf8');
@@ -16,7 +17,8 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../en
  exports:rejectionExports,require:()=>({FailureKind:{NETWORK:'network',ACCOUNT:'account'}})});
 function fixture() {
   const f = { now: 1800000000000, files: new Map(), reads: 0, posts: [], rows: [],
-    deviceId: 'device-1', error: '', errorStatus: 0, omitAcl: false, releases: [], recovery: 0, recoveryCalls: 0, limited: false, limits: 0, managedCalls: 0, managedWorks: false };
+    deviceId: 'device-1', error: '', errorStatus: 0, omitAcl: false, releases: [], recovery: 0, recoveryCalls: 0, limited: false, limits: 0, managedCalls: 0, managedWorks: false,
+    approved: [], appIdCalls: 0, approvedCalls: 0 };
   f.context = { filesDir: '/sandbox' }; f.account = { userId: '42', teamId: 'team-1' };
   f.udid = 'A'.repeat(64);
   f.identity = { accountId: '42', certId: '123', certificatePath: '/sandbox/cert.cer' };
@@ -34,17 +36,27 @@ function fixture() {
         acls: { 'allowed-acls': f.omitAcl ? [] : [...acls] } }) };
     }
     async download(url) { return url; }
+    async approvedAcls() { f.approvedCalls++; return [...f.approved]; }
   }
   const exports = {};
   vm.runInNewContext(code, { exports, Error, Date: class extends Date { static now() { return f.now; } },
     require: name => ({
+      './I18n': { I18n: { t: value => value } },
+      './SideloadAclPolicy': { SideloadAclPolicy },
       './CertificateRejection':rejectionExports,
       './AgcManagedProfile': { AgcManagedProfile: { automaticLimited: () => f.limited,
         rememberLimit: () => { f.limited = true; f.limits++; },
+        appId: async () => { f.appIdCalls++; return 'app-1'; },
         obtain: async (_agc, _account, _cert, _ids, acls, bundle, p, valid, _udid, renewalRequest) => {
           f.managedCalls++;
           (f.managedRequests ??= []).push(renewalRequest);
-          if (!f.managedWorks) { const e = Error('最近 30 天最多 150 次；删除授权不会恢复次数'); e.status = 205389938; throw e; }
+          if (!f.managedWorks) {
+            if (f.managedScopeRefusal) {
+              const scope = Error('AGC 拒绝请求：check aclPermissionList failed, exist permission not in support scope.');
+              scope.status = f.managedScopeStatus ?? 0; throw scope;
+            }
+            const e = Error('最近 30 天最多 150 次；删除授权不会恢复次数'); e.status = 205389938; throw e;
+          }
           f.files.set(p, JSON.stringify({ type: 'debug', 'bundle-info': { 'bundle-name': bundle },
             validity: { 'not-before': f.now/1000-60, 'not-after': f.now/1000+86400 },
             'debug-info': { 'device-ids': [f.udid] }, acls: { 'allowed-acls': acls } }));
@@ -113,9 +125,70 @@ test('a certificate error is not turned into repeated Profile creation with unch
 });
 test('cached device registration never bypasses the returned Profile ACL validation', async () => {
   const f = fixture(); await f.ensure('com.example.first'); f.omitAcl = true;
-  await assert.rejects(() => f.ensure('com.example.second', ['ohos.permission.SYSTEM_FLOAT_WINDOW']), /不匹配/);
+  await assert.rejects(() => f.ensure('com.example.second', ['ohos.permission.SYSTEM_FLOAT_WINDOW']),
+    /缺少应用所需 ACL：ohos\.permission\.SYSTEM_FLOAT_WINDOW/);
   assert.equal([...f.files.keys()].some(p => p.includes('com.example.second')), false);
   f.omitAcl = false; await f.ensure('com.example.third'); assert.equal(f.reads, 2);
+});
+const supplementedAcls = [
+  'ACCESS_DLP_SERVICE', 'ALLOW_ACCESSORY_ACCESS', 'ALLOW_EXTERNAL_NATIVE_CODE',
+  'AUTO_RESTORE_MAIN_WINDOW', 'CHECK_CALL_LOG', 'CONTROL_DEVICE', 'FLOAT_VIEW',
+  'GET_CALL_TRANSFER_INFO', 'INPUT_DEVICE_CONFIGURATOR', 'KEEP_BACKGROUND_RUNNING_SPECIAL_SCENARIO',
+  'KNOCK_COLLABORATION', 'MANAGE_BLUETOOTH_ADVERTISER_NAME', 'MANAGE_CALL_FOR_DEVICES',
+  'MANAGE_MEDIA_RESOURCES_FOR_PUBLIC', 'MANAGE_RECENT_SNAPSHOT', 'MANAGE_SKILL',
+  'PRINTER_DRIVER', 'REGISTER_OBJECTEDITOR_EXTENSION', 'SET_WINDOW_ALPHA', 'SET_WINDOW_TOUCH_AREAS',
+  'atomicService.MANAGE_AGING', 'atomicService.MANAGE_STORAGE', 'kernel.AS_LDK_DRIVER',
+  'GET_NETWORK_STATS', 'ACCESS_GAME_BUDDY_SERVICE', 'kernel.SUPPORT_LOCAL_PLUGIN',
+  'MANAGE_AUDIO_ACCESSORY', 'ALLOW_USE_BM', 'ACCESS_DIGITAL_IDENTITY', 'CAPTURE_PLAYBACK_DOWNLINK',
+  'MANAGE_SANDBOX_BUNDLE', 'DETECT_DEVICE', 'ACCESS_SE_KEY',
+  'FOWNER', 'READ_DOCUMENT', 'WRITE_DOCUMENT'
+].map(name => 'ohos.permission.' + name);
+test('HoKit and current Huawei restricted ACL declarations are preserved in the AGC request and actual signed Profile', async () => {
+  for (const acl of supplementedAcls) {
+    const f = fixture();
+    const retained = await f.ensure('com.example.restricted', [acl, 'ohos.permission.INTERNET', acl]);
+    assert.deepEqual(f.posts[0].acls, [acl], acl);
+    assert.deepEqual(JSON.parse(f.files.get(retained)).acls['allowed-acls'], [acl], acl);
+    assert.equal(await f.ensure('com.example.restricted', [acl]), retained, acl);
+    assert.equal(f.posts.length, 1, 'a verified grant avoids repeat cloud requests: ' + acl);
+  }
+});
+test('ordinary and system-only permissions do not become ACL requests or broaden application permissions', async () => {
+  const f = fixture(), acl = 'ohos.permission.PRINTER_DRIVER';
+  await f.ensure('com.example.printer', [acl, 'ohos.permission.CAMERA', 'ohos.permission.INTERNET',
+    'ohos.permission.GET_BUNDLE_INFO_PRIVILEGED', 'ohos.permission.FILE_ACCESS_MANAGER',
+    'ohos.permission.SYSTEM_FLOAT_WINDOW', 'ohos.permission.ACCESS_DDK_USB_SERIAL', acl]);
+  assert.deepEqual(f.posts[0].acls, [
+    'ohos.permission.ACCESS_DDK_USB_SERIAL', acl, 'ohos.permission.SYSTEM_FLOAT_WINDOW'
+  ]);
+});
+test('a previously cached Profile missing a newly supported ACL cannot be reused for the same package', async () => {
+  const f = fixture(), bundle = 'com.example.editor', acl = 'ohos.permission.REGISTER_OBJECTEDITOR_EXTENSION';
+  const previous = await f.ensure(bundle), oldBytes = f.files.get(previous);
+  const granted = await f.ensure(bundle, [acl]);
+  assert.notEqual(granted, previous); assert.equal(f.files.get(previous), oldBytes);
+  assert.equal(f.posts.length, 2); assert.deepEqual(f.posts[1].acls, [acl]);
+  assert.equal(await f.ensure(bundle, [acl]), granted); assert.equal(f.posts.length, 2);
+});
+test('omitting a new required ACL in the returned signed Profile never retains a weakened authorization', async () => {
+  const f = fixture(), bundle = 'com.example.editor', acl = 'ohos.permission.REGISTER_OBJECTEDITOR_EXTENSION';
+  const previous = await f.ensure(bundle), oldBytes = f.files.get(previous);
+  f.omitAcl = true;
+  await assert.rejects(() => f.ensure(bundle, [acl]), error =>
+    error.failureKind === 'account' && error.message.includes('缺少应用所需 ACL：' + acl));
+  assert.equal(f.files.get(previous), oldBytes); assert.equal(f.releases.length, 2);
+  assert.equal([...f.files.keys()].filter(p => p.startsWith('/sandbox/signing-profiles/' + bundle) &&
+    p.endsWith('.p7b')).length, 1);
+  f.omitAcl = false; const granted = await f.ensure(bundle, [acl]);
+  assert.notEqual(granted, previous); assert.deepEqual(f.posts[2].acls, [acl]);
+});
+test('expanded ACL authorization survives a process restart and a cloud quota limit without new allocation', async () => {
+  const f = fixture(), bundle = 'com.example.restricted';
+  const retained = await f.ensure(bundle, supplementedAcls), bytes = f.files.get(retained);
+  const fresh = fixture(); fresh.files = new Map(f.files); fresh.limited = true;
+  assert.equal(await fresh.ensure(bundle, supplementedAcls.slice().reverse()), retained);
+  assert.equal(fresh.files.get(retained), bytes); assert.equal(fresh.posts.length, 0);
+  assert.equal(fresh.managedCalls, 0); assert.equal(fresh.reads, 0);
 });
 test('renewal obtains a distinct Profile, retries reuse it, and the next renewal has its own request', async () => {
   const f = fixture(), bundle = 'com.example.first';
@@ -241,7 +314,8 @@ test('missing or malformed issuance time is never treated as a young renewal aut
 });
 test('a rejected returned Profile still releases its created cloud record', async () => {
   const f = fixture(); f.omitAcl = true;
-  await assert.rejects(() => f.ensure('com.example.first', ['ohos.permission.SYSTEM_FLOAT_WINDOW']), /不匹配/);
+  await assert.rejects(() => f.ensure('com.example.first', ['ohos.permission.SYSTEM_FLOAT_WINDOW']),
+    /缺少应用所需 ACL：ohos\.permission\.SYSTEM_FLOAT_WINDOW/);
   assert.deepEqual(f.releases, ['1']);
 });
 test('quota exhaustion does not retry allocations or delete signing certificates', async () => {
@@ -249,6 +323,56 @@ test('quota exhaustion does not retry allocations or delete signing certificates
   await assert.rejects(() => f.ensure('com.example.first'), /最近 30 天最多 150 次/);
   assert.equal(f.posts.length, 1);
   assert.equal(f.releases.length, 0);
+});
+const documentAcl = 'ohos.permission.READ_DOCUMENT';
+const floatAcl = 'ohos.permission.SYSTEM_FLOAT_WINDOW';
+test('a scope refusal never re-registers the device and names every permission needing AGC approval', async () => {
+  const f = fixture();
+  f.error = 'check aclPermissionList failed, exist permission not in support scope.';
+  f.errorStatus = 205389941;
+  await assert.rejects(() => f.ensure('com.example.first', [documentAcl, floatAcl]), error =>
+    error.status === 205389941 &&
+    /AGC 不支持自动签名申请这些权限：ohos\.permission\.READ_DOCUMENT/.test(error.message) &&
+    /ohos\.permission\.SYSTEM_FLOAT_WINDOW/.test(error.message) === false &&
+    /已保留全部 2 项权限声明/.test(error.message));
+  assert.equal(f.posts.length, 1, 'a scope refusal must not repeat the doomed auto-signing request');
+  assert.equal(f.reads, 1, 'device re-registration cannot widen the IDE support scope');
+  assert.equal(f.approvedCalls, 1, 'the approved-ACL route is consulted once');
+  assert.equal(f.managedWorks, false);
+});
+test('an approved ACL outside auto-apply scope reaches the manual route with its requirement intact', async () => {
+  const f = fixture();
+  f.error = 'exist permission not in support scope.'; f.errorStatus = 205389941;
+  f.approved = [documentAcl];
+  // The manual route's own quota exhaustion must surface as a quota error, not
+  // be masked by the scope diagnostic, and no weakened Profile may be written.
+  await assert.rejects(() => f.ensure('com.example.first', [documentAcl]), error =>
+    error.status === 205389938 && /150 次/.test(error.message));
+  assert.equal(f.approvedCalls, 1, 'approval state is consulted before the manual route');
+  assert.equal(f.appIdCalls, 1);
+  assert.equal(f.managedCalls, 1, 'the approved ACL is actually attempted, not skipped');
+  assert.deepEqual(f.posts[0].acls, [documentAcl], 'the scope refusal must not shrink the requested ACL set');
+  assert.equal([...f.files.keys()].some(p => p.endsWith('.p7b')), false, 'no weakened Profile is retained');
+});
+test('an approved ACL outside auto-apply scope is signed through the manual route without dropping any requirement',
+  async () => {
+    const f = fixture();
+    f.error = 'exist permission not in support scope.'; f.errorStatus = 205389941;
+    f.approved = [documentAcl, floatAcl]; f.managedWorks = true;
+    const profile = await f.ensure('com.example.first', [documentAcl, floatAcl]);
+    assert.deepEqual(JSON.parse(f.files.get(profile)).acls['allowed-acls'], [documentAcl, floatAcl]);
+    assert.equal(f.managedCalls, 1);
+    assert.equal(f.posts.length, 1);
+    assert.equal(f.appIdCalls, 1);
+  });
+test('a scope refusal still yields the actionable diagnostic when the manual route refuses too', async () => {
+  const f = fixture();
+  f.error = 'exist permission not in support scope.'; f.errorStatus = 205389941;
+  f.approved = [floatAcl]; f.managedScopeRefusal = true; f.managedWorks = true;
+  await assert.rejects(() => f.ensure('com.example.first', [documentAcl, floatAcl]), error =>
+    error.status === 205389941 && /ohos\.permission\.READ_DOCUMENT/.test(error.message) &&
+    /已保留全部 2 项权限声明/.test(error.message));
+  assert.equal(f.posts.length, 1, 'neither route may create a weakened or repeated authorization');
 });
 test('successful receipt cleanup cannot reset the rolling automatic signing limit', async () => {
   const f = fixture(); f.error = 'Provision number exceeds limit'; f.errorStatus = 205389938;
@@ -335,6 +459,16 @@ test('same shortened UDID cannot reuse a Profile issued to another full device U
 });
 test('download rejection of a receipt-free response leaves no signed material to reuse', async () => {
   const f=fixture();f.noReceipt=true;f.omitAcl=true;
-  await assert.rejects(()=>f.ensure('com.example.first',['ohos.permission.SYSTEM_FLOAT_WINDOW']),/不匹配/);
+  await assert.rejects(()=>f.ensure('com.example.first',['ohos.permission.SYSTEM_FLOAT_WINDOW']),
+    /缺少应用所需 ACL：ohos\.permission\.SYSTEM_FLOAT_WINDOW/);
   assert.equal(f.releases.length,0);assert.equal([...f.files.keys()].some(p=>p.endsWith('.p7b')||p.endsWith('.part')),false);
+});
+
+test('cached lower-case UDID authorizations are rejected before a paused install can reuse them',async()=>{
+ const f=fixture(),bundle='com.example.case';
+ const p=await f.profile.ensure(f.context,f.account,f.identity,bundle,f.udid,[]);
+ assert.equal(f.profile.valid(p,bundle,f.udid.toLowerCase(),f.identity.certificatePath,[]),true);
+ const row=JSON.parse(f.files.get(p));row['debug-info']['device-ids']=[f.udid.toLowerCase()];
+ f.files.set(p,JSON.stringify(row));
+ assert.equal(f.profile.valid(p,bundle,f.udid.toLowerCase(),f.identity.certificatePath,[]),false);
 });

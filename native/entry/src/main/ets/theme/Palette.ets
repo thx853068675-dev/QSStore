@@ -31,6 +31,8 @@ export class Palette {
   get bg(): string { return this.pick('#F7F9FC', '#0B1220'); }
   /** 卡片 / 浮层底色 */
   get surface(): string { return this.pick('#FFFFFF', '#161F2E'); }
+  /** Device picker glass keeps a fixed 50% theme tint for readable content. */
+  get devicePanelTint(): string { return this.pick('#80FFFFFF', '#80000000'); }
   /** 卡片内部的次级填充（条目底、输入框底） */
   get fill(): string { return this.pick('#F5F7FB', '#131C2A'); }
   /** 详情页头部那种带色调的底 */
@@ -75,6 +77,11 @@ export class Palette {
   get dangerSoft(): string { return this.pick('#FFF0F0', '#3A1F22'); }
   /** Signing authorization expires within seven days. */
   get renewalWarning(): string { return this.pick('#FFF0F5', '#30232E'); }
+  /** User-paused updates are a neutral choice, separate from expiry warnings. */
+  get updatePaused(): string { return this.pick('#286D60', '#B7D6CA'); }
+  get updatePausedSoft(): string { return this.pick('#EAF3EF', '#1D2B29'); }
+  get updatePausedPattern(): string { return this.pick('#D9E6DF', '#2D403A'); }
+  get updatePausedWarningPattern(): string { return this.pick('#F7E7EE', '#382A34'); }
   /** 成功 */
   get success(): string { return this.pick('#257B65', '#5DD3AE'); }
   get successSoft(): string { return this.pick('#E7F5EF', '#14322A'); }

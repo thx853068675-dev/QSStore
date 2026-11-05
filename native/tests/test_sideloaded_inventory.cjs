@@ -1,5 +1,8 @@
+const { ManagementSort } = require('./load_ets.cjs').loadEts('data/ManagementSort');
 const { loadEts } = require('./load_ets.cjs');
-const { CatalogLookup } = loadEts('data/CatalogLookup');
+const lookupRelease = loadEts('data/ReleaseInfo');
+const { CatalogLookup } = loadEts('data/CatalogLookup', { './ReleaseInfo': lookupRelease,
+  './CatalogApp': loadEts('data/CatalogApp', { './ReleaseInfo': lookupRelease }) });
 const { InstallJob } = loadEts('jobs/InstallJob');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -94,12 +97,13 @@ function method(name) {
   assert(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
 }
 function pageFixture(registry) {
-  const box = { CatalogLookup, InstallJob, ReleaseUpdate: require('./release_update_fixture.cjs').releaseUpdate(), InstallStage: { INSTALLED: 'installed' }, ReleaseChannelRegistry: { apply: app => app },
+  const box = { ManagementSort, CatalogLookup, InstallJob, ReleaseUpdate: require('./release_update_fixture.cjs').releaseUpdate(), InstallStage: { INSTALLED: 'installed' }, ReleaseChannelRegistry: { apply: app => app },
     InstalledSigningExpiry: load('jobs/InstalledSigningExpiry', {}).InstalledSigningExpiry,
-    InstalledAppRegistry: registry ?? { version: () => -1, observedAt: () => 0, versionName: () => '', displayName: () => '', installationTime: () => 0 } };
+    InstalledAppRegistry: registry ?? { isAppGallery: () => false, version: () => -1, observedAt: () => 0, versionName: () => '', displayName: () => '', installationTime: () => 0 } };
   box.AppDisplayName = load('data/AppDisplayName', {
     '../jobs/InstalledAppRegistry': { InstalledAppRegistry: box.InstalledAppRegistry }
   }).AppDisplayName;
+  if(!box.InstalledAppRegistry.signingIdentity)box.InstalledAppRegistry.signingIdentity=()=>undefined;
   const members = ['catalogLookup', 'allInstalledJobs', 'recentInstalledJobs', 'currentInstalledView', 'displayInstalledVersion',
     'managementInstalledJobs', 'renewalDeadline', 'updateApps', 'installedAssets', 'latestAssets', 'catalogForJob', 'jobTitle'];
   vm.runInNewContext(ts.transpileModule(`class Page { ${members.map(method).join('\n')} }; globalThis.Page = Page;`, {
@@ -108,7 +112,7 @@ function pageFixture(registry) {
   const ui = new box.Page();
   Object.assign(ui, { installedJobs: [], storeInstalled: [], deviceInstalled: [], pendingJobs: [],
     updateFor: () => undefined, signingExpiries: new Map(), signingExpiryEstimates: new Map(),
-    installedDisplay: new Map(), apps: [], updateCatalog: [], updateCatalogReady: true, installedLocalOnly: false });
+    installedDisplay: new Map(), apps: [], updateCatalog: [], updateCatalogReady: true, installedLocalOnly: false,managementSort:'expiry',managementDirection:'asc' });
   return ui;
 }
 function job(bundleName, id = bundleName) {
@@ -116,7 +120,7 @@ function job(bundleName, id = bundleName) {
     stage: 'installed', stageHistory: [], updatedAt: 1800000000000 };
 }
 
-test('both installed groups rank updates first, then earliest exact or estimated expiry, preserving ties', () => {
+test('both installed groups honor explicit expiry sorting and preserve equal-time ties', () => {
   for (const localOnly of [false, true]) {
     const ui = pageFixture();
     const rows = ['latest', 'expired', 'estimate', 'update-late', 'update-soon', 'same-day']
@@ -133,7 +137,7 @@ test('both installed groups rank updates first, then earliest exact or estimated
     // An estimate is ordered by the displayed date, but never replaces a verified date.
     ui.signingExpiryEstimates = new Map([[rows[2].bundleName, end + 10], [rows[3].bundleName, end - 100]]);
     assert.deepEqual(Array.from(ui.managementInstalledJobs(localOnly), row => row.id),
-      ['update-soon', 'update-late', 'expired', 'estimate', 'latest', 'same-day']);
+      ['expired', 'estimate', 'update-soon', 'update-late', 'latest', 'same-day']);
     assert.deepEqual(Array.from(ui.installedJobs, row => row.id), rows.map(row => row.id),
       'sorting must not rewrite install history');
     ui.signingExpiryEstimates.set(rows[2].bundleName, end + 500);

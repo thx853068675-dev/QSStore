@@ -1,7 +1,17 @@
+import { DeviceInstallGroup } from '../jobs/DeviceInstallGroup';
+import { DeviceInstallProgress } from '../components/DeviceInstallProgress';
+import { MultiDeviceInstall } from '../jobs/MultiDeviceInstall';
+import { MultiDeviceDialog } from '../components/MultiDeviceDialog';
+import { MultiDeviceTargets } from '../jobs/MultiDeviceTargets';
+import { DeviceInstallTarget } from '../jobs/DeviceInstallTarget';
+import { CatalogPackageVariant } from '../data/CatalogPackageVariant';
 import { repositoryUrl } from '../data/RepositoryAddress';
 import { displayVersion, releaseDisplayVersion } from '../data/DisplayVersion';
 import { InstallConfirmation } from '../jobs/InstallConfirmation';
+import { InstallConflictFlow } from '../jobs/InstallConflictFlow';
 import { InstallCertificatePrompt } from '../components/InstallCertificatePrompt';
+import { InstallAccountPrompt } from '../components/InstallAccountPrompt';
+import { CatalogInstallTarget } from '../jobs/CatalogInstallTarget';
 import { CatalogInstallIdentity } from '../jobs/CatalogInstallIdentity';
 import { ReleaseUpdate } from '../jobs/ReleaseUpdate';
 import { InstallCoordinator } from '../jobs/InstallCoordinator';
@@ -11,13 +21,17 @@ import { isPending } from '../jobs/RecoveryPlanner';
 import { promptAction, router, LengthMetrics } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
+import { HdsTabs } from '@kit.UIDesignKit';
+import { MaterialPreferences } from '../data/MaterialPreferences';
 import { CatalogApp } from '../data/CatalogApp';
 import { RepositoryStats } from '../components/RepositoryStats';
 import { CatalogAppTitle } from '../components/CatalogAppTitle';
-import { StoreClient } from '../data/StoreClient';
+import { StoreClient, ReviewPage } from '../data/StoreClient';
 import { ReleaseInfo, HapAsset } from '../data/ReleaseInfo';
+import { DeviceSupportDisplay } from '../data/DeviceSupportDisplay';
 import { ReleaseChannelRegistry } from '../data/ReleaseChannelRegistry';
 import { HdcDeviceBridge } from '../jobs/HdcDeviceBridge';
+import { FixedDebugPort } from '../jobs/FixedDebugPort';
 import { JobStore } from '../jobs/JobStore';
 import { JobScheduler } from '../jobs/JobScheduler';
 import { errorText } from '../jobs/ErrorText';
@@ -27,29 +41,64 @@ import { InstallJob, InstallStage } from '../jobs/InstallJob';
 import { AppReview } from '../data/StoreActions';
 import { AccountSession, DeveloperAccount } from '../data/DeveloperAccount';
 import { Palette } from '../theme/Palette';
+import { StoreMaterial } from '../theme/StoreMaterial';
 import { StoreIconButton, StoreImmersiveIconButton, StoreLayout, StorePageHeader, StoreImmersiveAction, StoreTopStyle } from '../theme/StoreDesign';
 import { StoreSelect } from '../theme/StoreSelect';
 import { ColorTint } from '../theme/ColorTint';
 import { StorePageMotion } from '../theme/StorePageMotion';
 import { AppDisplayName } from '../data/AppDisplayName';
+import { ForegroundIdle } from '../jobs/ForegroundIdle';
+import { UpdatePolicy } from '../data/UpdatePolicy';
+import { InstallDeviceCompatibility } from '../jobs/InstallDeviceCompatibility';
+import { I18n } from '../data/I18n';
+import { CatalogIconExport } from '../jobs/CatalogIconExport';
+import { RepositoryReadmeCard } from '../components/RepositoryReadmeCard';
+import { StoreNavigationSurface } from '../theme/StoreDesign';
+import { ScaledArticle } from '../components/ScaledArticle';
 
-@Entry
+export class CatalogDetailController {
+  show: () => void = () => {};
+  hide: () => void = () => {};
+  back: () => boolean = () => false;
+}
+
 @Component
-struct Detail {
+export struct Detail {
+  controller: CatalogDetailController = new CatalogDetailController();
+  @Prop embedded: boolean = false;
+  @Prop embeddedAppId: number = 0;
+  @Prop embeddedTopInset: number = 0;
+  @Prop embeddedActionRight: number = 8;
+  @Prop @Watch('syncPalette') embeddedStarfield: boolean = false;
+  @Prop @Watch('syncEmbeddedVisibility') embeddedVisible: boolean = true;
+  onEmbeddedBack: () => void = () => {};
+  onEmbeddedReady: () => void = () => {};
+  @State private showMultiDevice:boolean=false;
+  @StorageProp('installTargetCount') private installTargetCount:number=1;
+  @StorageProp('installTargetName') private installTargetName:string='';
   @StorageProp('darkMode') @Watch('syncPalette') darkMode: boolean = false;
+  @StorageProp('materialMode') private materialMode: string = 'adaptive';
   @StorageProp('statusBarInset') statusBarInset: number = 0;
+  @StorageProp('windowWidth') private windowWidth: number = 0;
+  @StorageProp('windowHeight') private windowHeight: number = 0;
+  @StorageProp('navigationBottomInset') private navigationBottomInset: number = 0;
+  @StorageProp('updatePolicyRevision') @Watch('syncUpdatePolicy') private updatePolicyRevision: number = 0;
+  @State private updatePolicyReady: boolean = false;
+  @State private updatesPaused: boolean = false;
   private detailScroller: Scroller = new Scroller();
   @State private detailTopBlurOpacity: number = 0;
   @State private app: CatalogApp = new CatalogApp();
   @State private appIcon: image.PixelMap | null = null;
+  @State private iconSaving: boolean = false;
   /** 头部卡片底色：由图标主色调推导，取不到时用主题默认值。 */
   @State private heroColor: string = '';
   @State private loaded: boolean = false;
   @State private error: string = '';
   @State private releaseLoading: boolean = true;
   private detailLoading: boolean = false;
+  private embeddedReadySent: boolean = false;
   @State private releases: ReleaseInfo[] = [];
-  @State private selectedAsset: HapAsset = new HapAsset();
+  @State @Watch('syncUpdatePolicy') private selectedAsset: HapAsset = new HapAsset();
   @State private downloadBusy: boolean = false;
   @State private downloadPercent: number = 0;
   @State private installButtonWidth: number = 0;
@@ -59,6 +108,8 @@ struct Detail {
   private confirmationSubscription: number = -1;
   private reconnectSubscription: number = -1;
   private detailAppId: number = 0;
+  /** Only an explicit history/attachment choice stays pinned across refreshes. */
+  @State private explicitSelection: boolean = false;
   /**
    * 一次性提示文案。
    *
@@ -82,6 +133,9 @@ struct Detail {
   @State private reviewText: string = '';
   @State private reviewStars: number = 5;
   @State private reviewBusy: boolean = false;
+  @State private reviewDeleteBusy: boolean = false;
+  private reviewDeletePromptOpen: boolean = false;
+  private reviewOwnerScope: string = '';
   @State private reviewMessage: string = '';
   @State private account: DeveloperAccount = new DeveloperAccount();
   @State private signedIn: boolean = false;
@@ -94,9 +148,13 @@ struct Detail {
    * 为 true 时不能把状态当成未安装；仍允许用户主动发起安装或更新。
    */
   @State private installedUnknown: boolean = false;
+  private originQueryBundle: string = '';
+  private originQueryFlight: Promise<void> | undefined;
   /** 「检查更新」的进行状态与结果提示。 */
   @State private pageVisible: boolean = true;
   @State private showCertificatePrompt: boolean = false;
+  @State private showAccountPrompt: boolean = false;
+  @State private accountPromptDismiss: number = 0;
   @State private certificatePromptDismiss: number = 0;
   @State private headerVisible: boolean = true;
   private returning: boolean = false;
@@ -109,6 +167,8 @@ struct Detail {
   @State private expandedReleaseTag: string = '';
   @State @Watch('onReconnectVisibilityChanged') private showReconnect: boolean = false;
   @State private reconnectPort: string = '';
+  private reconnectPortReadGeneration: number = 0;
+  private reconnectPortInputRevision: number = 0;
   @State private reconnectBusy: boolean = false;
   @State private reconnectMessage: string = '';
   @State private activeInstallId: string = '';
@@ -116,7 +176,7 @@ struct Detail {
   /** 默认 0 = 最新版本；版本不再平铺，改成下拉选择。 */
   @State private selectedReleaseIndex: number = 0;
 
-  private colors(): Palette { return Palette.forMode(this.darkMode); }
+  private colors(): Palette { return Palette.forMode(this.darkMode || (this.embedded && this.embeddedStarfield)); }
 
   syncPalette(): void {
     // 主题一变，之前按旧主题算出的底色就不再合适，重新推导一次
@@ -128,25 +188,56 @@ struct Detail {
       this.heroColor = '';
       return;
     }
-    const dark = this.darkMode;
+    const dark = this.darkMode || (this.embedded && this.embeddedStarfield);
     ColorTint.heroBackground(this.appIcon, dark).then((color: string) => {
-      if (!this.disposed && dark === this.darkMode) this.heroColor = color;
+      if (!this.disposed && dark === (this.darkMode || (this.embedded && this.embeddedStarfield))) this.heroColor = color;
     }).catch(() => {});
+  }
+
+  private syncEmbeddedVisibility(): void {
+    if (!this.embedded || this.disposed) return;
+    if (this.embeddedVisible) this.onPageShow(); else this.onPageHide();
   }
 
   onPageShow(): void {
     this.pageVisible = true;
     if (!this.disposed && !this.returning) this.headerVisible = true;
-    this.observeReconnect();
+    if (!this.embedded) this.observeReconnect();
     this.observeInstallTasks();
     this.syncInstallTask();
     this.loadInstalledJobs();
+    this.restoreUpdatePolicy();
+  }
+
+  private async restoreUpdatePolicy(): Promise<void> {
+    try {
+      await UpdatePolicy.restore(getContext(this) as common.UIAbilityContext);
+      if (this.disposed) return;
+      this.updatePolicyReady = true;
+      this.syncUpdatePolicy();
+    } catch (_) {
+      if (!this.disposed) this.updatePolicyReady = false;
+      console.warn('Update preferences could not be restored');
+    }
+  }
+
+  private syncUpdatePolicy(): void {
+    if (!this.disposed) this.updatesPaused = UpdatePolicy.disabled(this.selectedBundleName());
   }
 
   aboutToAppear(): void {
-    this.observeReconnect();
+    if (this.embedded) {
+      this.pageVisible = this.embeddedVisible;
+      this.headerVisible = this.embeddedVisible;
+    }
+    if (!this.embedded) {
+      this.controller.show = () => this.onPageShow();
+      this.controller.hide = () => this.onPageHide();
+      this.controller.back = () => this.onBackPress();
+    }
+    if (!this.embedded) this.observeReconnect();
     const params = router.getParams() as Record<string, number>;
-    this.detailAppId = Number(params['id'] ?? 0);
+    this.detailAppId = this.embedded ? this.embeddedAppId : Number(params['id'] ?? 0);
     this.observeInstallTasks();
     this.syncPalette();
     this.loadApp();
@@ -157,6 +248,11 @@ struct Detail {
   }
 
   aboutToDisappear(): void {
+    if (!this.embedded) {
+      this.controller.show = () => {};
+      this.controller.hide = () => {};
+      this.controller.back = () => false;
+    }
     this.disposed = true;
     this.headerVisible = false;
     if (this.appIcon) this.appIcon.release().catch(() => {});
@@ -171,6 +267,7 @@ struct Detail {
   }
 
   onPageHide(): void {
+    this.showMultiDevice=false;
     this.headerVisible = false;
     this.pageVisible = false;
     if (this.installSubscription >= 0) InstallTaskState.unsubscribe(this.installSubscription);
@@ -180,6 +277,9 @@ struct Detail {
   }
 
   onBackPress(): boolean {
+    if(StorePageMotion.dismissDevicePanel?.())return true;
+    if(this.showMultiDevice){this.closeMultiDevice();return true;}
+    if (this.showAccountPrompt) { this.accountPromptDismiss++; return true; }
     if (this.showCertificatePrompt) { this.certificatePromptDismiss++; return true; }
     if (this.showReconnect) {
       if (!this.reconnectBusy) {
@@ -204,14 +304,7 @@ struct Detail {
   private observeReconnect(): void {
     if (this.confirmationSubscription === -1) {
       this.confirmationSubscription = InstallConfirmation.subscribe((id: string) => {
-        if (!id) return;
-        JobStore.open(getContext(this) as common.UIAbilityContext).then(async (store: JobStore) => {
-          const job = await store.get(id);
-          if (!job || job.stage !== InstallStage.WAITING_CONFIRMATION ||
-            !InstallConfirmation.isOwner(this.confirmationSubscription) || !InstallConfirmation.isRequested(id)) return;
-          InstallConfirmation.clear(id);
-          this.confirmDataLoss(job);
-        }).catch(() => {});
+        if(id)InstallConflictFlow.present(getContext(this) as common.UIAbilityContext,this.confirmationSubscription,id);
       });
     }
     InstallConfirmation.activate(this.confirmationSubscription);
@@ -220,9 +313,12 @@ struct Detail {
         if (jobId.length > 0) {
           this.reconnectJobId = jobId;
           this.reconnectMessage = '';
-          this.animateOverlay(() => { this.showReconnect = true; });
+          JobStore.open(getContext(this) as common.UIAbilityContext).then((store)=>store.get(jobId)).then((job)=>{
+            if(this.reconnectJobId!==jobId || !this.pageVisible || !InstallReconnect.isOwner(this.reconnectSubscription) || !InstallReconnect.isRequested(jobId))return;
+            this.animateOverlay(()=>{if(job?.installTarget)this.showMultiDevice=true;else this.showReconnect=true;});
+          }).catch(()=>{});
         } else if (this.reconnectJobId.length > 0) {
-          this.animateOverlay(() => { this.showReconnect = false; });
+          this.animateOverlay(() => { this.showReconnect = false; this.showMultiDevice=false; });
         }
       });
     }
@@ -234,7 +330,7 @@ struct Detail {
     this.installSubscription = InstallTaskState.subscribe((rows: InstallTaskSnapshot[]) => {
       this.installTasks = rows;
       const installed = rows.map((row: InstallTaskSnapshot) => row.job).filter((job: InstallJob) =>
-        job.stage === InstallStage.INSTALLED);
+        job.stage === InstallStage.INSTALLED && !job.installTarget);
       const changed = installed.map((job: InstallJob) => job.id + ':' + job.updatedAt).join(',') !==
         this.installedJobs.map((job: InstallJob) => job.id + ':' + job.updatedAt).join(',');
       if (changed) this.installedJobs = installed;
@@ -255,6 +351,8 @@ struct Detail {
     return InstallTaskState.forApp(this.installTasks, this.detailAppId,
       this.selectedAsset.bundleName);
   }
+
+  private deviceRows():InstallTaskSnapshot[]{return DeviceInstallGroup.activeForApp(this.installTasks,this.detailAppId,this.selectedAsset.bundleName);}
 
   private syncInstallTask(): void {
     const row = this.currentInstallTask();
@@ -291,21 +389,44 @@ struct Detail {
   private installButtonLabel(): string {
     const row = this.currentInstallTask();
     if (row !== undefined && row.running) return InstallTaskState.label(row);
-    if (row !== undefined && isPending(row.job.stage)) return InstallTaskState.label(row) + ' · 继续';
-    if (this.downloadBusy) return '准备中';
-    if (this.releaseLoading) return '读取版本';
+    if (row !== undefined && isPending(row.job.stage)) return InstallTaskState.label(row) + I18n.t(' · 继续');
+    if (this.downloadBusy) return I18n.t('准备中');
+    if (this.releaseLoading) return I18n.t('读取版本');
     if (this.selectedAsset.name.length === 0) {
-      return this.showPreviewReleases ? '暂无预览版本' : '暂无安装包';
+      if (this.releases.some((release: ReleaseInfo) => release.assets.length > 0)) return I18n.t('请选择安装包');
+      return this.showPreviewReleases ? I18n.t('暂无预览版本') : I18n.t('暂无安装包');
     }
-    if (this.selectedDowngrade()) return '版本较低，无法降级';
-    if (this.installedUnknown && this.installedForApp() === undefined) return '安装/更新';
-    return !this.installedForApp() ? '安装应用' :
-      (this.updateAvailable() ? '更新到 ' + this.selectedVersionLabel() : '打开应用');
+    if(this.installTargetCount>1)return I18n.t('安装到 ')+this.installTargetCount+I18n.t(' 台设备');
+    if(this.installTargetName)return (row?.job.stage===InstallStage.INSTALLED?I18n.t('已安装到 '):I18n.t('安装到 '))+this.installTargetName;
+    if (this.selectedDowngrade()) return I18n.t('版本较低，无法降级');
+    if (!this.explicitSelection && this.updatesPaused && this.installedUnknown &&
+      this.installedForApp() === undefined) return I18n.t('已停更');
+    if (this.installedUnknown && this.installedForApp() === undefined) return I18n.t('安装/更新');
+    return !this.installedForApp() ? I18n.t('安装应用') :
+      (this.updateAvailable() ? I18n.t('更新到 ') + this.selectedVersionLabel() : I18n.t('打开应用'));
   }
 
   private installProgressDeterminate(): boolean {
     const row = this.currentInstallTask();
     return row !== undefined && row.running && InstallTaskState.determinate(row);
+  }
+
+  private sidebarInstallLabel(): string {
+    const row = this.currentInstallTask();
+    if (row !== undefined && row.running) {
+      return this.installProgressDeterminate() ? Math.round(this.downloadPercent) + '%' : I18n.t('进行中');
+    }
+    if (row !== undefined && isPending(row.job.stage)) return I18n.t('继续');
+    if (this.downloadBusy) return I18n.t('准备中');
+    if (this.releaseLoading) return I18n.t('读取中');
+    if (this.selectedAsset.name.length === 0) return I18n.t('暂无');
+    if (this.selectedDowngrade()) return I18n.t('不可降级');
+    if (this.installTargetCount > 1 || this.installTargetName) {
+      return row?.job.stage === InstallStage.INSTALLED ? I18n.t('已安装') : I18n.t('安装');
+    }
+    if (!this.explicitSelection && this.updatesPaused && this.installedUnknown && !this.installedForApp()) return I18n.t('已停更');
+    if (this.installedUnknown && !this.installedForApp()) return I18n.t('安装/更新');
+    return !this.installedForApp() ? I18n.t('安装') : (this.updateAvailable() ? I18n.t('更新') : I18n.t('打开'));
   }
 
   /**
@@ -318,7 +439,7 @@ struct Detail {
   private async loadInstalledJobs(): Promise<void> {
     try {
       const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
-      InstallTaskState.seed(await store.listAll());
+      InstallTaskState.seed(await store.listAll(true));
     } catch (_) {
       // 保留已收到的任务快照。
     }
@@ -340,10 +461,37 @@ struct Detail {
       this.installedUnknown = true;
       return;
     }
-    const version = LocalBundles.installedVersion(bundleName);
+    const version = InstalledAppRegistry.isAppGallery(bundleName) ? 0 : LocalBundles.installedVersion(bundleName);
     this.installedUnknown = !LocalBundles.isKnown(version);
     this.installedVersion = version > 0 ? version : 0;
+    if (!this.explicitSelection && this.releases.length > 0) this.reconcileSelectedAsset('', '');
     if (this.installedUnknown) this.confirmInstalledViaDevice(bundleName);
+    else if (version > 0 && !InstalledAppRegistry.hasApplicationOrigin(bundleName)) this.confirmInstalledOrigin(bundleName);
+  }
+
+  /** 缺少来源的旧版本缓存只补一次异步核对，不在页面绘制中增加同步 IPC。 */
+  private confirmInstalledOrigin(bundleName: string): Promise<void> {
+    if (this.originQueryFlight !== undefined && this.originQueryBundle === bundleName) return this.originQueryFlight;
+    this.originQueryBundle = bundleName;
+    const flight = this.readInstalledOrigin(bundleName).finally(() => {
+      if (this.originQueryFlight === flight) this.originQueryFlight = undefined;
+    });
+    this.originQueryFlight = flight;
+    return flight;
+  }
+
+  private async readInstalledOrigin(bundleName: string): Promise<void> {
+    try {
+      await ForegroundIdle.wait();
+      if (this.disposed || !this.pageVisible || this.selectedBundleName() !== bundleName) return;
+      const state = await LocalBundles.liveInstalledState(bundleName);
+      if (LocalBundles.isKnown(state.versionCode)) {
+        await InstalledAppRegistry.persist(getContext(this) as common.UIAbilityContext);
+        if (this.disposed || !this.pageVisible || this.selectedBundleName() !== bundleName) return;
+        this.installedVersion = InstalledAppRegistry.isAppGallery(bundleName) ? 0 : state.versionCode;
+        this.installedUnknown = false;
+      } else await this.confirmInstalledViaDevice(bundleName);
+    } catch (_) { /* 来源查询失败保留已确认的安装状态，后续设备核对仍可更新。 */ }
   }
 
   /**
@@ -359,8 +507,9 @@ struct Detail {
       // 期间用户可能已经切到别的附件，只认仍然对得上的结果。
       if (this.selectedBundleName() !== bundleName) return;
       if (version >= 0) {
-        this.installedVersion = version;
+        this.installedVersion = InstalledAppRegistry.isAppGallery(bundleName) ? 0 : version;
         this.installedUnknown = false;
+        if (!this.explicitSelection && this.releases.length > 0) this.reconcileSelectedAsset('', '');
       }
     } catch (_) {
       // 设备没连/已断开：无法核实就保持无法核实
@@ -375,9 +524,11 @@ struct Detail {
   /** 已确认卸载优先于历史记录；未知状态才沿用成功安装的记录。 */
   private installedForApp(): InstallJob | undefined {
     const bundleName = this.selectedBundleName();
-    if (bundleName.length === 0 || (!this.installedUnknown && this.installedVersion <= 0)) return undefined;
-    const record = this.installedJobs.find((job: InstallJob) =>
-      job.bundleName === bundleName);
+    if (bundleName.length === 0 || InstalledAppRegistry.isAppGallery(bundleName) ||
+      (!this.installedUnknown && this.installedVersion <= 0)) return undefined;
+    const record = CatalogInstallTarget.receipt(this.installedJobs, bundleName,
+      this.installedUnknown ? -1 : this.installedVersion,
+      InstalledAppRegistry.signingIdentity(bundleName)?.updateTime ?? 0);
     if (record !== undefined) return record;
     // 系统里装着但没有轻启的安装记录：构造一个够用的记录（没有入口 ability，
     // openInstalled 会交给系统解析）
@@ -398,6 +549,10 @@ struct Detail {
    * 没有记录则保持未知，由按钮显示「安装/更新」。设备最终版本仍由安装链核实。
    */
   private updateAvailable(): boolean {
+    // Browsing versions is unchanged. Only an explicit history/attachment
+    // choice can override a paused app's ordinary update suggestion.
+    if (!this.explicitSelection && (!this.updatePolicyReady || this.updatesPaused)) return false;
+    if (InstalledAppRegistry.isAppGallery(this.selectedBundleName())) return false;
     const recorded = this.installedForApp();
     const installed = this.installedUnknown ? recorded?.versionCode ?? -1 : this.installedVersion;
     const bundle = this.selectedAsset.bundleName || recorded?.bundleName || '';
@@ -407,6 +562,8 @@ struct Detail {
   }
 
   private selectedDowngrade(): boolean {
+    if(this.installTargetName||this.installTargetCount>1)return false;
+    if (InstalledAppRegistry.isAppGallery(this.selectedBundleName())) return false;
     const installed = this.installedUnknown ? this.installedForApp()?.versionCode ?? 0 : this.installedVersion;
     const latest = this.releases.find((release: ReleaseInfo) => release.prerelease === this.showPreviewReleases &&
       release.assets.some((asset: HapAsset) => asset.bundleName === this.selectedAsset.bundleName))
@@ -424,6 +581,8 @@ struct Detail {
   private installButtonEnabled(): boolean {
     const row = this.currentInstallTask();
     if (row !== undefined && (row.running || isPending(row.job.stage))) return true;
+    if (this.installTargetCount<2 && !this.installTargetName && !this.explicitSelection && this.updatesPaused && this.installedUnknown &&
+      this.installedForApp() === undefined) return false;
     return !this.releaseLoading && this.selectedAsset.name.length > 0 && !this.selectedDowngrade();
   }
 
@@ -431,9 +590,9 @@ struct Detail {
   private selectedVersionLabel(): string {
     const release = this.currentRelease();
     const version = releaseDisplayVersion(release?.name ?? '', release?.tag ?? '',
-      this.selectedAsset.versionName, this.app.displayName);
+      this.selectedAsset.versionName, this.app.displayName, this.selectedAsset.versionCode);
     if (version.length > 0) return version;
-    return this.selectedAsset.versionCode > 0 ? String(this.selectedAsset.versionCode) : '待确认';
+    return this.selectedAsset.versionCode > 0 ? String(this.selectedAsset.versionCode) : I18n.t('待确认');
   }
 
   /**
@@ -446,7 +605,7 @@ struct Detail {
     try {
       await new HdcDeviceBridge(context).openApp(job.bundleName, job.moduleName, job.mainAbility);
     } catch (error) {
-      this.notify('无法打开应用：' + errorText(error));
+      this.notify(I18n.t('无法打开应用：') + errorText(error));
     }
   }
 
@@ -466,31 +625,35 @@ struct Detail {
     }
     this.lastCheckAt = now;
     this.refreshBusy = true;
-    this.refreshMessage = '正在检查…';
+    this.refreshMessage = I18n.t('正在检查…');
     try {
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
       // 服务端要现去 GitHub 采一次，给它一个上限：卡住时按钮要能自己恢复
       let status = await Detail.withDeadline(client.refreshApp(this.app.id), Detail.CHECK_TIMEOUT_MS,
-        '检查更新超时，请稍后再试');
+        I18n.t('检查更新超时，请稍后再试'));
       for (const delay of [2000, 4000, 8000, 16000]) {
         if (status !== 'pending' && status !== 'running') break;
-        this.refreshMessage = '后台正在检查仓库，可继续浏览';
+        this.refreshMessage = I18n.t('后台正在检查仓库，可继续浏览');
         await new Promise<void>((resolve: () => void) => { setTimeout(resolve, delay); });
         if (!this.pageVisible) return;
         status = await client.refreshStatus(this.app.id);
       }
       if (status === 'pending' || status === 'running') {
-        this.refreshMessage = '检查已安排在后台，稍后查看版本列表';
+        this.refreshMessage = I18n.t('检查已安排在后台，稍后查看版本列表');
         return;
       }
+      const fresh = await client.appDetail(this.app.id, true);
+      if (this.disposed || !this.pageVisible) return;
+      this.app = fresh;
       const releases = await client.listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE,
-        this.showPreviewReleases);
+        this.showPreviewReleases, true);
+      if (this.disposed || !this.pageVisible) return;
       const before = this.releaseTotal;
       const previousTags = this.releases.map((release: ReleaseInfo) => release.identity()).join(',');
       const selectedUrl = this.selectedAsset.url;
       const selectedName = this.selectedAsset.name;
       await ReleaseChannelRegistry.select(getContext(this) as common.UIAbilityContext,
-        this.app.id, this.showPreviewReleases, releases.items);
+        this.app.id, this.showPreviewReleases, releases.items, this.app);
       this.releases = releases.items;
       this.releasePage = releases.page;
       this.releaseTotal = releases.total;
@@ -500,13 +663,13 @@ struct Detail {
       // 先取本机版本，再判断按钮该显示「安装」还是「更新」
       this.refreshInstalledVersion();
       this.refreshMessage = releases.total > before ?
-        '发现 ' + (releases.total - before) + ' 个新版本' :
-        (releases.total < before ? '已移除 ' + (before - releases.total) + ' 个失效版本' :
+        I18n.t('发现 ') + (releases.total - before) + I18n.t(' 个新版本') :
+        (releases.total < before ? I18n.t('已移除 ') + (before - releases.total) + I18n.t(' 个失效版本') :
           (previousTags !== this.releases.map((release: ReleaseInfo) => release.identity()).join(',') ?
-            '版本列表已更新' : '已是最新'));
+            I18n.t('版本列表已更新') : I18n.t('已是最新')));
     } catch (error) {
       // 检查失败不影响已有内容，只提示这一次
-      this.refreshMessage = '检查更新失败：' + errorText(error);
+      this.refreshMessage = I18n.t('检查更新失败：') + errorText(error);
     } finally {
       this.refreshBusy = false;
     }
@@ -559,27 +722,33 @@ struct Detail {
   /** 版本下拉收起时显示的标签：版本名 · 发布时间。 */
   private currentReleaseLabel(): string {
     const release = this.currentRelease();
-    if (release === undefined) return '选择版本';
-    return (release.prerelease ? '预览版 · ' : '') +
-      (releaseDisplayVersion(release.name, release.tag, '', this.app.displayName) ||
-        displayVersion(release.name.length > 0 ? release.name : release.tag, this.app.displayName)) +
+    if (release === undefined) return I18n.t('选择版本');
+    return (release.prerelease ? I18n.t('预览版 · ') : '') +
+      this.releaseVersionLabel(release) +
       (this.app.secondaryRepo.trim() ? ' · ' + release.sourceLabel() : '') +
       (release.publishedAt.length >= 10 ? '  ·  ' + release.publishedAt.substring(0, 10) : '');
   }
 
   private releaseOptions(): SelectOption[] {
     const options = this.releases.map((release: ReleaseInfo) => {
-      const label = (release.prerelease ? '预览版 · ' : '') +
-        (releaseDisplayVersion(release.name, release.tag, '', this.app.displayName) ||
-          displayVersion(release.name.length > 0 ? release.name : release.tag, this.app.displayName)) +
+      const label = (release.prerelease ? I18n.t('预览版 · ') : '') +
+        this.releaseVersionLabel(release) +
         (this.app.secondaryRepo.trim() ? ' · ' + release.sourceLabel() : '') +
         (release.publishedAt.length >= 10 ? '  ·  ' + release.publishedAt.substring(0, 10) : '');
       return { value: label } as SelectOption;
     });
     if (this.releases.length < this.releaseTotal) {
-      options.push({ value: this.releaseMoreBusy ? '读取历史版本中…' : '更多历史版本…' });
+      options.push({ value: this.releaseMoreBusy ? I18n.t('读取历史版本中…') : I18n.t('更多历史版本…') });
     }
     return options;
+  }
+
+  private releaseVersionLabel(release: ReleaseInfo): string {
+    const asset = release.assets.find((item: HapAsset) => item.bundleName === this.selectedAsset.bundleName) ??
+      release.assets[0];
+    return releaseDisplayVersion(release.name, release.tag, asset?.versionName ?? '',
+      this.app.displayName, asset?.versionCode ?? 0) ||
+      displayVersion(release.name.length > 0 ? release.name : release.tag, this.app.displayName);
   }
 
   /** 评论时间：API 给的是 epoch 秒或毫秒的字符串。始终带年份。 */
@@ -606,7 +775,7 @@ struct Detail {
   private reconcileSelectedAsset(preferredUrl: string, preferredName: string): void {
     let chosen = new HapAsset();
     let chosenIndex = 0;
-    if (preferredUrl.length > 0) {
+    if (this.explicitSelection && preferredUrl.length > 0) {
       for (let index = 0; index < this.releases.length; index++) {
         const match = this.releases[index].assets.find((asset: HapAsset) =>
           asset.url === preferredUrl && asset.name === preferredName);
@@ -620,7 +789,17 @@ struct Detail {
     if (chosen.url.length === 0) {
       for (let index = 0; index < this.releases.length; index++) {
         if (this.releases[index].assets.length > 0) {
-          chosen = this.releases[index].assets[0];
+          const primary = ReleaseChannelRegistry.apply(this.app).latestAsset;
+          const bundle = this.selectedAsset.bundleName || primary?.bundleName || '';
+          const choices = this.releases[index].assets.filter((asset: HapAsset) => !bundle || asset.bundleName === bundle);
+          if (choices.length === 0) continue;
+          const observed = LocalBundles.installedVersion(bundle);
+          const installed = LocalBundles.isKnown(observed) ? observed :
+            (!this.installedUnknown && this.selectedBundleName() === bundle && this.installedVersion > 0 ?
+              this.installedVersion : -1);
+          const receipt = CatalogInstallTarget.receipt(this.installedJobs, bundle, installed,
+            InstalledAppRegistry.signingIdentity(bundle)?.updateTime ?? 0);
+          chosen = CatalogInstallTarget.asset(choices, primary, receipt, preferredName) ?? new HapAsset();
           chosenIndex = index;
           break;
         }
@@ -628,6 +807,7 @@ struct Detail {
     }
     this.selectedReleaseIndex = chosenIndex;
     this.selectedAsset = chosen;
+    this.syncUpdatePolicy();
     this.syncInstallTask();
   }
 
@@ -641,9 +821,13 @@ struct Detail {
       this.loadMoreReleases();
       return;
     }
+    this.explicitSelection = true;
     this.selectedReleaseIndex = index;
     const release = this.releases[index];
-    this.selectedAsset = release && release.assets.length > 0 ? release.assets[0] : new HapAsset();
+    this.selectedAsset = release && release.assets.length > 0 ?
+      (CatalogPackageVariant.choose(release.assets.filter((asset: HapAsset) =>
+        asset.bundleName === this.selectedAsset.bundleName), this.selectedAsset.name, this.app.latestAsset) ??
+        release.assets[0]) : new HapAsset();
     this.expandedReleaseTag = '';
     this.syncInstallTask();
     // 换了附件就可能换了包名，按钮状态要跟着重算
@@ -659,9 +843,21 @@ struct Detail {
     this.releaseMoreBusy = true;
     this.animateOverlay(() => { this.showPreviewReleases = next; });
     try {
-      const result = await new StoreClient(getContext(this) as common.UIAbilityContext)
-        .listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE, next);
+      const client = new StoreClient(getContext(this) as common.UIAbilityContext);
+      let result = await client.listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE, next);
+      if (ReleaseChannelRegistry.staleReleases(this.app, result.items, next)) {
+        let freshApp = this.app;
+        await Promise.all([
+          client.appDetail(this.app.id, true).then((fresh: CatalogApp) => { freshApp = fresh; }),
+          client.listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE, next, true)
+            .then((fresh) => { result = fresh; })
+        ]);
+        if (this.disposed) return;
+        this.app = freshApp;
+      }
+      if (this.disposed) return;
       this.showPreviewReleases = next;
+      this.explicitSelection = false;
       this.releases = result.items;
       this.releasePage = result.page;
       this.releaseTotal = result.total;
@@ -669,10 +865,10 @@ struct Detail {
       this.refreshInstalledVersion();
       this.releaseMessage = '';
       await ReleaseChannelRegistry.select(getContext(this) as common.UIAbilityContext,
-        this.app.id, next, result.items);
+        this.app.id, next, result.items, this.app);
     } catch (error) {
       this.animateOverlay(() => { this.showPreviewReleases = previous; });
-      this.releaseMessage = '无法读取版本：' + errorText(error);
+      this.releaseMessage = I18n.t('无法读取版本：') + errorText(error);
     } finally {
       this.releaseMoreBusy = false;
     }
@@ -680,20 +876,62 @@ struct Detail {
 
   /** 取服务端的第 page 页（从 1 开始）。失败时保留当前页，只提示错误。 */
   private async fetchReviewPage(page: number): Promise<void> {
-    if (page < 1 || this.reviewPageBusy) return;
+    if (page < 1 || this.reviewPageBusy || this.reviewDeleteBusy) return;
     this.reviewPageBusy = true;
     try {
-      const result = await new StoreClient(getContext(this) as common.UIAbilityContext)
-        .listReviews(this.app.id, page, Detail.REVIEWS_PER_PAGE);
+      const context = getContext(this) as common.UIAbilityContext;
+      const account = await AccountSession.load(context);
+      const result = await new StoreClient(context).listReviews(this.app.id, page, Detail.REVIEWS_PER_PAGE, account);
       if (this.disposed) return;
-      this.reviews = result.items;
-      this.reviewPage = result.page;
-      this.reviewTotal = result.total;
+      this.account = account ?? new DeveloperAccount(); this.signedIn = !!account;
+      this.reviewOwnerScope = account ? JSON.stringify([account.userId, account.teamId]) : '';
+      this.applyReviewPage(result);
     } catch (error) {
       if (!this.disposed) this.reviewMessage = errorText(error);
     } finally {
       if (!this.disposed) this.reviewPageBusy = false;
     }
+  }
+
+  private applyReviewPage(result: ReviewPage): void {
+    this.reviews = result.items; this.reviewPage = result.page; this.reviewTotal = result.total;
+    const app = CatalogApp.copy(this.app);
+    app.ratingCount = result.ratingCount; app.ratingAverage = result.ratingAverage;
+    this.app = app;
+  }
+
+  private async removeOwnReview(review: AppReview): Promise<void> {
+    if (!review.canDelete || this.reviewDeleteBusy || this.reviewBusy || this.reviewDeletePromptOpen ||
+      this.embedded && !this.embeddedVisible) return;
+    const scope = this.reviewOwnerScope;
+    this.reviewDeletePromptOpen = true;
+    let confirmed = false;
+    try {
+      const result = await promptAction.showDialog({ title: I18n.t('删除这条评论？'),
+        message: I18n.t('删除后无法恢复。') + (review.body ? '\n\n' + review.body.substring(0, 180) : ''),
+        buttons: [{ text: I18n.t('取消'), color: Palette.forMode(this.darkMode).text },
+          { text: I18n.t('删除'), color: Palette.forMode(this.darkMode).danger }] });
+      confirmed = result.index === 1;
+    } catch (_) { /* Dismissing the system confirmation leaves the review intact. */ }
+    finally { this.reviewDeletePromptOpen = false; }
+    if (!confirmed || this.disposed) return;
+    this.reviewDeleteBusy = true;
+    let refresh = false;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const account = await AccountSession.load(context);
+      if (!account || !scope || JSON.stringify([account.userId, account.teamId]) !== scope) {
+        throw new Error(I18n.t('账号已变更，请刷新评论后重试'));
+      }
+      const result = await new StoreClient(context).deleteReview(this.app.id, review.id, this.reviewPage, account);
+      if (this.disposed) return;
+      this.applyReviewPage(result);
+      promptAction.showToast({ message: I18n.t('评论已删除') });
+    } catch (error) {
+      refresh = true;
+      if (!this.disposed) promptAction.showToast({ message: errorText(error) });
+    } finally { if (!this.disposed) this.reviewDeleteBusy = false; }
+    if (refresh && !this.disposed) await this.fetchReviewPage(this.reviewPage);
   }
 
   private async loadReviews(): Promise<void> {
@@ -716,7 +954,7 @@ struct Detail {
       this.releaseMessage = '';
     } catch (error) {
       // 续取失败不能清空页面：已加载的版本仍然可用，只提示这一行。
-      this.releaseMessage = '无法加载更早的版本：' + errorText(error);
+      this.releaseMessage = I18n.t('无法加载更早的版本：') + errorText(error);
     } finally {
       this.releaseMoreBusy = false;
     }
@@ -724,11 +962,11 @@ struct Detail {
 
   private async sendReview(): Promise<void> {
     if (!this.signedIn) {
-      this.reviewMessage = '请在「我的」登录华为开发者账号后评价';
+      this.reviewMessage = I18n.t('请在「我的」登录华为开发者账号后评价');
       return;
     }
     if (this.reviewText.trim().length === 0) {
-      this.reviewMessage = '请输入评价内容';
+      this.reviewMessage = I18n.t('请输入评价内容');
       return;
     }
     this.reviewBusy = true;
@@ -736,11 +974,10 @@ struct Detail {
       // 新评价排在最前，服务端返回的第一页就是它所在的那页。
       const result = await new StoreClient(getContext(this) as common.UIAbilityContext)
         .postReview(this.app.id, this.reviewStars, this.reviewText.trim(), this.account);
-      this.reviews = result.items;
-      this.reviewPage = result.page;
-      this.reviewTotal = result.total;
+      this.applyReviewPage(result);
+      this.reviewOwnerScope = JSON.stringify([this.account.userId, this.account.teamId]);
       this.reviewText = '';
-      this.reviewMessage = '评价已发布';
+      this.reviewMessage = I18n.t('评价已发布');
     } catch (error) {
       this.reviewMessage = errorText(error);
     } finally {
@@ -754,24 +991,37 @@ struct Detail {
     this.error = '';
     try {
       const params = router.getParams() as Record<string, number>;
-      const id = Number(params['id'] ?? 0);
-      if (id <= 0) throw new Error('应用编号无效');
+      const id = this.embedded ? this.embeddedAppId : Number(params['id'] ?? 0);
+      if (id <= 0) throw new Error(I18n.t('应用编号无效'));
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
       const app = await client.appDetail(id);
       if (this.disposed) return;
       this.app = app;
+      await this.restoreUpdatePolicy();
+      if (this.disposed) return;
       await ReleaseChannelRegistry.restore(getContext(this) as common.UIAbilityContext);
       if (this.disposed) return;
-      this.showPreviewReleases = ReleaseChannelRegistry.preview(id);
+      this.showPreviewReleases = this.embedded || params['notificationPreview']===undefined ? ReleaseChannelRegistry.preview(id) : params['notificationPreview']===1;
       // 主信息先显示；图标、版本、评论各自加载，失败只影响对应区域。
       this.loaded = true;
       this.syncInstallTask();
-      await Promise.all([this.loadDetailIcon(client), this.loadInitialReleases(client), this.loadReviews()]);
+      this.notifyEmbeddedReady();
+      const reviews = this.loadReviews();
+      await Promise.all([this.loadDetailIcon(client), this.loadInitialReleases(client)]);
+      await reviews;
     } catch (error) {
       if (!this.disposed) this.error = errorText(error);
     } finally {
       this.detailLoading = false;
+      // Failed primary reads also finish the handoff, exposing the retry control.
+      this.notifyEmbeddedReady();
     }
+  }
+
+  private notifyEmbeddedReady(): void {
+    if (!this.embedded || this.disposed || this.embeddedReadySent) return;
+    this.embeddedReadySent = true;
+    this.onEmbeddedReady();
   }
 
   private async loadDetailIcon(client: StoreClient): Promise<void> {
@@ -790,10 +1040,21 @@ struct Detail {
 
   private async loadInitialReleases(client: StoreClient): Promise<void> {
     this.releaseLoading = true;
-    this.releaseMessage = '正在读取版本…';
+    this.releaseMessage = I18n.t('正在读取版本…');
     try {
-      const releases = await client.listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE,
+      let releases = await client.listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE,
         this.showPreviewReleases);
+      // A newer catalog plus an older cached version page must not become a new target.
+      if (ReleaseChannelRegistry.staleReleases(this.app, releases.items, this.showPreviewReleases)) {
+        let freshApp = this.app;
+        await Promise.all([
+          client.appDetail(this.app.id, true).then((fresh: CatalogApp) => { freshApp = fresh; }),
+          client.listReleases(this.app.id, 1, Detail.RELEASES_PER_PAGE, this.showPreviewReleases, true)
+            .then((fresh) => { releases = fresh; })
+        ]);
+        if (this.disposed) return;
+        this.app = freshApp;
+      }
       if (this.disposed) return;
       this.releases = releases.items;
       this.releasePage = releases.page;
@@ -803,9 +1064,9 @@ struct Detail {
       this.syncInstallTask();
       this.releaseMessage = '';
       await ReleaseChannelRegistry.select(getContext(this) as common.UIAbilityContext,
-        this.app.id, this.showPreviewReleases, releases.items);
+        this.app.id, this.showPreviewReleases, releases.items, this.app);
     } catch (error) {
-      if (!this.disposed) this.releaseMessage = '版本读取失败，点击右上角重试：' + errorText(error);
+      if (!this.disposed) this.releaseMessage = I18n.t('版本读取失败，点击右上角重试：') + errorText(error);
     } finally {
       if (!this.disposed) this.releaseLoading = false;
     }
@@ -834,16 +1095,16 @@ struct Detail {
         this.lastNotice = '';
         await this.loadInstalledJobs();
       } else if (result.stage === InstallStage.WAITING_DEVICE) {
-        this.notify('安装已暂停，重新连接后会从当前步骤继续');
+        this.notify(I18n.t('安装已暂停，重新连接后会从当前步骤继续'));
         this.reconnectMessage = '';
         InstallReconnect.request(id);
       } else if (result.stage === InstallStage.WAITING_ACCOUNT) {
-        this.notify('请先在「我的」登录华为开发者账号');
+        this.notify(I18n.t('请先在「我的」登录华为开发者账号'));
       } else if (result.stage === InstallStage.WAITING_CONFIRMATION) {
         InstallConfirmation.request(result.id);
       } else {
         this.notify(result.lastError.length > 0 ? result.lastError :
-          '安装任务已保存，可在「管理」中继续');
+          I18n.t('安装任务已保存，可在「管理」中继续'));
       }
     } catch (error) {
       const text = errorText(error);
@@ -851,8 +1112,8 @@ struct Detail {
       // 超时只结束了「等待」，旧执行还在收尾（锁没放）。说清楚原因，否则用户
       // 立刻点重试会收到「正在执行」，看起来像卡住了。
       this.notify(JobScheduler.stillFinishing(id) ?
-        text + '（本次执行仍在后台收尾，请等它结束后再重试）' :
-        (text.includes('正在执行') ? '该任务已在执行中，请稍候' : text));
+        text + I18n.t('（本次执行仍在后台收尾，请等它结束后再重试）') :
+        (text.includes('正在执行') ? I18n.t('该任务已在执行中，请稍候') : text));
     } finally {
       this.downloadBusy = false;
       this.syncInstallTask();
@@ -860,37 +1121,25 @@ struct Detail {
   }
 
   private confirmDataLoss(job: InstallJob): void {
-    const renewal = job.renewalRequestedAt > 0;
-    AlertDialog.show({
-      title: InstallConfirmation.dataLossTitle(renewal),
-      message: InstallConfirmation.dataLossMessage(renewal, LocalBundles.isSelfBundle(job.bundleName)),
-      primaryButton: { value: '取消', action: () => {} },
-      secondaryButton: { value: InstallConfirmation.dataLossAction(renewal), action: async () => {
-        try {
-          const store = await JobStore.open(getContext(this) as common.UIAbilityContext);
-          const installed = await new HdcDeviceBridge(getContext(this) as common.UIAbilityContext)
-            .installedSigningIdentity(job.bundleName);
-          if (!installed) throw new Error('无法核对当前安装身份，请连接无线调试后重试');
-          await store.approveDataLoss(job.id, installed);
-          await this.resumeInstall(job.id);
-        } catch (error) { this.notify(errorText(error)); }
-      } }
-    });
+    InstallConfirmation.request(job.id);
   }
 
   onReconnectVisibilityChanged(): void {
-    if (!this.showReconnect || this.reconnectPort.length > 0) return;
+    const generation = ++this.reconnectPortReadGeneration;
+    if (!this.showReconnect) return;
+    const revision = this.reconnectPortInputRevision;
     new HdcDeviceBridge(getContext(this) as common.UIAbilityContext).savedPort().then((port: number) => {
-      // 异步读取期间用户已经输入时，不覆盖输入。
-      if (this.showReconnect && this.reconnectPort.length === 0 && port >= 1024 && port <= 65535) {
-        this.reconnectPort = String(port);
+      // Refresh each opening, including a changed fixed port; keep edits and newer openings intact.
+      if (this.showReconnect && generation === this.reconnectPortReadGeneration &&
+        revision === this.reconnectPortInputRevision && !this.reconnectBusy) {
+        this.reconnectPort = Number.isInteger(port) && port >= 1024 && port <= 65535 ? String(port) : '';
       }
     }).catch(() => {});
   }
 
   private async reconnect(): Promise<void> {
     this.reconnectBusy = true;
-    this.reconnectMessage = '正在连接，请在系统弹窗中信任本机';
+    this.reconnectMessage = I18n.t('正在连接，请在系统弹窗中信任本机');
     try {
       const port = Number(this.reconnectPort.trim());
       const bridge = new HdcDeviceBridge(getContext(this) as common.UIAbilityContext);
@@ -900,6 +1149,7 @@ struct Detail {
       }
       this.animateOverlay(() => { this.showReconnect = false; });
       this.reconnectMessage = '';
+      FixedDebugPort.wake();
       const jobId = this.reconnectJobId || this.activeInstallId;
       InstallReconnect.clear(jobId);
       await this.resumeInstall(jobId);
@@ -911,39 +1161,79 @@ struct Detail {
     }
   }
 
+  private async resumeRemoteTarget(target:DeviceInstallTarget=MultiDeviceTargets.selected):Promise<void>{
+    const id=this.reconnectJobId;
+    if(!id)return;
+    const context=getContext(this) as common.UIAbilityContext;
+    const store=await JobStore.open(context),job=await store.get(id);
+    if(!job?.installTarget)return;
+    const expected=DeviceInstallTarget.parse(job.installTarget);
+    if(expected.udid!==target.udid){this.notify(I18n.t('该任务需要连接 ')+expected.name);return;}
+    job.installTarget=DeviceInstallTarget.snapshot(target);
+    await store.save(job);InstallReconnect.clear(id);this.reconnectJobId='';this.showMultiDevice=false;
+    await InstallCoordinator.run(context,id);
+  }
+
+  private closeMultiDevice():void{InstallReconnect.clear(this.reconnectJobId);this.reconnectJobId='';this.showMultiDevice=false;}
+  private reconnectExpectedUdid():string{try{const job=this.installTasks.find((row)=>row.job.id===this.reconnectJobId)?.job;return job?.installTarget?DeviceInstallTarget.parse(job.installTarget).udid:'';}catch(_){return '';}}
+
   private async downloadSelected(): Promise<void> {
     if (this.downloadBusy || this.currentInstallTask()?.running) return;
     if (!this.installButtonEnabled()) return;
+    const pinnedTarget=DeviceInstallTarget.selectedSnapshot();
+    const pinnedTargets = MultiDeviceTargets.snapshots();
     const asset = this.selectedAsset;
+    const installed = this.installedForApp();
+    const bundleName = asset.bundleName || installed?.bundleName || '';
+    const needsPolicyCheck = pinnedTargets.length<2 && !pinnedTarget && (this.installedUnknown || this.installedVersion !== 0);
+    const manuallySelected = this.explicitSelection;
     if (!/^https:\/\//.test(asset.url)) {
-      this.notify('该附件缺少 HTTPS 下载地址，暂不能下载');
+      this.notify(I18n.t('该附件缺少 HTTPS 下载地址，暂不能下载'));
       return;
     }
+    let releaseBatch:()=>void=()=>{};
     this.downloadBusy = true;
     this.downloadPercent = 0;
-    this.notify('正在下载安装包');
     try {
       const context = getContext(this) as common.UIAbilityContext;
+      if (needsPolicyCheck && !manuallySelected) {
+        await UpdatePolicy.restore(context);
+        if (UpdatePolicy.disabled(bundleName)) { this.notify(I18n.t('此应用已停更')); return; }
+      }
+      if (pinnedTargets.length<2 && !await InstallDeviceCompatibility.confirm(asset, this.app.displayName || asset.bundleName || asset.name, pinnedTarget)) return;
+      this.notify(I18n.t('正在下载安装包'));
       const store = await JobStore.open(context);
+      // Recheck after opening the journal: a stale default action must not
+      // enqueue an update if the user paused this bundle during that await.
+      if (needsPolicyCheck && !manuallySelected) {
+        await UpdatePolicy.restore(context);
+        if (UpdatePolicy.disabled(bundleName)) { this.notify(I18n.t('此应用已停更')); return; }
+      }
+      if(pinnedTargets.length>1)releaseBatch=InstallCoordinator.holdQueue();
       const job = await store.enqueue(this.app.id, asset.name, asset.url,
         asset.sha256, asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode,
         asset.releaseTag, asset.releaseName,
-        (this.installedUnknown ? this.installedForApp()?.versionCode : this.installedVersion) === asset.versionCode);
+        Boolean(pinnedTarget) || (this.installedUnknown ? this.installedForApp()?.versionCode : this.installedVersion) === asset.versionCode,
+        InstallDeviceCompatibility.confirmedFingerprint(asset, pinnedTarget), pinnedTarget);
       if (job.stage === InstallStage.INSTALLED) {
         job.stage = InstallStage.QUEUED; job.stageHistory = []; job.lastError = '';
-        job.reinstallRequired = (this.installedUnknown ? this.installedForApp()?.versionCode : this.installedVersion) === asset.versionCode;
+        job.reinstallRequired = Boolean(pinnedTarget) || (this.installedUnknown ? this.installedForApp()?.versionCode : this.installedVersion) === asset.versionCode;
         job.replacementInstallBaseline = 0;
         await store.save(job);
       }
+      if(manuallySelected){job.forceInstall=true;await store.save(job);}
+      await MultiDeviceInstall.enqueue(store, job, pinnedTargets, context);
       if (job.stage === InstallStage.QUEUED) {
         InstallCoordinator.recovered(context);
-        this.notify('已加入安装队列，可继续选择其他安装包');
+        this.notify(I18n.t('已加入安装队列，可继续选择其他安装包'));
         return;
       }
+      if(pinnedTargets.length>1){InstallCoordinator.run(context,job.id).catch(()=>{});return;}
       await this.resumeInstall(job.id);
     } catch (error) {
       this.notify(errorText(error));
     } finally {
+      releaseBatch();
       this.downloadBusy = false;
       this.syncInstallTask();
     }
@@ -953,41 +1243,50 @@ struct Detail {
   private reconnectSheet() {
     Column({ space: 15 }) {
       Row() {
-        Text('连接无线调试').fontSize(22).fontWeight(FontWeight.Bold)
+        Text(I18n.t('连接无线调试')).fontSize(22).fontWeight(FontWeight.Bold)
           .fontColor(this.colors().text).layoutWeight(1)
         StoreIconButton({ active: !this.reconnectBusy, action: () => {
           InstallReconnect.clear(this.reconnectJobId); this.animateOverlay(() => { this.showReconnect = false; });
         } })
       }.width('100%')
-      Text('前往系统设置，开启无线调试').fontSize(12).padding({ top: 3, bottom: 3 })
-        .fontColor(this.colors().accent).width('100%').height(44)
-        .decoration({ type: TextDecorationType.Underline, color: this.colors().accent })
-        .onClick(() => new HdcDeviceBridge(getContext(this) as common.UIAbilityContext)
-          .openWirelessSettings())
-      Text('安装进度已保留。连接后会从刚才的步骤继续。')
-        .fontSize(13).fontColor(this.colors().textSecondary).width('100%')
-      TextInput({ placeholder: '输入无线调试端口', text: this.reconnectPort })
-        .type(InputType.Number).height(48).textAlign(TextAlign.Center)
-        .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
-        .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
-        .onChange((value: string) => { this.reconnectPort = value; })
-      Button({ type: ButtonType.Capsule }) {
-        Row({ space: 8 }) {
-          if (this.reconnectBusy) {
-            LoadingProgress().width(18).height(18).color(this.colors().onAccent)
+      Scroll() {
+        Column({ space: 15 }) {
+          Text(I18n.t('前往系统设置，开启无线调试')).fontSize(12).padding({ top: 3, bottom: 3 })
+            .fontColor(this.colors().accent).width('100%').height(44)
+            .decoration({ type: TextDecorationType.Underline, color: this.colors().accent })
+            .onClick(() => new HdcDeviceBridge(getContext(this) as common.UIAbilityContext)
+              .openWirelessSettings())
+          Text(I18n.t('安装进度已保留。连接后会从刚才的步骤继续。'))
+            .fontSize(13).fontColor(this.colors().textSecondary).width('100%')
+          TextInput({ placeholder: I18n.t('输入无线调试端口'), text: this.reconnectPort })
+            .type(InputType.Number).height(48).textAlign(TextAlign.Center)
+            .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
+            .backgroundColor(this.colors().fill).caretColor(this.colors().accent)
+            .onChange((value: string) => {
+              if (value !== this.reconnectPort) this.reconnectPortInputRevision++;
+              this.reconnectPort = value;
+            })
+          Button({ type: ButtonType.Capsule }) {
+            Row({ space: 8 }) {
+              if (this.reconnectBusy) {
+                LoadingProgress().width(18).height(18).color(this.colors().onAccent)
+              }
+              Text(this.reconnectBusy ? I18n.t('正在连接…') : I18n.t('连接并继续安装'))
+                .fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.colors().onAccent)
+            }.justifyContent(FlexAlign.Center)
           }
-          Text(this.reconnectBusy ? '正在连接…' : '连接并继续安装')
-            .fontSize(15).fontWeight(FontWeight.Medium).fontColor(this.colors().onAccent)
-        }.justifyContent(FlexAlign.Center)
-      }
-        .width('100%').height(48).enabled(!this.reconnectBusy)
-        .backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
-        .onClick(() => this.reconnect())
-      if (this.reconnectMessage.length > 0) {
-        Text(this.reconnectMessage).fontSize(12).fontColor(this.colors().textSecondary)
-          .width('100%').maxLines(3)
-      }
+            .width('100%').height(48).enabled(!this.reconnectBusy)
+            .backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
+            .onClick(() => this.reconnect())
+          if (this.reconnectMessage.length > 0) {
+            Text(this.reconnectMessage).fontSize(12).fontColor(this.colors().textSecondary)
+              .width('100%').maxLines(3)
+          }
+        }.width('100%').alignItems(HorizontalAlign.Start)
+      }.width('100%').layoutWeight(1).align(Alignment.Top).scrollBar(BarState.Off)
     }.padding(24).width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth })
+      .height(Math.min(440, StoreLayout.sheetMaxHeight(this.windowHeight,
+        this.statusBarInset, this.navigationBottomInset)))
       .backgroundColor(this.colors().surface).borderRadius(28)
       .transition(TransitionEffect.translate({ y: 16 }))
   }
@@ -1040,7 +1339,7 @@ struct Detail {
         uri: 'https://' + this.repoHost() + '/' + path
       });
     } catch (error) {
-      this.notify('无法打开来源仓库：' + errorText(error));
+      this.notify(I18n.t('无法打开来源仓库：') + errorText(error));
     }
   }
 
@@ -1052,22 +1351,27 @@ struct Detail {
         action: 'ohos.want.action.viewData', uri: uri,
         entities: ['entity.system.browsable']
       });
-    } catch (error) { this.notify('无法打开仓库：' + errorText(error)); }
+    } catch (error) { this.notify(I18n.t('无法打开仓库：') + errorText(error)); }
   }
 
+  private selectedDeviceLabels(): string[] {
+    if (this.selectedAsset.name.length === 0) return [];
+    const labels = DeviceSupportDisplay.labels(this.selectedAsset.deviceTypes);
+    return labels.length > 0 ? labels : [I18n.t('设备未标注')];
+  }
   private appTitle(): string {
-    return AppDisplayName.forBundle(this.selectedAsset.bundleName || this.app.latestAsset?.bundleName || '',
+    return AppDisplayName.forCatalogBundle(this.selectedAsset.bundleName || this.app.latestAsset?.bundleName || '',
       this.app.displayName);
   }
 
   private packageSizeLabel(): string {
     const size = this.selectedAsset.url.length > 0 ? this.selectedAsset.size :
       (this.app.latestAsset?.size ?? 0);
-    if (!Number.isFinite(size) || size <= 0) return '安装包大小待确认';
-    if (size >= 1024 * 1024 * 1024) return '安装包 ' + (size / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
-    if (size >= 1024 * 1024) return '安装包 ' + (size / (1024 * 1024)).toFixed(1) + ' MB';
-    if (size >= 1024) return '安装包 ' + Math.ceil(size / 1024) + ' KB';
-    return '安装包 ' + Math.ceil(size) + ' B';
+    if (!Number.isFinite(size) || size <= 0) return I18n.t('安装包大小待确认');
+    if (size >= 1024 * 1024 * 1024) return I18n.t('安装包 ') + (size / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+    if (size >= 1024 * 1024) return I18n.t('安装包 ') + (size / (1024 * 1024)).toFixed(1) + ' MB';
+    if (size >= 1024) return I18n.t('安装包 ') + Math.ceil(size / 1024) + ' KB';
+    return I18n.t('安装包 ') + Math.ceil(size) + ' B';
   }
 
   private animateOverlay(change: () => void): void {
@@ -1094,22 +1398,23 @@ struct Detail {
         color: this.colors().borderStrong, radius: 14 })
       .responseRegion({ x: 0, y: -8, width: '100%', height: 44 })
       .enabled(!this.releaseLoading && !this.releaseMoreBusy && !this.refreshBusy).stateEffect(true)
-      .accessibilityText(label + (this.showPreviewReleases === preview ? '，已选中' : '，点击切换'))
+      .accessibilityText(label + (this.showPreviewReleases === preview ? I18n.t('，已选中') : I18n.t('，点击切换')))
       .onClick(() => this.selectReleaseChannel(preview))
   }
 
   @Builder
   private releaseChannelSelector() {
     Row({ space: 2 }) {
-      this.releaseChannelOption('正式版', false)
-      this.releaseChannelOption('预览版', true)
+      this.releaseChannelOption(I18n.t('正式版'), false)
+      this.releaseChannelOption(I18n.t('预览版'), true)
     }.width(138).height(36).padding(4).backgroundColor(this.colors().fill).borderRadius(18).clip(true)
       .border({ width: 1, color: this.colors().border, radius: 18 })
   }
 
   @Builder
   private headerTools() {
-    StoreImmersiveIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: '检查更新',
+    StoreImmersiveIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: I18n.t('检查更新'),
+      darkSurface: this.embedded && this.embeddedStarfield,
       controlId: 'detail-refresh', loading: this.refreshBusy || this.releaseLoading && this.loaded,
       active: !this.releaseMoreBusy && (!this.releaseLoading || this.error.length > 0),
       visible: this.headerVisible && !this.showReconnect && !this.showCertificatePrompt,
@@ -1118,18 +1423,23 @@ struct Detail {
 
   @Builder
   private detailHeader() {
-    StorePageHeader({ title: '应用详情', statusInset: this.statusBarInset,
+    StorePageHeader({ title: I18n.t('应用详情'), statusInset: this.statusBarInset,
       fadeOpacity: this.detailTopBlurOpacity, visible: this.headerVisible && !this.showReconnect && !this.showCertificatePrompt,
       action: () => this.back(), backAction: () => { this.onBackPress(); }, tools: () => { this.headerTools(); } })
       .position({ x: 0, y: 0 })
   }
 
   @Builder
-  private installActionContent(immersive: boolean) {
-    // 有计数时用原生平滑填充，其余阶段只在底边显示细流光，主体与文案保持稳定。
-    Button({ type: ButtonType.Normal }) {
+  private installActionFace() {
       Stack({ alignContent: Alignment.Center }) {
-        if (this.downloadBusy && this.installProgressDeterminate()) {
+        if (this.embedded && this.downloadBusy && this.installProgressDeterminate()) {
+          Progress({ value: this.downloadPercent, total: 100, type: ProgressType.Ring })
+            .width(this.sidebarActionSize() - 8).height(this.sidebarActionSize() - 8)
+            .color(StoreMaterial.foreground(this.darkMode, false, this.materialMode))
+            .backgroundColor(Palette.forMode(this.darkMode).border)
+            .style({ strokeWidth: 3, enableSmoothEffect: true })
+            .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+        } else if (!this.embedded && this.downloadBusy && this.installProgressDeterminate()) {
           // 填充层不单独画胶囊圆角，统一由外层按钮的 18vp 圆角裁切。
           Progress({ value: this.downloadPercent, total: 100, type: ProgressType.Linear })
             .width('100%').height(52)
@@ -1138,7 +1448,7 @@ struct Detail {
               enableScanEffect: false, enableSmoothEffect: true })
             .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
         }
-        if (this.downloadBusy && !this.installProgressDeterminate()) {
+        if (!this.embedded && this.downloadBusy && !this.installProgressDeterminate()) {
           Stack({ alignContent: Alignment.Start }) {
             Row().width('100%').height(2).backgroundColor('#10FFFFFF')
             Row().width(80).height(2)
@@ -1153,36 +1463,123 @@ struct Detail {
             .position({ left: 16, bottom: 6 })
             .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
         }
-        Text(this.installButtonLabel())
-          .fontSize(17).fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().onAccent)
+        Text(this.embedded ? this.sidebarInstallLabel() : this.installButtonLabel())
+          .fontSize(this.embedded ? 14 : 17).fontWeight(FontWeight.Medium)
+          .textAlign(TextAlign.Center).maxLines(this.embedded ? 2 : 1)
+          .fontColor(this.embedded ? StoreMaterial.foreground(this.darkMode, false, this.materialMode) : this.colors().onAccent)
       }
-      .width('100%').height(52)
+      // The native tab builder receives its inner height after vertical insets.
+      .width('100%').height(this.embedded ? '100%' : 52)
+  }
+
+  @Builder
+  private installActionContent(immersive: boolean) {
+    Button({ type: ButtonType.Normal }) {
+      this.installActionFace();
     }
-    .width('100%').height(52).padding(0)
+    .width('100%').height(this.embedded ? this.sidebarActionSize() : 52).padding(0)
     .enabled(this.installButtonEnabled())
     .stateEffect(true).accessibilityText(this.installButtonLabel())
-    // The action remains blue/readable even if the native material is transparent.
-    // A small translucency still preserves its system light and edge effects.
     .backgroundColor(immersive ? '#EB' + this.colors().accent.substring(1) : this.colors().accent)
     .borderRadius(18).clip(true)
+    .shadow({ radius: 0, color: Color.Transparent, offsetX: 0, offsetY: 0 })
     .onSizeChange((_old: SizeOptions, size: SizeOptions) => {
       const width = Number(size.width);
       if (Number.isFinite(width) && width > 0 && width !== this.installButtonWidth) this.installButtonWidth = width;
     })
-    .onClick(() => {
-      if (this.downloadBusy) return;
-      const task = this.currentInstallTask();
-      if (task !== undefined && isPending(task.job.stage)) {
-        this.resumeInstall(task.job.id);
-        return;
+    .onClick(() => this.performInstallAction())
+  }
+
+  private performInstallAction(): void {
+    if (this.disposed || (this.embedded && !this.embeddedVisible)) return;
+
+    if (this.downloadBusy) return;
+    const task = this.currentInstallTask();
+    if (task !== undefined && isPending(task.job.stage)) {
+      this.resumeInstall(task.job.id);
+      return;
+    }
+    if (!this.installButtonEnabled()) return;
+    const installed = this.installedForApp();
+    // 已装且没有更新可装：打开；否则安装或更新
+    if (this.installTargetCount<2 && !this.installTargetName && installed !== undefined && !this.updateAvailable()) this.openInstalled(installed);
+    else this.downloadSelected();
+  }
+
+  private sidebarActionSize(): number {
+    return StoreLayout.navigationHeight;
+  }
+
+  @Builder
+  private sidebarDockTab() {
+    TabContent() {
+      if (!StoreMaterial.supported(this.materialMode)) {
+        StoreNavigationSurface({ darkMode: this.darkMode }).width('100%').height('100%')
       }
-      if (!this.installButtonEnabled()) return;
-      const installed = this.installedForApp();
-      // 已装且没有更新可装：打开；否则安装或更新
-      if (installed !== undefined && !this.updateAvailable()) this.openInstalled(installed);
-      else this.downloadSelected();
-    })
+    }.tabBar(this.installActionFace)
+  }
+
+  @Builder
+  private sidebarInstallDock() {
+    // The dock is neither scaled with the article nor hosted in a separate popup window.
+    // Use the same native floating-bar renderer and global theme as the main navigation.
+    WithTheme({ colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT }) {
+      Stack() {
+        if (StoreMaterial.supported(this.materialMode)) {
+          Tabs({ barPosition: BarPosition.End }) {
+            this.sidebarDockTab();
+          }.width('100%').height('100%').borderRadius(this.sidebarActionSize() / 2).clip(true)
+            .barHeight(StoreLayout.navigationHeight)
+            .barMode(BarMode.Fixed).vertical(false).scrollable(false).animationDuration(0).barOverlap(true)
+            .barFloatingStyle({ maskColor: '#00000000', barSideMargin: 0, barBottomMargin: 0,
+              barWidth: { smallBarWidth: this.sidebarActionSize(), mediumBarWidth: this.sidebarActionSize(),
+                largeBarWidth: this.sidebarActionSize() },
+              systemMaterial: StoreMaterial.dock(this.materialMode, this.darkMode) })
+            .onTabBarClick(() => this.performInstallAction())
+        } else {
+          HdsTabs({ barPosition: BarPosition.End }) {
+            this.sidebarDockTab();
+          }.width('100%').height('100%').borderRadius(this.sidebarActionSize() / 2).clip(true)
+            .barHeight(StoreLayout.navigationHeight)
+            .barMode(BarMode.Fixed).vertical(false).scrollable(false).animationDuration(0).barOverlap(true)
+            .barFloatingStyle({ gradientMask: { maskColor: '#00000000' }, barSideMargin: 0,
+              barBottomMargin: 0, barOpacity: 1,
+              barWidth: { smallWidth: this.sidebarActionSize(), mediumWidth: this.sidebarActionSize(),
+                largeWidth: this.sidebarActionSize() },
+              systemMaterialEffect: { materialType: MaterialPreferences.type(this.materialMode),
+                materialLevel: MaterialPreferences.level(this.materialMode) } })
+            .onTabBarClick(() => this.performInstallAction())
+        }
+      }.width(this.sidebarActionSize()).height(this.sidebarActionSize()).borderRadius(this.sidebarActionSize() / 2)
+        // Clip native bar shadows to the disc; cast one explicit circular shadow outside it.
+        .shadow({ radius: 12, color: this.darkMode ? '#70000000' : '#38344769', offsetX: 0, offsetY: 4 })
+        .position({ right: this.embeddedActionRight, bottom: StoreLayout.navigationBottomMargin })
+        .enabled(this.installButtonEnabled()).accessibilityText(this.installButtonLabel())
+        .id('sidebar-install-action')
+    }
+  }
+
+  private async saveIconOriginal(): Promise<void> {
+    if (this.iconSaving || !this.appIcon || this.disposed) return;
+    this.iconSaving = true;
+    try {
+      const saved = await CatalogIconExport.save(getContext(this) as common.UIAbilityContext,
+        CatalogApp.copy(this.app), this.appTitle(), () => !this.disposed);
+      if (saved && !this.disposed) promptAction.showToast({ message: I18n.t('图标已保存') });
+    } catch (error) {
+      if (!this.disposed) promptAction.showToast({ message: I18n.t('图标保存失败：') + errorText(error) });
+    } finally {
+      if (!this.disposed) this.iconSaving = false;
+    }
+  }
+
+  @Builder
+  private iconMenu() {
+    Menu() {
+      MenuItem({ content: this.iconSaving ? I18n.t('正在保存…') : I18n.t('保存原图') })
+        .enabled(!this.iconSaving).id('detail-icon-save')
+        .onClick(() => this.saveIconOriginal())
+    }
   }
 
   @Builder
@@ -1203,7 +1600,7 @@ struct Detail {
         }.width('100%')
         this.skeletonLine('100%', 12)
         this.skeletonLine('65%', 12)
-      }.width('100%').padding(20).backgroundColor(this.colors().surface).borderRadius(22)
+      }.width('100%').padding(20).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
       Column({ space: 12 }) {
         this.skeletonLine('35%', 14)
         this.skeletonLine('70%', 12)
@@ -1214,33 +1611,42 @@ struct Detail {
         this.skeletonLine('85%', 12)
         this.skeletonLine('60%', 12)
       }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
-    }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth })
-      .padding({ left: 24, right: 24, top: this.statusBarInset + 72, bottom: 28 })
-      .id('detail-information-skeleton').accessibilityText('正在读取应用信息')
+    }.width('100%').constraintSize({ maxWidth: this.embedded ? '100%' : StoreLayout.frameMaxWidth(this.windowWidth) })
+      .padding({ left: this.embedded ? StoreLayout.sidebarCardInset / StoreLayout.sidebarDetailScale : StoreLayout.inset(this.windowWidth),
+        right: this.embedded ? StoreLayout.sidebarCardInset / StoreLayout.sidebarDetailScale : StoreLayout.inset(this.windowWidth),
+        top: this.embedded ? this.embeddedTopInset / StoreLayout.sidebarDetailScale + 8 : this.statusBarInset + 72,
+        bottom: Math.max(28, this.navigationBottomInset + 16) })
+      .id('detail-information-skeleton').accessibilityText(I18n.t('正在读取应用信息'))
   }
 
-  build() {
-    Stack({ alignContent: Alignment.Center }) {
-    Column() {
+  @Builder
+  private detailPlaceholder() {
+          Column() {
       if (this.error.length > 0) {
         Column({ space: 12 }) {
-          Text('无法读取应用详情').fontSize(15).fontColor(this.colors().textSecondary)
+          Text(I18n.t('无法读取应用详情')).fontSize(15).fontColor(this.colors().textSecondary)
           Text(this.error).fontSize(12).fontColor(this.colors().textSecondary).textAlign(TextAlign.Center)
-          Button('重试').fontSize(14).backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
+          Button(I18n.t('重试')).fontSize(14).backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
             .id('detail-retry').onClick(() => this.loadApp())
-        }.padding(24).margin({ top: this.statusBarInset + 62 })
-      } else if (!this.loaded) {
-        this.detailSkeleton()
+        }.padding(24).margin({ top: this.embedded ? this.embeddedTopInset / StoreLayout.sidebarDetailScale : this.statusBarInset + 62 })
       } else {
-        Stack({ alignContent: Alignment.Bottom }) {
+        this.detailSkeleton()
+      }
+          }.width('100%').height('100%')
+  }
+
+  @Builder
+  private detailArticle() {
           Scroll(this.detailScroller) {
             Column({ space: 16 }) {
               Column({ space: 12 }) {
                 Row({ space: 16 }) {
                   if (this.appIcon) {
                     Image(this.appIcon).width(74).height(74).borderRadius(20)
+                      .id('detail-app-icon').accessibilityDescription(I18n.t('长按保存原图'))
+                      .bindContextMenu(this.iconMenu, ResponseType.LongPress)
                   } else {
-                    Text(this.appTitle().substring(0, 1) || '应')
+                    Text(this.appTitle().substring(0, 1) || I18n.t('应'))
                       .fontSize(28).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
                       .width(74).height(74).textAlign(TextAlign.Center)
                       .backgroundColor(this.colors().surface).borderRadius(20)
@@ -1248,13 +1654,18 @@ struct Detail {
                   Column({ space: 7 }) {
                     CatalogAppTitle({ title: this.appTitle(), titleSize: 25, titleLines: 2,
                       version: this.selectedAsset.name.length === 0 ?
-                        (this.showPreviewReleases ? '暂无预览版本' : '暂无安装包') : this.selectedVersionLabel(),
+                        (this.showPreviewReleases ? I18n.t('暂无预览版本') : I18n.t('暂无安装包')) : this.selectedVersionLabel(),
                       color: this.colors().text, versionColor: this.colors().surface,
                       versionBackground: this.colors().text })
                     Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(6), cross: LengthMetrics.vp(6) } }) {
-                      Text(this.app.category).fontSize(11).fontWeight(FontWeight.Medium)
+                      Text(I18n.category(this.app.category)).fontSize(11).fontWeight(FontWeight.Medium)
                         .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
                         .backgroundColor(this.colors().surface).borderRadius(8).maxLines(1)
+                      ForEach(this.selectedDeviceLabels(), (label: string) => {
+                        Text(label).fontSize(11).fontWeight(FontWeight.Medium)
+                          .fontColor(this.colors().accent).padding({ left: 9, right: 9, top: 5, bottom: 5 })
+                          .backgroundColor(this.colors().surface).borderRadius(8).maxLines(1)
+                      }, (label: string) => label)
                     }.width('100%')
                   }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                 }.width('100%')
@@ -1263,7 +1674,7 @@ struct Detail {
                     .lineHeight(20).maxLines(2).width('100%')
                 }
                 Row({ space: 8 }) {
-                  Text('由 ' + this.app.publisherName + ' 上架').fontSize(12)
+                  Text(I18n.t('由 ') + this.app.publisherName + I18n.t(' 上架')).fontSize(12)
                     .fontColor(this.colors().textSecondary).maxLines(1)
                     .constraintSize({ maxWidth: '50%' })
                   Text(this.packageSizeLabel()).fontSize(12).fontColor(this.colors().textSecondary)
@@ -1274,8 +1685,20 @@ struct Detail {
               }.alignItems(HorizontalAlign.Start).width('100%')
                 .padding(18)
                 .backgroundColor(this.heroColor.length > 0 ? this.heroColor : this.colors().hero)
-                .borderRadius(StoreLayout.heroRadius)
+                .borderRadius(StoreLayout.cardRadius)
+              if(this.deviceRows().length>1){
+                Column({space:14}){
+                  Row(){
+                    Text(I18n.t('多设备安装')).fontSize(14).fontWeight(FontWeight.Medium).fontColor(this.colors().text).layoutWeight(1)
+                    Text(this.deviceRows().filter((row)=>row.job.stage===InstallStage.INSTALLED||row.job.stage===InstallStage.SKIPPED).length+'/'+this.deviceRows().length).fontSize(12).fontColor(this.colors().accent)
+                  }.width('100%')
+                  DeviceInstallProgress({rows:this.deviceRows(),darkSurface:this.embedded && this.embeddedStarfield,
+                    onAction:(job:InstallJob)=>this.resumeInstall(job.id)})
+                }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+              }
               // 来源仓库卡片：平台徽章按仓库地址识别，不写死 GitHub
+              Text(I18n.t('仓库介绍')).fontSize(18).fontWeight(FontWeight.Bold)
+                .fontColor(this.colors().text).width('100%')
               Row({ space: 10 }) {
                 Text(this.repoHostLabel()).fontSize(11).fontWeight(FontWeight.Medium)
                   .fontColor(this.colors().textSecondary).padding({ left: 6, right: 6, top: 4, bottom: 4 })
@@ -1286,11 +1709,11 @@ struct Detail {
                   .fontColor([this.colors().textSecondary])
               }.width('100%').padding(14).constraintSize({ minHeight: 52 })
                 .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
-                .accessibilityText('来源仓库 ' + this.repoPath() + '，在浏览器打开')
+                .accessibilityText(I18n.t('来源仓库 ') + this.repoPath() + I18n.t('，在浏览器打开'))
                 .onClick(() => this.openRepo())
               if (this.app.secondaryRepo.length > 0) {
                 Row({ space: 9 }) {
-                  Text('子仓').fontSize(11).fontColor(this.colors().accent)
+                  Text(I18n.t('子仓')).fontSize(11).fontColor(this.colors().accent)
                     .padding({ left: 7, right: 7, top: 4, bottom: 4 })
                     .backgroundColor(this.colors().accentSoft).borderRadius(7)
                   Text(this.app.secondaryRepo).fontSize(13).fontColor(this.colors().text)
@@ -1301,22 +1724,31 @@ struct Detail {
                   .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
                   .onClick(() => this.openSecondaryRepo())
               }
+              RepositoryReadmeCard({ appId: this.app.id, darkSurface: this.embedded && this.embeddedStarfield })
               Row({ space: 8 }) {
-                Text('版本记录').fontSize(18).fontWeight(FontWeight.Bold)
+                Text(I18n.t('版本记录')).fontSize(18).fontWeight(FontWeight.Bold)
                   .fontColor(this.colors().text).layoutWeight(1)
                 this.releaseChannelSelector()
+                if (this.embedded) {
+                  StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: I18n.t('检查更新'),
+                    darkSurface: this.embeddedStarfield,
+                    controlSize: 36, active: !this.refreshBusy && !this.releaseMoreBusy,
+                    action: () => this.refreshPage() })
+                }
               }.width('100%').alignItems(VerticalAlign.Center)
               if (!this.currentRelease()) {
                 Row({ space: 8 }) {
                   if (this.releaseLoading) LoadingProgress().width(16).height(16).color(this.colors().textTertiary)
                   Text(this.releaseMessage.length > 0 ? this.releaseMessage :
-                    (this.showPreviewReleases ? '暂无预览版本' : '暂无正式版本'))
+                    (this.showPreviewReleases ? I18n.t('暂无预览版本') : I18n.t('暂无正式版本')))
                     .fontSize(13).fontColor(this.colors().textSecondary).layoutWeight(1)
                 }.width('100%').padding({ top: 8, bottom: 12 })
               }
               if (this.currentRelease()) {
                 // 独立选择框与更新说明卡片同宽，主题由 StoreSelect 统一处理。
                 StoreSelect({ options: this.releaseOptions(), selectedIndex: this.selectedReleaseIndex,
+                  darkSurface: this.embedded && this.embeddedStarfield,
+                  cornerRadius: StoreLayout.cardRadius,
                   selectedValue: this.currentReleaseLabel(), controlId: 'release-history-select',
                   action: (index: number) => this.selectRelease(index) }).width('100%')
                 Column({ space: 11 }) {
@@ -1324,11 +1756,12 @@ struct Detail {
                     Text(this.displayNotes(this.currentRelease()!.notes, this.currentRelease()!.name))
                       .fontSize(11).fontColor(this.colors().textBody)
                       .lineHeight(18)
-                      .maxLines(this.expandedReleaseTag === this.currentRelease()!.identity() ? 80 : 3)
+                      .maxLines(this.expandedReleaseTag === this.currentRelease()!.identity() ? 80 : 9)
                       .width('100%')
                     if (this.displayNotes(this.currentRelease()!.notes,
-                      this.currentRelease()!.name).length > 125) {
-                      Text(this.expandedReleaseTag === this.currentRelease()!.identity() ? '收起' : '展开更新内容')
+                      this.currentRelease()!.name).length > 375 || this.displayNotes(this.currentRelease()!.notes,
+                      this.currentRelease()!.name).split('\n').length > 9) {
+                      Text(this.expandedReleaseTag === this.currentRelease()!.identity() ? I18n.t('收起') : I18n.t('展开更新内容'))
                         .fontSize(11).fontColor(this.colors().accent)
                         .onClick(() => {
                           this.expandedReleaseTag =
@@ -1341,7 +1774,7 @@ struct Detail {
                   ForEach(this.currentRelease()!.assets, (asset: HapAsset) => {
                     Row({ space: 10 }) {
                       Text(this.selectedAsset.url === asset.url &&
-                        this.selectedAsset.name === asset.name ? '✓' : '选择')
+                        this.selectedAsset.name === asset.name ? '✓' : I18n.t('选择'))
                         .fontSize(10).fontColor(this.selectedAsset.url === asset.url &&
                         this.selectedAsset.name === asset.name ? this.colors().accent : this.colors().textTertiary)
                       Text(asset.name).fontSize(12).fontColor(this.colors().textBody)
@@ -1350,7 +1783,7 @@ struct Detail {
                       .backgroundColor(this.selectedAsset.url === asset.url &&
                         this.selectedAsset.name === asset.name ? this.colors().accentSoft : this.colors().fill)
                       .borderRadius(10)
-                      .onClick(() => { this.selectedAsset = asset; this.syncInstallTask(); this.refreshInstalledVersion(); })
+                      .onClick(() => { this.explicitSelection = true; this.selectedAsset = asset; this.syncInstallTask(); this.refreshInstalledVersion(); })
                   }, (asset: HapAsset) => asset.name)
                   }
                   // 版本按服务端分页续取，避免只看到第一页就以为没有旧版本。
@@ -1371,9 +1804,9 @@ struct Detail {
                   .border({ width: 0.5, color: this.colors().border })
               }
               Row() {
-                Text('用户评价').fontSize(18).fontWeight(FontWeight.Bold)
+                Text(I18n.t('用户评价')).fontSize(18).fontWeight(FontWeight.Bold)
                   .fontColor(this.colors().text).layoutWeight(1)
-                Text(this.reviewPageBusy && this.reviewPage === 0 ? '读取中…' : this.reviewTotal + ' 条')
+                Text(this.reviewPageBusy && this.reviewPage === 0 ? I18n.t('读取中…') : this.reviewTotal + I18n.t(' 条'))
                   .fontSize(11).fontColor(this.colors().textTertiary)
               }.width('100%')
               // 应用总分：服务端详情接口返回 rating:{average,count}
@@ -1384,7 +1817,7 @@ struct Detail {
                     .fontSize(34).fontWeight(FontWeight.Bold)
                     .fontColor(this.app.ratingCount > 0 ? this.colors().accent : this.colors().textTertiary)
                   Text(this.app.ratingCount > 0 ?
-                    this.app.ratingCount + ' 条评分' : '还没有评分')
+                    this.app.ratingCount + I18n.t(' 条评分') : I18n.t('还没有评分'))
                     .fontSize(11).fontColor(this.colors().textTertiary)
                 }.alignItems(HorizontalAlign.Start)
                 Column({ space: 4 }) {
@@ -1394,7 +1827,7 @@ struct Detail {
                         .fontSize(15).fontColor(this.colors().star)
                     }, (slot: number) => String(slot))
                   }
-                  Text('满分 5 分').fontSize(10).fontColor(this.colors().textTertiary)
+                  Text(I18n.t('满分 5 分')).fontSize(10).fontColor(this.colors().textTertiary)
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
               }.width('100%').padding(14)
                 .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
@@ -1403,13 +1836,13 @@ struct Detail {
                 if (!this.reviewComposeOpen) {
                   Button({ type: ButtonType.Normal }) {
                     Row({ space: 9 }) {
-                      Text('写下你的使用感受…').fontSize(12)
+                      Text(I18n.t('写下你的使用感受…')).fontSize(12)
                         .fontColor(this.colors().textTertiary).layoutWeight(1).maxLines(1)
-                      Text('✎ 写评价').fontSize(12).fontColor(this.colors().accent)
+                      Text(I18n.t('✎ 写评价')).fontSize(12).fontColor(this.colors().accent)
                     }.width('100%').height(44).padding({ left: 13, right: 13 })
                   }.width('100%').height(44).padding(0)
                     .backgroundColor(this.colors().fill).borderRadius(11).stateEffect(true)
-                    .accessibilityText('写评价')
+                    .accessibilityText(I18n.t('写评价'))
                     .onClick(() => { this.reviewComposeOpen = true; })
                 } else {
                   Row({ space: 3 }) {
@@ -1418,18 +1851,18 @@ struct Detail {
                         Text(star <= this.reviewStars ? '★' : '☆').fontSize(26).fontColor(this.colors().star)
                     }.width(44).height(44).padding(0).backgroundColor('#00000000')
                       .enabled(!this.reviewBusy)
-                        .accessibilityText('评 ' + star + ' 星')
+                        .accessibilityText(I18n.t('评 ') + star + I18n.t(' 星'))
                         .onClick(() => { this.reviewStars = star; })
                     }, (star: number) => String(star))
                   }.width('100%')
-                  TextArea({ placeholder: this.signedIn ? '写下你的使用感受' : '登录开发者账号后可评价',
+                  TextArea({ placeholder: this.signedIn ? I18n.t('写下你的使用感受') : I18n.t('登录开发者账号后可评价'),
                     text: this.reviewText })
                     .height(100).fontSize(14).backgroundColor(this.colors().fill).borderRadius(14)
                     .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
                     .caretColor(this.colors().accent)
                     .enabled(!this.reviewBusy)
                     .onChange((value: string) => { this.reviewText = value; })
-                  Button(this.reviewBusy ? '提交中…' : '发布评价')
+                  Button(this.reviewBusy ? I18n.t('提交中…') : I18n.t('发布评价'))
                     .height(44).width('100%').fontSize(13).borderRadius(14)
                     .backgroundColor(this.colors().accentSoft).fontColor(this.colors().accent)
                     .enabled(!this.reviewBusy)
@@ -1438,7 +1871,7 @@ struct Detail {
                     Text(this.reviewMessage).fontSize(11).fontColor(this.colors().textSecondary)
                       .width('100%').maxLines(3)
                   }
-                  Button('收起').height(44).fontSize(12).fontColor(this.colors().textSecondary)
+                  Button(I18n.t('收起')).height(44).fontSize(12).fontColor(this.colors().textSecondary)
                     .backgroundColor(this.colors().fill).borderRadius(14)
                     .enabled(!this.reviewBusy)
                     .onClick(() => { this.reviewComposeOpen = false; })
@@ -1460,7 +1893,7 @@ struct Detail {
                         if (review.avatarUrl.length > 0) {
                           Image(review.avatarUrl).width(36).height(36).borderRadius(18)
                         } else {
-                          Text(review.displayName.length > 0 ? review.displayName.substring(0, 1) : '华')
+                          Text(review.displayName.length > 0 ? review.displayName.substring(0, 1) : I18n.t('华'))
                             .fontSize(14).fontColor(this.colors().accent).width(36).height(36)
                             .textAlign(TextAlign.Center).backgroundColor(this.colors().accentSoft).borderRadius(18)
                         }
@@ -1471,6 +1904,15 @@ struct Detail {
                             .fontSize(10).fontColor(this.colors().textTertiary).maxLines(1)
                         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                         Text('★'.repeat(review.stars)).fontSize(11).fontColor(this.colors().star)
+                        if (review.canDelete && this.signedIn) {
+                          Button({ type: ButtonType.Circle }) {
+                            SymbolGlyph($r('sys.symbol.trash')).fontSize(14).fontColor([this.colors().textTertiary])
+                          }.width(32).height(32).padding(0).backgroundColor(Color.Transparent)
+                            .id('review-delete-' + review.id).accessibilityText(I18n.t('删除我的评论'))
+                            .enabled(!this.reviewDeleteBusy && !this.reviewBusy && !this.reviewPageBusy &&
+                              (!this.embedded || this.embeddedVisible))
+                            .onClick(() => this.removeOwnReview(review))
+                        }
                       }.width('100%')
                       Text(review.body).fontSize(13).fontColor(this.colors().textBody)
                         .lineHeight(21).width('100%')
@@ -1483,7 +1925,7 @@ struct Detail {
                   // 分页条：翻页直接向服务端要第 N 页，不再对第一页做本地切片
                   if (this.reviewPageCount() > 1) {
                     Row({ space: 6 }) {
-                      Text('上一页')
+                      Text(I18n.t('上一页'))
                         .fontSize(12)
                         .fontColor(this.reviewPage > 1 ? this.colors().accent : this.colors().textTertiary)
                         .padding({ left: 10, right: 10, top: 6, bottom: 6 })
@@ -1491,7 +1933,7 @@ struct Detail {
                       Text(this.reviewPage + ' / ' + this.reviewPageCount())
                         .fontSize(12).fontColor(this.colors().textSecondary)
                         .layoutWeight(1).textAlign(TextAlign.Center)
-                      Text('下一页')
+                      Text(I18n.t('下一页'))
                         .fontSize(12)
                         .fontColor(this.reviewPage < this.reviewPageCount() ?
                           this.colors().accent : this.colors().textTertiary)
@@ -1502,37 +1944,86 @@ struct Detail {
                 }.width('100%').padding({ left: 14, right: 14, top: 2, bottom: 6 })
                   .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
               }
-            }.width('100%').constraintSize({ maxWidth: StoreLayout.contentWidth + 40 })
-              .padding({ left: 20, right: 20, top: this.statusBarInset + 68, bottom: 115 })
-          }.width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Off)
+            }.width('100%').constraintSize({ maxWidth: this.embedded ? '100%' : StoreLayout.frameMaxWidth(this.windowWidth) })
+              .padding({ left: this.embedded ? StoreLayout.sidebarCardInset / StoreLayout.sidebarDetailScale : StoreLayout.inset(this.windowWidth),
+                right: this.embedded ? StoreLayout.sidebarCardInset / StoreLayout.sidebarDetailScale : StoreLayout.inset(this.windowWidth),
+                top: this.embedded ? this.embeddedTopInset / StoreLayout.sidebarDetailScale + 8 : this.statusBarInset + 68,
+                bottom: this.embedded ? (StoreLayout.navigationHeight + StoreLayout.navigationBottomMargin + 16) /
+                  StoreLayout.sidebarDetailScale : 95 + Math.max(20, this.navigationBottomInset + 8) })
+          }.width('100%').height('100%')
+            .align(Alignment.TopStart).scrollBar(BarState.Off)
             .onDidScroll(() => {
+              if (this.embedded || this.disposed) return;
+              const offset = this.detailScroller.currentOffset();
               const progress = Math.min(1, Math.max(0,
-                this.detailScroller.currentOffset().yOffset / StoreTopStyle.scrollDistance));
+                (offset?.yOffset ?? 0) / StoreTopStyle.scrollDistance));
               this.detailTopBlurOpacity = progress * progress * (3 - 2 * progress);
             })
+  }
+
+  build() {
+    WithTheme({ colorMode: this.darkMode || (this.embedded && this.embeddedStarfield) ? ThemeColorMode.DARK : ThemeColorMode.LIGHT }) {
+    Stack({ alignContent: Alignment.Center }) {
+    Column() {
+      if (this.error.length > 0 || !this.loaded) {
+        ScaledArticle({ sceneScale: this.embedded ? StoreLayout.sidebarDetailScale : 1, content: (): void => this.detailPlaceholder()
+        }).width('100%').height('100%').layoutWeight(1)
+      } else {
+        Stack({ alignContent: this.embedded ? Alignment.TopStart : Alignment.Bottom }) {
+          ScaledArticle({ sceneScale: this.embedded ? StoreLayout.sidebarDetailScale : 1, content: (): void => this.detailArticle()
+          }).width('100%').height('100%')
+          if (this.embedded) {
+            if (this.headerVisible && !this.showReconnect && !this.showCertificatePrompt) {
+              this.sidebarInstallDock()
+            }
+          } else {
           Column({ space: 7 }) {
             StoreImmersiveAction({ visible: this.headerVisible && !this.showReconnect && !this.showCertificatePrompt,
-              tint: this.colors().accent, backAction: () => { this.onBackPress(); },
+              tint: this.colors().accent, followsTarget: this.embedded, backAction: () => {
+                if (this.embedded) this.onEmbeddedBack(); else this.onBackPress();
+              },
               content: (immersive: boolean): void => this.installActionContent(immersive) })
-          }.width('calc(100% - 48vp)').constraintSize({ maxWidth: 560 }).margin({ bottom: 20 })
+          }.width('calc(100% - ' + StoreLayout.inset(this.windowWidth) * 2 + 'vp)')
+            .constraintSize({ maxWidth: this.windowWidth > StoreLayout.frameMaxWidth(this.windowWidth) ?
+              StoreLayout.contentWidth : 560 })
+            .margin({ bottom: Math.max(20, this.navigationBottomInset + 8) })
             .backgroundColor('#00000000')
+          }
         }.layoutWeight(1).width('100%')
       }
-    }.width('100%').height('100%').backgroundColor(this.colors().bg)
-    this.detailHeader()
-    if (this.showReconnect) {
+    }.width('100%').height('100%').backgroundColor(this.embedded ? Color.Transparent : this.colors().bg)
+    if (!this.embedded) { this.detailHeader() }
+    if(this.showMultiDevice){
+          MultiDeviceDialog({expectedUdid:this.reconnectExpectedUdid(),onClose:()=>this.closeMultiDevice(),onConnected:(target:DeviceInstallTarget)=>this.resumeRemoteTarget(target)})
+        }
+        if (this.showReconnect) {
       Column() { this.reconnectSheet() }
         .height('100%').width('100%').justifyContent(FlexAlign.Center)
         .backgroundColor(this.colors().scrim)
         .transition(TransitionEffect.opacity(0))
     }
-    InstallCertificatePrompt({ active: this.pageVisible, showing: this.showCertificatePrompt,
-      dismissRequest: this.certificatePromptDismiss })
-    }.width('100%').height('100%').backgroundColor(this.colors().bg)
+    if (!this.embedded) {
+      InstallCertificatePrompt({ active: this.pageVisible, showing: this.showCertificatePrompt,
+        dismissRequest: this.certificatePromptDismiss })
+      InstallAccountPrompt({ active: this.pageVisible, showing: this.showAccountPrompt,
+        dismissRequest: this.accountPromptDismiss })
+    }
+    }.width('100%').height('100%').backgroundColor(this.embedded ? Color.Transparent : this.colors().bg)
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+    }
   }
 
+ }
+
+@Entry
+@Component
+struct DetailPage {
+  private controller: CatalogDetailController = new CatalogDetailController();
+  onPageShow(): void { this.controller.show(); }
+  onPageHide(): void { this.controller.hide(); }
+  onBackPress(): boolean { return this.controller.back(); }
+  build() { Stack() { Detail({ controller: this.controller }) }.width('100%').height('100%') }
   pageTransition() {
     PageTransitionEnter(StorePageMotion.options(RouteType.Push)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
     PageTransitionEnter(StorePageMotion.stationary(RouteType.Pop)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })

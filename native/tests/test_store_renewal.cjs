@@ -103,18 +103,18 @@ test('an ordinary update in flight cannot be replaced by renewal', async () => {
 });
 test('Management and application information retain a confirmed online renewal source when catalog identity is incomplete', () => {
   const source=fs.readFileSync(path.join(root,'pages/Index.ets'),'utf8');
-  const methods=['renewalAppId','renewInstalled','openRenewal','pendingRenewal','renewalButtonLabel','openJobDetails'].map(name=>{
+  const methods=['renewalAppId','renewInstalled','openRenewal','pendingRenewal','renewalInProgress','renewalButtonLabel','openInstalledInformation'].map(name=>{
     const start=source.search(new RegExp('^  private '+name+'\\(', 'm'));
     assert.notEqual(start,-1);return source.slice(start,source.indexOf('\n  }',start)+4);
   });
   let dialog;
-  const routes=[],box={AlertDialog:{show:options=>dialog=options},InstallStage:jobs.InstallStage,InstalledInspection:{selection:(job,title,appId)=>({bundleName:job.bundleName,title,appId})},
+  const routes=[],box={AlertDialog:{show:options=>dialog=options},InstallStage:jobs.InstallStage,InstalledAppRegistry:{installationTime:()=>0,signingIdentity:()=>undefined},InstalledInspection:{selection:(job,title,appId)=>({bundleName:job.bundleName,title,appId})},
     StorePageMotion:{pushUrl:args=>routes.push(args)}};
   vm.runInNewContext(ts.transpileModule('class Page { '+methods.join('\n')+' };globalThis.Page=Page;',{
     compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
-  const ui=new box.Page();Object.assign(ui,{catalogForJob:()=>undefined,currentInstalledView:job=>job,jobTitle:()=> 'title',jobIcon:()=>undefined,pendingJobs:[],renewalPreparing:[]});
+  const ui=new box.Page();Object.assign(ui,{catalogForJob:()=>undefined,currentInstalledView:job=>job,versionLabel:job=>job.versionName,jobTitle:()=> 'title',jobIcon:()=>undefined,pendingJobs:[],renewalPreparing:[]});
   ui.allInstalledJobs=()=>[job];
-  const job=old();ui.renewInstalled(job);ui.openJobDetails(job);
+  const job=old();ui.renewInstalled(job);ui.openInstalledInformation(job);
   assert.equal(routes.length,1,'opening the renewal choice does not enqueue or navigate');
   assert.equal(JSON.parse(routes[0].params.selection).appId,1);
   assert.deepEqual(Array.from(dialog.buttons,b=>b.value),['商店自动续签','自选 HAP 包续签','取消']);
@@ -137,12 +137,13 @@ test('an installed card remains available for reopening a renewal while ordinary
   const source=fs.readFileSync(path.join(root,'pages/Index.ets'),'utf8');
   const start=source.indexOf('  private managementInstalledJobs(');
   const method=source.slice(start,source.indexOf('\n  }',start)+4);
-  const box={};
+  const box={ManagementSort:require('./load_ets.cjs').loadEts('data/ManagementSort').ManagementSort,InstalledAppRegistry:{signingIdentity:()=>undefined},ReleaseUpdate:{completedAt:job=>job.updatedAt||0}};
   vm.runInNewContext(ts.transpileModule('class Page { '+method+' };globalThis.Page=Page;',{
     compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
   const page=new box.Page(),installed=old();
   Object.assign(page,{installedLocalOnly:false,allInstalledJobs:()=>[installed],
     renewalDeadline:()=>1800000000,
+    catalogForJob:()=>page.updateApps()[0],
     updateApps:()=>[{id:1}],installedAssets:()=>[{bundleName:installed.bundleName}],updateFor:()=>undefined,
     pendingJobs:[{...installed,stage:jobs.InstallStage.WAITING_CONFIRMATION,renewalRequestedAt:123}]});
   assert.equal(page.managementInstalledJobs().length,1);

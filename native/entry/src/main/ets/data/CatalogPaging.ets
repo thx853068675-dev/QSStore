@@ -3,7 +3,7 @@ import { DiscoverSort } from './DiscoverSort';
 
 /** Filter and order only a verified complete catalog. */
 export function filterCatalogCategory(catalog: CatalogApp[], category: string,
-  sort: string = 'discover', direction: string = 'desc'): CatalogApp[] {
+  sort: string = 'stars', direction: string = 'desc'): CatalogApp[] {
   return catalog.filter((app: CatalogApp) => app.category.trim() === category.trim())
     .sort((a: CatalogApp, b: CatalogApp) => DiscoverSort.compare(a, b, sort, direction));
 }

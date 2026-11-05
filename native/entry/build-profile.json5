@@ -9,7 +9,14 @@
   },
   "buildOptionSet": [{
     "name": "release",
-    "arkOptions": { "obfuscation": { "ruleOptions": { "enable": false } } }
+    "arkOptions": {
+      "obfuscation": {
+        "ruleOptions": {
+          "enable": true,
+          "files": ["./obfuscation-rules.txt", "./obfuscation-contracts.txt"]
+        }
+      }
+    }
   }],
   "targets": [{ "name": "default" }]
 }

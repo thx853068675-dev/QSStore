@@ -1,0 +1,5 @@
+{
+  "baseUrl": "https://store.example.invalid",
+  "publicKeySha256": "BASE64_SHA256_OF_YOUR_SERVER_PUBLIC_KEY",
+  "caFile": "/path/to/your/store-ca.crt"
+}

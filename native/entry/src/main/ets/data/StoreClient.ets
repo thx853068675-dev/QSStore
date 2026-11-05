@@ -1,3 +1,4 @@
+import { FollowedApp,FollowChange } from './Following';
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { http } from '@kit.NetworkKit';
@@ -11,6 +12,10 @@ import { AccountService } from './AccountService';
 import { ServiceFailure } from './ServiceFailure';
 import { FailureKind } from '../jobs/InstallJob';
 import { SubmitDraft, AppReview } from './StoreActions';
+import { PrivacyConsent } from './PrivacyConsent';
+import { CloudBackupConsent } from './CloudBackupConsent';
+import { I18n } from './I18n';
+import { StoreBuildConfig } from './StoreBuildConfig';
 
 class PrepareBody { repo_url: string = ''; }
 class ConfirmBody {
@@ -41,6 +46,25 @@ class EmptyBody { }
  */
 class RefreshStaleBody {
   app_ids: number[] = [];
+}
+
+export class UpdatePushWatchItem {
+  app_id: number = 0;
+  bundle_name: string = '';
+  version_code: number = 0;
+}
+
+class FollowingBody { changes:FollowChange[]=[]; }
+
+class UpdatePushBody {
+  deep_link:boolean=false;
+  client_id: string = '';
+  nickname: string = '';
+  subscription: string = '';
+  code: string = '';
+  enabled: boolean = false;
+  include_prerelease: boolean = false;
+  items: UpdatePushWatchItem[] = [];
 }
 
 /// Server page size ceilings: /apps caps page_size at 100, /releases and
@@ -76,10 +100,40 @@ function numberField(row: Record<string, Object>, key: string, fallback: number)
   return Number.isFinite(value) ? value : fallback;
 }
 
+export class ReviewPage extends ListPage<AppReview> {
+  ratingCount: number = 0;
+  ratingAverage: number = 0;
+  static fromJson(data: Record<string, Object>, page: number, pageSize: number): ReviewPage {
+    const result = new ReviewPage();
+    const rows = data['items'] as Array<Record<string, Object>> | undefined;
+    result.items = (rows ?? []).map((row: Record<string, Object>) => AppReview.fromJson(row));
+    result.total = numberField(data, 'total', result.items.length);
+    result.page = numberField(data, 'page', page);
+    result.pageSize = numberField(data, 'page_size', pageSize);
+    const summary = data['summary'] as Record<string, Object> | undefined;
+    result.ratingCount = summary ? numberField(summary, 'count', result.total) : result.total;
+    result.ratingAverage = summary ? numberField(summary, 'average', 0) : 0;
+    return result;
+  }
+}
+
 export class BackedUpIdentity {
   revision: number = 0;
   certId: string = '';
   privateKeyPem: string = '';
+}
+
+export class RepositoryReadme {
+  found: boolean = false;
+  html: string = '';
+  sourceUrl: string = '';
+  static fromJson(data: Record<string, Object>): RepositoryReadme {
+    const value = new RepositoryReadme();
+    value.found = data['found'] === true;
+    value.html = String(data['html'] ?? '');
+    value.sourceUrl = String(data['source_url'] ?? '');
+    return value;
+  }
 }
 
 /// The server uses a self-signed certificate. Trusting only the bundled
@@ -131,19 +185,20 @@ export class StoreClient implements RenewalCatalog {
     }
   }
 
-  private static readonly BASE_URL = 'https://47.98.250.230';
-  private static readonly PUBLIC_KEY_SHA256 = '1z7Q/bXjcnfeell5HUKRCLRP1E8u1rJHMJYRN3PI3Lo=';
+  private static readonly BASE_URL = StoreBuildConfig?.baseUrl ?? 'https://store.example.invalid';
+  private static readonly PUBLIC_KEY_SHA256 = StoreBuildConfig?.publicKeySha256 ?? '';
   private caData: string;
   private context: common.UIAbilityContext;
 
   constructor(context: common.UIAbilityContext) {
     this.context = context;
-    const bytes = context.resourceManager.getRawFileContentSync('store-ca.crt');
-    this.caData = new util.TextDecoder('utf-8').decodeToString(bytes);
+    if (!StoreBuildConfig?.configured) throw new Error(I18n.t('此构建未配置商店服务'));
+    this.caData = StoreBuildConfig.caData;
   }
 
   private async requestData(path: string, method: http.RequestMethod,
     account?: DeveloperAccount, body?: Object, retried: boolean = false): Promise<Record<string, Object>> {
+    PrivacyConsent.assertBusinessAllowed();
     const request = http.createHttp();
     const epoch = StoreClient.responseEpoch;
     try {
@@ -152,7 +207,7 @@ export class StoreClient implements RenewalCatalog {
       if (cached?.etag) headers['If-None-Match'] = cached.etag;
       if (account) {
         if (account.jwtToken.length === 0 || account.accessToken.length === 0) {
-          throw new ServiceFailure(FailureKind.ACCOUNT, '请先登录华为开发者账号', 401);
+          throw new ServiceFailure(FailureKind.ACCOUNT, I18n.t('请先登录华为开发者账号'), 401);
         }
         headers['Authorization'] = 'Bearer ' + account.jwtToken;
         headers['X-Huawei-Access-Token'] = account.accessToken;
@@ -174,29 +229,41 @@ export class StoreClient implements RenewalCatalog {
         maxLimit: 2 * 1024 * 1024
       };
       if (body) options.extraData = JSON.stringify(body);
+      if (path.startsWith('/api/v1/signing-identity') && account &&
+        !await CloudBackupConsent.allowed(this.context, account)) {
+        throw new Error(I18n.t('云备份未启用，本机签名材料已保留'));
+      }
+      PrivacyConsent.assertBusinessAllowed();
+      if (path.startsWith('/api/v1/signing-identity') && account &&
+        !CloudBackupConsent.isAllowedNow(this.context, account)) {
+        throw new Error(I18n.t('云备份已停用，本机签名材料已保留'));
+      }
       const response = await request.request(StoreClient.BASE_URL + path, options);
+      PrivacyConsent.assertBusinessAllowed();
       if (response.responseCode === 304 && cached) {
         if (epoch === StoreClient.responseEpoch) cached.receivedAt = Date.now();
         return cached.data;
       }
       if (response.responseCode === 401 && account && !retried) {
+        PrivacyConsent.assertBusinessAllowed();
         AccountService.configure(this.context);
         await AccountService.refresh(account, true);
+        PrivacyConsent.assertBusinessAllowed();
         return this.requestData(path, method, account, body, true);
       }
       if (typeof response.result !== 'string') {
-        throw new Error('商店服务响应格式无效');
+        throw new Error(I18n.t('商店服务响应格式无效'));
       }
       const envelope = JSON.parse(response.result) as Record<string, Object>;
       if (envelope['ok'] !== true) {
         const error = envelope['error'] as Record<string, Object> | undefined;
         throw new ServiceFailure(response.responseCode === 401 ? FailureKind.ACCOUNT :
           response.responseCode === 403 ? FailureKind.INTERNAL : FailureKind.NETWORK,
-          String(error?.['message'] ?? '商店服务暂不可用') +
+          String(error?.['message'] ?? I18n.t('商店服务暂不可用')) +
           (error?.['hint'] ? ' · ' + String(error['hint']) : ''), response.responseCode);
       }
       if (response.responseCode < 200 || response.responseCode >= 300) {
-        throw new Error('商店服务返回 ' + response.responseCode);
+        throw new Error(I18n.t('商店服务返回 ') + response.responseCode);
       }
       const data = envelope['data'] as Record<string, Object>;
       if (!account && method === http.RequestMethod.GET && epoch === StoreClient.responseEpoch) {
@@ -230,6 +297,68 @@ export class StoreClient implements RenewalCatalog {
     return read;
   }
 
+  async following(account:DeveloperAccount,changes:FollowChange[]=[]):Promise<FollowedApp[]>{
+    const body=new FollowingBody();body.changes=changes;
+    const data=changes.length?await this.requestData('/api/v1/me/following',http.RequestMethod.POST,account,body):await this.getData('/api/v1/me/following',account);
+    const rows=data['items'] as Array<Record<string,Object>>;
+    return (Array.isArray(rows)?rows:[]).slice(0,200).map((row:Record<string,Object>)=>FollowedApp.fromJson(row));
+  }
+
+  async updatePushState(account: DeveloperAccount, clientId: string): Promise<Record<string, Object>> {
+    return this.getData('/api/v1/me/update-push?client_id=' + encodeURIComponent(clientId), account);
+  }
+
+  async webPushPublicKey(): Promise<Record<string, Object>> {
+    return this.getData('/api/v1/push/vapid-key');
+  }
+
+  async webPushChallenge(account: DeveloperAccount, clientId: string,
+    subscription: string): Promise<Record<string, Object>> {
+    const body = new UpdatePushBody(); body.client_id = clientId; body.subscription = subscription;
+    return this.requestData('/api/v1/me/update-push/webpush-challenge', http.RequestMethod.POST, account, body);
+  }
+
+  async webPushConfirm(account: DeveloperAccount, clientId: string,
+    code: string): Promise<Record<string, Object>> {
+    const body = new UpdatePushBody(); body.client_id = clientId; body.code = code;
+    return this.requestData('/api/v1/me/update-push/webpush-confirm', http.RequestMethod.POST, account, body);
+  }
+
+  async updatePushChallenge(account: DeveloperAccount, clientId: string,
+    nickname: string): Promise<Record<string, Object>> {
+    const body = new UpdatePushBody(); body.client_id = clientId; body.nickname = nickname;
+    return this.requestData('/api/v1/me/update-push/challenge', http.RequestMethod.POST, account, body);
+  }
+
+  async updatePushConfirm(account: DeveloperAccount, clientId: string,
+    code: string): Promise<Record<string, Object>> {
+    const body = new UpdatePushBody(); body.client_id = clientId; body.code = code;
+    return this.requestData('/api/v1/me/update-push/confirm', http.RequestMethod.POST, account, body);
+  }
+
+  async updatePushPreferences(account: DeveloperAccount, clientId: string,
+    enabled: boolean): Promise<Record<string, Object>> {
+    const body = new UpdatePushBody(); body.client_id = clientId;
+    body.enabled = enabled; body.include_prerelease = true;
+    return this.requestData('/api/v1/me/update-push/preferences', http.RequestMethod.POST, account, body);
+  }
+
+  async updatePushWatchlist(account: DeveloperAccount, clientId: string,
+    items: UpdatePushWatchItem[]): Promise<Record<string, Object>> {
+    const body = new UpdatePushBody(); body.client_id = clientId; body.items = items; body.deep_link=true;
+    return this.requestData('/api/v1/me/update-push/watchlist', http.RequestMethod.POST, account, body);
+  }
+
+  async updatePushTest(account: DeveloperAccount, clientId: string): Promise<Record<string, Object>> {
+    const body = new UpdatePushBody(); body.client_id = clientId;
+    return this.requestData('/api/v1/me/update-push/test', http.RequestMethod.POST, account, body);
+  }
+
+  async updatePushRemove(account: DeveloperAccount, clientId: string): Promise<Record<string, Object>> {
+    return this.requestData('/api/v1/me/update-push?client_id=' + encodeURIComponent(clientId)+'&account_scope=1',
+      http.RequestMethod.DELETE, account);
+  }
+
   /// ``page`` is 1-based. ``discover`` ranks featured apps before pagination.
   /// Other orders: updated/stars/name/new.
   /// ``query`` 走服务端搜索：只过滤本地已加载的那一页会漏掉没加载的应用。
@@ -259,10 +388,24 @@ export class StoreClient implements RenewalCatalog {
     return result;
   }
 
-  async appDetail(id: number): Promise<CatalogApp> {
-    const app = CatalogApp.fromJson(await this.getData('/api/v1/apps/' + id, undefined, 30000));
-    StoreClient.viewedApps.set(id, CatalogApp.copy(app));
-    if (StoreClient.viewedApps.size > 32) StoreClient.viewedApps.delete(Array.from(StoreClient.viewedApps.keys())[0]);
+  async repositoryReadme(id: number, forceRefresh: boolean = false): Promise<RepositoryReadme> {
+    return RepositoryReadme.fromJson(await this.getData('/api/v1/apps/' + id + '/readme',
+      undefined, forceRefresh ? 0 : 600000));
+  }
+
+  async appDetail(id: number, forceRefresh: boolean = false): Promise<CatalogApp> {
+    const epoch = StoreClient.responseEpoch;
+    const app = CatalogApp.fromJson(await this.getData('/api/v1/apps/' + id, undefined, forceRefresh ? 0 : 30000));
+    const previous = StoreClient.viewedApps.get(id);
+    const at = Number(app.updatedAt), previousAt = Number(previous?.updatedAt);
+    const known = Number.isFinite(at) && at > 0;
+    const previousKnown = Number.isFinite(previousAt) && previousAt > 0;
+    // 请求缓存已失效时，迟到结果仍可返回给原调用方，但不能回灌已更新的列表。
+    if (epoch === StoreClient.responseEpoch && (previous === undefined || !previousKnown ||
+      (known && at >= previousAt))) {
+      StoreClient.viewedApps.set(id, CatalogApp.copy(app));
+      if (StoreClient.viewedApps.size > 32) StoreClient.viewedApps.delete(Array.from(StoreClient.viewedApps.keys())[0]);
+    }
     return app;
   }
 
@@ -273,6 +416,7 @@ export class StoreClient implements RenewalCatalog {
    * 缓存的字节直接画出图标，再去后端刷新。
    */
   private async cachedIconBytes(app: CatalogApp, useCache: boolean): Promise<ArrayBuffer | undefined> {
+    const cacheGeneration = CatalogCache.generation();
     if (app.id <= 0 || app.iconUrl !== '/api/v1/apps/' + app.id + '/icon') {
       return undefined;
     }
@@ -281,7 +425,7 @@ export class StoreClient implements RenewalCatalog {
       const bytes = cached.get(app.id);
       if (bytes !== undefined) return bytes;
     }
-    const key = app.id + ':' + app.iconRev;
+    const key = app.id + ':' + app.iconRev + ':' + cacheGeneration;
     const existing = StoreClient.iconReads.get(key);
     if (existing) return existing;
     const read = this.appIconBytes(app).then(async (bytes: ArrayBuffer | undefined) => {
@@ -289,7 +433,7 @@ export class StoreClient implements RenewalCatalog {
         const icon = new CachedIcon();
         icon.id = String(app.id); icon.rev = app.iconRev;
         icon.data = new util.Base64Helper().encodeToStringSync(new Uint8Array(bytes));
-        await CatalogCache.saveIcons(this.context, [icon]);
+        await CatalogCache.saveIcons(this.context, [icon], cacheGeneration);
       }
       return bytes;
     }).finally(() => {
@@ -330,6 +474,11 @@ export class StoreClient implements RenewalCatalog {
     }
   }
 
+  /** The full source file, preserving its dimensions, alpha and encoding. */
+  async originalIconBytes(app: CatalogApp): Promise<ArrayBuffer | undefined> {
+    return this.cachedIconBytes(app, true);
+  }
+
   async appIcon(app: CatalogApp): Promise<image.PixelMap | undefined> {
     for (let attempt = 0; attempt < 2; attempt++) {
       const bytes = await this.cachedIconBytes(app, attempt === 0);
@@ -347,7 +496,7 @@ export class StoreClient implements RenewalCatalog {
 
   /** Enqueue a bounded server refresh; heavy collection runs in the worker. */
   async refreshApp(appId: number): Promise<string> {
-    if (appId <= 0) throw new Error('应用编号无效');
+    if (appId <= 0) throw new Error(I18n.t('应用编号无效'));
     const data = await this.requestData('/api/v1/apps/' + appId + '/refresh',
       http.RequestMethod.POST, undefined, new EmptyBody());
     return String(data['status'] ?? 'done');
@@ -387,11 +536,12 @@ export class StoreClient implements RenewalCatalog {
 
   /// ``page`` is 1-based; the server caps page_size at 50.
   async listReleases(appId: number, page: number = 1,
-    pageSize: number = 20, includePrerelease: boolean = false): Promise<ListPage<ReleaseInfo>> {
+    pageSize: number = 20, includePrerelease: boolean = false,
+    forceRefresh: boolean = false): Promise<ListPage<ReleaseInfo>> {
     const data = await this.getData('/api/v1/apps/' + appId + '/releases?page=' +
       Math.max(1, Math.floor(page)) + '&page_size=' +
       Math.min(50, Math.max(1, Math.floor(pageSize))) +
-      '&prerelease=' + (includePrerelease ? '1' : '0'), undefined, 30000);
+      '&prerelease=' + (includePrerelease ? '1' : '0'), undefined, forceRefresh ? 0 : 30000);
     const result = new ListPage<ReleaseInfo>();
     const raw = data['items'] as Array<Record<string, Object>> | undefined;
     result.items = (raw ?? []).map((row: Record<string, Object>) => ReleaseInfo.fromJson(row));
@@ -419,7 +569,7 @@ export class StoreClient implements RenewalCatalog {
   async confirmSubmit(draft: SubmitDraft, assetNames: string[], category: string,
     account: DeveloperAccount): Promise<CatalogApp> {
     if (assetNames.length > 1 && !draft.supportsMultiSelect) {
-      throw new Error('服务器尚未支持多包上架，请先更新服务端');
+      throw new Error(I18n.t('服务器尚未支持多包上架，请先更新服务端'));
     }
     const body = new ConfirmBody();
     body.draft_token = draft.token;
@@ -467,41 +617,38 @@ export class StoreClient implements RenewalCatalog {
 
   /// Reviews always sort newest first, so page 1 is also what a new review lands on.
   async listReviews(appId: number, page: number = 1,
-    pageSize: number = 20): Promise<ListPage<AppReview>> {
-    const data = await this.getData('/api/v1/apps/' + appId + '/reviews?page=' +
-      Math.max(1, Math.floor(page)) + '&page_size=' +
-      Math.min(50, Math.max(1, Math.floor(pageSize))), undefined, 15000);
-    const result = new ListPage<AppReview>();
-    const rows = data['items'] as Array<Record<string, Object>> | undefined;
-    result.items = (rows ?? []).map((row: Record<string, Object>) => AppReview.fromJson(row));
-    result.total = numberField(data, 'total', result.items.length);
-    result.page = numberField(data, 'page', page);
-    result.pageSize = numberField(data, 'page_size', pageSize);
-    return result;
+    pageSize: number = 20, account?: DeveloperAccount): Promise<ReviewPage> {
+    const query = '?page=' + Math.max(1, Math.floor(page)) + '&page_size=' + Math.min(50, Math.max(1, Math.floor(pageSize)));
+    if (account) {
+      try {
+        const data = await this.requestData('/api/v1/me/apps/' + appId + '/reviews' + query,
+          http.RequestMethod.GET, account);
+        return ReviewPage.fromJson(data, page, pageSize);
+      } catch (_) { /* Expired identity must not hide the public discussion. */ }
+    }
+    const data = await this.getData('/api/v1/apps/' + appId + '/reviews' + query, undefined, 15000);
+    return ReviewPage.fromJson(data, page, pageSize);
   }
 
   async postReview(appId: number, stars: number, body: string,
-    account: DeveloperAccount): Promise<ListPage<AppReview>> {
-    const payload = new ReviewBody();
-    payload.stars = stars;
-    payload.body = body;
+    account: DeveloperAccount): Promise<ReviewPage> {
+    const payload = new ReviewBody(); payload.stars = stars; payload.body = body;
     const data = await this.requestData('/api/v1/apps/' + appId + '/reviews', http.RequestMethod.POST,
       account, payload);
-    const result = new ListPage<AppReview>();
-    const rows = data['items'] as Array<Record<string, Object>> | undefined;
-    result.items = (rows ?? []).map((row: Record<string, Object>) => AppReview.fromJson(row));
-    result.total = numberField(data, 'total', result.items.length);
-    result.page = numberField(data, 'page', 1);
-    // The POST route returns the endpoint's default page, not the length of
-    // the page it just produced.
-    result.pageSize = numberField(data, 'page_size', 20);
-    return result;
+    return ReviewPage.fromJson(data, 1, 20);
+  }
+
+  async deleteReview(appId: number, reviewId: number, page: number,
+    account: DeveloperAccount): Promise<ReviewPage> {
+    const data = await this.requestData('/api/v1/apps/' + appId + '/reviews/' + reviewId +
+      '?page=' + Math.max(1, Math.floor(page)) + '&page_size=20', http.RequestMethod.DELETE, account);
+    return ReviewPage.fromJson(data, page, 20);
   }
 
   /** 按账号及证书保留成功备份的回执，不把其他设备的版本作为轮换条件。 */
   async rememberSigningIdentity(account: DeveloperAccount, identity: BackedUpIdentity): Promise<void> {
     if (!Number.isSafeInteger(identity.revision) || identity.revision < 1) {
-      throw new Error('备份服务尚未支持版本校验，请更新服务端');
+      throw new Error(I18n.t('备份服务尚未支持版本校验，请更新服务端'));
     }
     const store = await preferences.getPreferences(this.context, 'signing-backup-version');
     // 这里只保存版本，不复制私钥到 preferences。
@@ -513,24 +660,29 @@ export class StoreClient implements RenewalCatalog {
   }
 
   async publishSigningIdentity(certId: string, privateKeyPem: string,
-    account: DeveloperAccount): Promise<void> {
+    account: DeveloperAccount): Promise<boolean> {
+    if (!await CloudBackupConsent.allowed(this.context, account)) return false;
     const body = new IdentityBody();
     body.cert_id = certId;
     body.private_key_pem = privateKeyPem;
     const result = await this.requestData('/api/v1/signing-identity',
       http.RequestMethod.POST, account, body);
+    if (!await CloudBackupConsent.allowed(this.context, account)) return false;
     if (result['synced'] !== true || String(result['cert_id'] ?? '') !== certId) {
-      throw new Error('签名身份备份未确认，已保留本机材料，请核对云端身份');
+      throw new Error(I18n.t('签名身份备份未确认，已保留本机材料，请核对云端身份'));
     }
     const saved = new BackedUpIdentity();
     saved.certId = certId;
     saved.revision = Number(result['revision'] ?? 0);
     await this.rememberSigningIdentity(account, saved);
+    return true;
   }
 
   async signingIdentity(account: DeveloperAccount, certId: string = ''): Promise<BackedUpIdentity | undefined> {
+    if (!await CloudBackupConsent.allowed(this.context, account)) return undefined;
     const data = await this.getData('/api/v1/signing-identity' +
       (certId.length > 0 ? '?cert_id=' + encodeURIComponent(certId) : ''), account);
+    if (!await CloudBackupConsent.allowed(this.context, account)) return undefined;
     const row = data['identity'] as Record<string, Object> | null | undefined;
     if (!row) return undefined;
     const identity = new BackedUpIdentity();
@@ -540,10 +692,10 @@ export class StoreClient implements RenewalCatalog {
     if (!/^\d{1,64}$/.test(identity.certId) ||
       !/^-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----\s*$/.test(identity.privateKeyPem) ||
       identity.privateKeyPem.length > 8192) {
-      throw new Error('云端签名身份格式无效');
+      throw new Error(I18n.t('云端签名身份格式无效'));
     }
     if (certId.length > 0 && identity.certId !== certId) {
-      throw new Error('备份服务返回了其他证书，已保留本机身份，请更新服务端');
+      throw new Error(I18n.t('备份服务返回了其他证书，已保留本机身份，请更新服务端'));
     }
     return identity;
   }

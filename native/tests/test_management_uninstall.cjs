@@ -11,9 +11,10 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../en
  compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}
 }).outputText,{exports:actionExports,require:()=>({InstallStage:{QUEUED:'queued',TERMINAL_ERROR:'terminal_error'}})});
 function fixture(){
- const f={connected:true,pending:[],removed:[],tombstones:[],persisted:0,toasts:[],synced:0,renewed:[],menuIndex:0,renewalLabel:'续签'};
- const box={ManagementActions:actionExports.ManagementActions,getContext:()=>({}),errorText:e=>e.message,promptAction:{showToast:v=>f.toasts.push(v.message)},
+ const f={connected:true,pending:[],removed:[],tombstones:[],persisted:0,toasts:[],synced:0,renewed:[],menuIndex:0,renewalLabel:'续签',disabled:false};
+ const box={ManagementAction:actionExports.ManagementAction,ManagementActions:actionExports.ManagementActions,UpdatePolicy:{disabled:()=>f.disabled},getContext:()=>({}),errorText:e=>e.message,promptAction:{showToast:v=>f.toasts.push(v.message)},
   HdcDeviceBridge:class{async connected(){return f.connected;} async uninstall(bundle){await f.uninstallWait;if(f.uninstallError)throw Error('system rejected');f.removed.push(bundle);}},
+  UpdatePushSync:{schedule(){}},
   JobStore:{open:async()=>({listPending:async()=>f.pending})},
   InstalledAppRegistry:{remember:(name,vc)=>f.tombstones.push([name,vc]),persist:async()=>{f.persisted++;if(f.persistError)throw Error('disk full');}},
   AlertDialog:{show:options=>f.confirmation=options}
@@ -23,7 +24,7 @@ function fixture(){
  const ui=new box.Page();Object.assign(ui,{uninstallingBundle:'',jobTitle:()=> '应用',applyDetectedCatalogVersion:()=>{},syncDeviceInstalled:()=>f.synced++,animateOverlay:fn=>fn(),updateFor:()=>undefined,checkInstalledUpdates:()=>{},openInstalled:async()=>{f.opened=(f.opened||0)+1;}});
  const job={bundleName:'com.example.app'};f.installed=[job];
  Object.assign(ui,{allInstalledJobs:()=>f.installed,renewalButtonLabel:()=>f.renewalLabel,
-  renewInstalled:job=>f.renewed.push(job),colors:()=>({text:'#111',danger:'#f00'}),
+  renewInstalled:job=>f.renewed.push(job),openInstalledInformation:job=>f.information=job,colors:()=>({text:'#111',danger:'#f00'}),
   showCardActionMenu:async(title,labels,destructiveIndex)=>{
    f.menu={title,buttons:labels.map(text=>({text})),destructiveIndex};if(f.menuWait)await f.menuWait;return f.menuIndex;
   }});
@@ -35,22 +36,25 @@ test('only a successful system uninstall persists confirmed absence',async()=>{
  assert.equal(f.state.persisted,1);assert.equal(f.state.synced,1);assert.equal(f.ui.uninstallingBundle,'');
 });
 
-test('installed long-press offers renewal and manual renewal without opening uninstall confirmation',async()=>{
+test('installed swipe menu keeps information, renewal and explicit uninstall confirmation',async()=>{
  for(const label of ['续签','手动续签','续签中']){
-  const f=fixture();f.state.renewalLabel=label;await f.ui.showInstalledActions(f.job);
-  assert.deepEqual(Array.from(f.state.menu.buttons,b=>b.text),[label,'卸载']);
+  const f=fixture();f.state.renewalLabel=label;f.state.menuIndex=1;await f.ui.showInstalledActions(f.job);
+  assert.deepEqual(Array.from(f.state.menu.buttons,b=>b.text),['应用信息',label,'停更','卸载']);
+  assert.equal(f.state.menu.destructiveIndex,3);
   assert.equal(f.renewed[0],f.job);assert.equal(f.state.confirmation,undefined);assert.equal(f.removed.length,0);
  }
 });
 
 test('installed menu uninstall waits for explicit data-loss confirmation',async()=>{
- const f=fixture();f.state.menuIndex=1;await f.ui.showInstalledActions(f.job);
+ const f=fixture();f.state.menuIndex=3;await f.ui.showInstalledActions(f.job);
  assert.equal(f.renewed.length,0);assert.equal(f.removed.length,0);
  assert.match(f.state.confirmation.message,/本地数据、缓存和登录状态/);
  f.state.confirmation.secondaryButton.action();await new Promise(setImmediate);
  assert.deepEqual(f.removed,[f.job.bundleName]);
 });
 test('installed swipe actions bypass the menu but retain confirmation and the uninstall busy guard',async()=>{
+ const information=fixture();await information.ui.showInstalledActions(information.job,'information');
+ assert.equal(information.state.information,information.job);assert.equal(information.state.menu,undefined);
  const f=fixture();await f.ui.showInstalledActions(f.job,'uninstall');
  assert.equal(f.state.menu,undefined);assert.ok(f.state.confirmation);assert.equal(f.removed.length,0);
  f.ui.uninstallingBundle=f.job.bundleName;f.state.confirmation=undefined;

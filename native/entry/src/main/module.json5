@@ -4,7 +4,7 @@
     "type": "entry",
     "description": "$string:module_desc",
     "mainElement": "EntryAbility",
-    "deviceTypes": ["phone", "tablet"],
+    "deviceTypes": ["phone", "tablet", "2in1"],
     "deliveryWithInstall": true,
     "installationFree": false,
     "pages": "$profile:main_pages",
@@ -16,12 +16,16 @@
         "description": "$string:EntryAbility_desc",
         "icon": "$media:app_icon",
         "label": "$string:EntryAbility_label",
-        "startWindowIcon": "$media:app_icon",
+        "startWindowIcon": "$media:start_window_icon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
         "launchType": "singleton",
+        // Follow the sensor while respecting the system rotation lock and the
+        // orientations supported by each phone, tablet or foldable device.
+        "orientation": "auto_rotation_unspecified",
         "backgroundModes": ["dataTransfer"],
         "skills": [
+          {"actions":["ohos.want.action.viewData"],"entities":["entity.system.browsable","entity.system.default"],"uris":[{"scheme":"qingqi-installer"}]},
           {
             "entities": ["entity.system.home"],
             "actions": ["action.system.home"]

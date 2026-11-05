@@ -1,8 +1,9 @@
 import { PackagePresentation } from './PackagePresentation';
 import { StorageBudget } from './StorageBudget';
-import { fileIo } from '@kit.CoreFileKit';
-import { listPackageEntries, extractPackageEntry } from 'libhap_core.so';
+import { fileIo, hash } from '@kit.CoreFileKit';
+import { listPackageEntries, extractPackageEntry, readModuleJson } from 'libhap_core.so';
 import { inspectPackage, PackageIdentity, PackageInspectError, requestedPermissions } from './PackageInspector';
+import { I18n } from '../data/I18n';
 
 class PreparedApp {
   fingerprint: string = '';
@@ -53,9 +54,14 @@ export class PackageArchive {
       if (identities.some((other: PackageIdentity, at: number) => other.bundleName !== identity.bundleName ||
         other.versionCode !== identity.versionCode || !other.moduleName ||
         identities.findIndex((candidate: PackageIdentity) => candidate.moduleName === other.moduleName) !== at)) {
-        throw new PackageInspectError('APP 模块的应用身份、版本或模块名不一致');
+        throw new PackageInspectError(I18n.t('APP 模块的应用身份、版本或模块名不一致'));
       }
-      if (PackageArchive.fingerprint(path) !== fingerprint) throw new PackageInspectError('APP 文件在解析期间发生变化');
+      // Feature-module targets do not decide which devices can launch the APP.
+      // Several entry modules may target different devices; any missing entry
+      // declaration makes that APP unknown. Without an entry, only agreement
+      // across every module provides a usable declaration.
+      identity.deviceTypes = PackageArchive.deviceTypes(identities);
+      if (PackageArchive.fingerprint(path) !== fingerprint) throw new PackageInspectError(I18n.t('APP 文件在解析期间发生变化'));
       const result = new PreparedApp(identity);
       result.paths = paths; result.primary = paths[index]; result.fingerprint = fingerprint;
       result.bytes = paths.reduce((total: number, module: string) => total + fileIo.statSync(module).size, 0);
@@ -69,8 +75,48 @@ export class PackageArchive {
 
   static readonly selector: string = '#qingqi-package=';
 
+  private static deviceTypes(identities: PackageIdentity[]): string[] {
+    const entries = identities.filter((identity: PackageIdentity) => identity.moduleType === 'entry');
+    const relevant = entries.length > 0 ? entries : identities;
+    if (relevant.some((identity: PackageIdentity) => identity.deviceTypes.length === 0)) return [];
+    if (entries.length === 0 && relevant.some((identity: PackageIdentity) =>
+      JSON.stringify(identity.deviceTypes) !== JSON.stringify(relevant[0].deviceTypes))) return [];
+    const types: string[] = [];
+    for (const identity of relevant) {
+      for (const type of identity.deviceTypes) if (!types.includes(type)) types.push(type);
+    }
+    return types.sort();
+  }
+
   static extension(name: string): string {
     return name.toLowerCase().endsWith('.app') ? '.app' : '.hap';
+  }
+
+  /** A published APP may be renamed .hap; a real HAP can itself contain worker HAPs. */
+  static async installablePath(path: string, appOutput: string, expectedSha256: string = ''): Promise<string> {
+    if (PackageArchive.extension(path) === '.app') return path;
+    try { readModuleJson(path); return path; }
+    catch (error) {
+      // Only a missing root manifest permits APP detection. Corrupt manifests stay errors.
+      if (!String(error).includes('HAP entry is missing: module.json')) throw error as Error;
+    }
+    await PackageArchive.inspect(path, '.app');
+    const digest = /^[a-f0-9]{64}$/i.test(expectedSha256) ? expectedSha256.toLowerCase() :
+      (await hash.hash(path, 'sha256')).toLowerCase();
+    await StorageBudget.require(path, fileIo.statSync(path).size);
+    const temporary = appOutput + '.part';
+    try {
+      await fileIo.copyFile(path, temporary);
+      if ((await hash.hash(temporary, 'sha256')).toLowerCase() !== digest) {
+        throw new PackageInspectError(I18n.t('APP 原包在准备期间发生变化'));
+      }
+      PackageArchive.release(appOutput);
+      fileIo.renameSync(temporary, appOutput);
+      return appOutput;
+    } finally {
+      PackageArchive.release(path);
+      if (fileIo.accessSync(temporary)) fileIo.unlinkSync(temporary);
+    }
   }
 
   /** A URL fragment chooses an entry; HTTP still downloads the original ZIP. */
@@ -81,7 +127,7 @@ export class PackageArchive {
     if (!name || name.length > 1024 || name.startsWith('/') || name.includes('\\') ||
       name.includes('\0') || name.includes(':') || name.split('/').some((part: string) =>
         !part || part === '.' || part === '..') || !/\.(hap|app)$/i.test(name)) {
-      throw new PackageInspectError('压缩包内安装文件路径无效');
+      throw new PackageInspectError(I18n.t('压缩包内安装文件路径无效'));
     }
     return name;
   }
@@ -89,7 +135,7 @@ export class PackageArchive {
   static async extractSelected(path: string, entry: string, output: string): Promise<string> {
     const entries = listPackageEntries(path);
     const selected = entries.find((row) => row.name === entry);
-    if (!selected) throw new PackageInspectError('压缩包中没有所选安装文件');
+    if (!selected) throw new PackageInspectError(I18n.t('压缩包中没有所选安装文件'));
     await StorageBudget.require(path, selected.size * 2);
     const temporary = output + '.part';
     try {
@@ -106,15 +152,15 @@ export class PackageArchive {
   }
 
   private static async modules(path: string): Promise<string[]> {
-    const entries = listPackageEntries(path);
-    if (!entries.length || entries.some((row) => !row.name.toLowerCase().endsWith('.hap'))) {
-      throw new PackageInspectError('APP 中没有可安装的 HAP 模块');
+    const entries = listPackageEntries(path, true);
+    if (!entries.length || entries.some((row) => !/\.(hap|hsp)$/i.test(row.name))) {
+      throw new PackageInspectError(I18n.t('APP 中没有可安装的 HAP 模块'));
     }
     await StorageBudget.require(path, entries.reduce((total: number, row) => total + row.size, 0));
     const paths: string[] = [];
     try {
       for (let i = 0; i < entries.length; i++) {
-        const output = path + '.module-' + i + '.hap';
+        const output = path + '.module-' + i + (entries[i].name.toLowerCase().endsWith('.hsp') ? '.hsp' : '.hap');
         paths.push(output);
         await extractPackageEntry(path, entries[i].name, output);
       }
@@ -151,7 +197,7 @@ export class PackageArchive {
   static workingBytes(path: string): number {
     const size = fileIo.statSync(path).size;
     if (PackageArchive.extension(path) !== '.app') return size * 3;
-    return Math.max(size, listPackageEntries(path).reduce((total: number, entry) => total + entry.size, 0)) * 3;
+    return Math.max(size, listPackageEntries(path, true).reduce((total: number, entry) => total + entry.size, 0)) * 3;
   }
 
   static async modulePaths(path: string): Promise<string[]> {

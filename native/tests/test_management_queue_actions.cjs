@@ -22,7 +22,7 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
   InstallStage: { QUEUED: 'queued', TERMINAL_ERROR: 'terminal_error' }
 }) });
 function fixture(running = false) {
-  const box = { ManagementActions: actionsExports.ManagementActions,
+  const box = { DeviceInstallGroup:require('./load_ets.cjs').loadEts('jobs/DeviceInstallGroup').DeviceInstallGroup, ManagementActions: actionsExports.ManagementActions,
     InstallJob: jobExports.InstallJob,
     InstallStage: { QUEUED: 'queued', TERMINAL_ERROR:'terminal_error' }, Index: { TAB_MINE: 3 }, AlertDialog: { show() {} } };
   vm.runInNewContext(ts.transpileModule('class Page { ' + method + ' }; globalThis.Page = Page;', {
@@ -58,7 +58,8 @@ test('swipe uses the same guarded actions without opening a second menu, with tw
   await f.ui.showQueueActions(f.job, 'continue'); assert.equal(f.continued.length, 1);
   f.ui.cancellingJobs = []; f.ui.pendingJobs = [];
   await f.ui.showQueueActions(f.job, 'cleanup'); assert.equal(f.canceled.length, 1);
-  assert.deepEqual(Array.from(actionsExports.ManagementActions.installed('手动续签'), action => action.shortLabel), ['续签', '卸载']);
+  assert.deepEqual(Array.from(actionsExports.ManagementActions.installed('手动续签'), action => action.shortLabel), ['续签', '停更', '卸载']);
+  assert.deepEqual(Array.from(actionsExports.ManagementActions.installed('手动续签', true), action => action.shortLabel), ['续签', '续更', '卸载']);
 });
 test('a continue action cannot run after the queue starts that job while its menu is open', async () => {
   const f = fixture(); let release; f.wait = new Promise(resolve => { release = resolve; });
@@ -113,7 +114,7 @@ test('long press reads the live task stage instead of the card snapshot captured
 test('failed tasks stay visible until cleanup or a newer attempt supersedes them', () => {
   const start=source.indexOf('  private managementQueueJobs(');
   const code=source.slice(start,source.indexOf('\n  }',start)+4);
-  const box={InstallStage:{TERMINAL_ERROR:'terminal_error'}};
+  const box={DeviceInstallGroup:require('./load_ets.cjs').loadEts('jobs/DeviceInstallGroup').DeviceInstallGroup,InstallStage:{TERMINAL_ERROR:'terminal_error'}};
   vm.runInNewContext(ts.transpileModule('class Page { '+code+' };globalThis.Page=Page;',{
     compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
   const page=new box.Page(),failed={id:'failed',stage:'terminal_error',bundleName:'com.app',updatedAt:10};
@@ -146,4 +147,11 @@ test('the themed card menu settles once on selection, replacement and dismissal'
   page.dismissCardActions(1); assert.equal(page.cardActionResolver, undefined);
   const dismissed = page.showCardActionMenu('应用', ['清理记录'], 0);
   page.dismissCardActions(-1); assert.equal(await dismissed, -1);
+});
+
+test('a paused device can continue while a different device task is already active',()=>{
+ const job={id:'peer-b',stage:'waiting_device'};
+ const actions=actionsExports.ManagementActions.queue(job,true,false,'peer-a');
+ assert.equal(actions[0].key,'continue');
+ assert.equal(actionsExports.ManagementActions.queue(job,true,false,'peer-b')[0].key,'details');
 });

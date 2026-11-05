@@ -12,7 +12,8 @@ function fixture() {
   const method = source.slice(start, source.indexOf('\n  }', start) + 4);
   const f = { requests: [], reconciled: [], saved: [], probes: 0 };
   const sandbox = { getContext: () => ({}), errorText: error => error.message,
-    ReleaseChannelRegistry: { select: async (_context, id, preview) => f.saved.push([id, preview]) },
+    ReleaseChannelRegistry: { staleReleases: () => false,
+      select: async (_context, id, preview) => f.saved.push([id, preview]) },
     StoreClient: class {
       listReleases(...args) {
         const work = {};
@@ -69,7 +70,8 @@ test('restoring the app preference happens before the first release request', as
   }).join('\n');
   const calls = [], sandbox = { getContext: () => ({}), errorText: error => error.message,
     router: { getParams: () => ({ id: 42 }) },
-    ReleaseChannelRegistry: { restore: async () => {}, preview: id => { calls.push(['load', id]); return true; }, select: async () => {} },
+    ReleaseChannelRegistry: { restore: async () => {}, staleReleases: () => false,
+      preview: id => { calls.push(['load', id]); return true; }, select: async () => {} },
     StoreClient: class {
       async appDetail(id) { return { id }; }
       async appIcon() { return null; }
@@ -80,7 +82,8 @@ test('restoring the app preference happens before the first release request', as
     ${methods} }; globalThis.Page = Detail;`, { compilerOptions: {
     target: ts.ScriptTarget.ES2020 } }).outputText, sandbox);
   const page = new sandbox.Page();
-  Object.assign(page, { showPreviewReleases: false, refreshHeroColor() {}, async loadReviews() {},
+  Object.assign(page, { showPreviewReleases: false, refreshHeroColor() {}, notifyEmbeddedReady() {}, async loadReviews() {},
+    async restoreUpdatePolicy() {},
     reconcileSelectedAsset() {}, refreshInstalledVersion() {}, syncInstallTask() {} });
   await page.loadApp();
   assert.deepEqual(calls, [['load', 42], ['releases', 42, 1, 20, true]]);

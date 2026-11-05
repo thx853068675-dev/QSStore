@@ -30,6 +30,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from . import auth, collector, db, identity_vault, monitor, submissions
 from .categories import CATEGORIES, normalize_category
+from . import repository_readme
 
 API_VERSION = 1
 HOST = os.environ.get("HAPSTORE_HOST", "127.0.0.1")
@@ -172,13 +173,26 @@ def h_app_detail(app_id: str, q: dict[str, list[str]]) -> dict[str, Any]:
     return app
 
 
-def h_reviews(app_id: str, q: dict[str, list[str]]) -> dict[str, Any]:
+def h_app_readme(app_id: str, q: dict[str, list[str]]) -> dict[str, Any]:
+    app = db.get_app(int(app_id))
+    if not app or app["status"] != "published":
+        raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
+    try:
+        return repository_readme.get(app["repo"], token=GITHUB_TOKEN)
+    except Exception as error:
+        if isinstance(error, ValueError):
+            raise ApiError(422, "README_UNAVAILABLE", str(error)) from error
+        raise ApiError(502, "README_UNAVAILABLE", "README 暂时无法读取，请重试") from error
+
+
+def h_reviews(app_id: str, q: dict[str, list[str]], viewer_account_id: str = "") -> dict[str, Any]:
     published = db.get_app(int(app_id))
     if not published or published["status"] != "published":
         raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
     return db.list_reviews(int(app_id),
                            page=_int((q.get("page") or ["1"])[0], 1, 1, 10000),
-                           page_size=_int((q.get("page_size") or ["20"])[0], 20, 1, 50))
+                           page_size=_int((q.get("page_size") or ["20"])[0], 20, 1, 50),
+                           viewer_account_id=viewer_account_id)
 
 
 def h_put_review(app_id: str, body: dict[str, Any], identity: tuple[str, str]) -> dict[str, Any]:
@@ -199,7 +213,20 @@ def h_put_review(app_id: str, body: dict[str, Any], identity: tuple[str, str]) -
     db.put_review(int(app_id), identity[0], identity[1], stars, comment)
     # Echo the page the client is now looking at, with the same default the
     # GET route uses, so both responses describe the listing identically.
-    return db.list_reviews(int(app_id), page=1, page_size=20)
+    return db.list_reviews(int(app_id), page=1, page_size=20, viewer_account_id=identity[0])
+
+
+def h_delete_review(app_id: str, review_id: str, q: dict[str, list[str]],
+                    identity: tuple[str, str]) -> dict[str, Any]:
+    published = db.get_app(int(app_id))
+    if not published or published["status"] != "published":
+        raise ApiError(404, "APP_NOT_FOUND", "应用不存在")
+    if not db.delete_review(int(app_id), int(review_id), identity[0]):
+        raise ApiError(404, "REVIEW_NOT_FOUND", "评论不存在或不属于当前账号")
+    size = _int((q.get("page_size") or ["20"])[0], 20, 1, 50)
+    total = db.review_summary(int(app_id))["count"]
+    page = min(_int((q.get("page") or ["1"])[0], 1, 1, 10000), max(1, (total + size - 1) // size))
+    return db.list_reviews(int(app_id), page, size, identity[0])
 
 
 def h_get_signing_identity(identity: tuple[str, str], cert_id: str = "") -> dict[str, Any]:
@@ -593,8 +620,11 @@ def h_admin_feature(app_id: str, body: dict[str, Any]) -> dict[str, Any]:
 # 注册路由
 router.add("GET", r"/api/v1/apps", h_list_apps)
 router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)", h_app_detail)
+router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/readme", h_app_readme)
 router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/reviews", h_reviews)
 router.add("POST", r"/api/v1/apps/(?P<app_id>\d+)/reviews", "REVIEW")
+router.add("GET", r"/api/v1/me/apps/(?P<app_id>\d+)/reviews", "REVIEWS_MINE")
+router.add("DELETE", r"/api/v1/apps/(?P<app_id>\d+)/reviews/(?P<review_id>\d+)", "REVIEW_DELETE")
 router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/releases", h_app_releases)
 router.add("GET", r"/api/v1/apps/(?P<app_id>\d+)/releases/(?P<tag>[^/]+)", h_app_release)
 router.add("GET", r"/api/v1/healthz", lambda q: {"ok": True, "stage": "M1"})
@@ -774,6 +804,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(h_configure_my_app(params["app_id"], self._read_body(), self._identity()))
             elif fn == "MY_APP_SOURCE_PREPARE":
                 self._json(h_prepare_app_source(params['app_id'], self._read_body(), ip, self._identity()))
+            elif fn == "REVIEWS_MINE":
+                self._json(h_reviews(params["app_id"], query, self._identity()[0]))
+            elif fn == "REVIEW_DELETE":
+                self._json(h_delete_review(params["app_id"], params["review_id"], query, self._identity()))
             elif fn == "REVIEW":
                 self._json(h_put_review(params["app_id"], self._read_body(), self._identity()))
             elif fn == "IDENTITY_GET":

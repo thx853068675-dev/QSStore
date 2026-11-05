@@ -1,3 +1,4 @@
+const targetModule = require('./load_ets.cjs').loadEts('jobs/DeviceInstallTarget');
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
@@ -12,17 +13,18 @@ before(() => execFileSync('c++', ['-std=c++17', '-Wall', '-Wextra', '-Werror', '
   path.join(root, 'entry/src/main/cpp/hap_core/signing_block.cpp'), path.join(root, 'tests/hap_inspect_cli.cpp'), '-lz', '-o', cli]));
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 function load(file, mocks) {
-  const box = { exports: {}, require: name => mocks[name] || {}, ArrayBuffer, Uint8Array };
+  mocks = { './StoreBuildConfig':{StoreBuildConfig:{configured:true,baseUrl:'https://store.example.invalid',publicKeySha256:'a'.repeat(43)+'=',caData:''}}, '../data/I18n': { I18n: { t: value => value } }, './I18n': { I18n: { t: value => value } }, ...mocks };
+  const box = { DeviceInstallTarget:targetModule.DeviceInstallTarget, exports: {}, require: name => mocks[name] || (name.endsWith('/DeviceInstallTarget')?targetModule:{}), ArrayBuffer, Uint8Array };
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, 'entry/src/main/ets', file + '.ets'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText, box); return box.exports;
 }
-const io = { accessSync: fs.existsSync, mkdirSync: p => fs.mkdirSync(p, { recursive: true }),
+const io = { accessSync: fs.existsSync, mkdirSync: p => fs.mkdirSync(p, { recursive: true }), lstatSync: fs.lstatSync,
   OpenMode: { READ_ONLY: 0 }, openSync: p => ({ fd: fs.openSync(p, 'r') }), closeSync: f => fs.closeSync(f.fd),
   statSync: p => typeof p === 'number' ? fs.fstatSync(p) : fs.statSync(p), unlinkSync: fs.unlinkSync, renameSync: fs.renameSync,
   copyFile: async (from,to) => typeof from === 'number' ? fs.writeFileSync(to, fs.readFileSync(from)) : fs.promises.copyFile(from,to) };
 const native = {
-  listPackageEntries: p => execFileSync(cli, [p, 'list'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean).map(line => {
+  listPackageEntries: (p,shared=false) => execFileSync(cli, [p, shared?'modules':'list'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean).map(line => {
     const [size,name] = line.split('\t'); return { size: Number(size), name }; }),
   extractPackageEntry: async (p,n,o) => { execFileSync(cli,[p,'extract',n,o]); },
   extractInstallArchive: async (p,prefix) => {
@@ -43,21 +45,40 @@ const native = {
 const presentation = load('jobs/PackagePresentation', { 'libhap_core.so': native });
 const inspector = load('jobs/PackageInspector', { 'libhap_core.so': native, './PackagePresentation':presentation });
 const storage = { StorageBudget: { require: async () => {} } };
-const archive = load('jobs/PackageArchive', { './StorageBudget': storage, 'libhap_core.so': native, '@kit.CoreFileKit': {fileIo:io}, './PackageInspector': inspector, './PackagePresentation':presentation });
+const archive = load('jobs/PackageArchive', { './StorageBudget': storage, 'libhap_core.so': native,
+  '@kit.CoreFileKit': {fileIo:io,hash:{hash:async p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')}},
+  './PackageInspector': inspector, './PackagePresentation':presentation });
 const jobs = load('jobs/InstallJob', {});
+const library = load('jobs/DownloadLibrary', { '@kit.CoreFileKit': {fileIo:io},
+ './PublicDownloadDirectory':{PublicDownloadDirectory:{ensure:async context=>{
+   const folder=path.join(path.dirname(context.filesDir),'Download','轻启·安装器');
+   if(!fs.existsSync(folder))fs.mkdirSync(folder,{recursive:true});
+   return {path:folder,uri:'file://docs'+folder,displayPath:'下载/轻启·安装器'};
+ }}}
+});
 function fixtures(name) {
   const sub = path.join(dir,name); fs.mkdirSync(sub);
   execFileSync('python3',['-c', `import io,zipfile,json,sys,os,random
 p=sys.argv[1]
-def hap(bundle='com.example.main',module='entry',code=12):
+def hap(bundle='com.example.main',module='entry',code=12,types=None,module_type=None):
  b=io.BytesIO()
+ manifest={'app':{'bundleName':bundle,'versionCode':code,'versionName':'1.2.0'},'module':{'name':module,'type':module_type or ('entry' if module=='entry' else 'feature'),'mainElement':'MainAbility' if module=='entry' else ''}}
+ if types is not None:manifest['module']['deviceTypes']=types
  with zipfile.ZipFile(b,'w',zipfile.ZIP_DEFLATED) as z:
-  z.writestr('module.json',json.dumps({'app':{'bundleName':bundle,'versionCode':code,'versionName':'1.2.0'},'module':{'name':module,'mainElement':'MainAbility' if module=='entry' else ''}}))
+  z.writestr('module.json',json.dumps(manifest))
  return b.getvalue()
 def pack(name,entries):
  with zipfile.ZipFile(os.path.join(p,name),'w',zipfile.ZIP_DEFLATED) as z:
   for n,data in entries:z.writestr(n,data)
 open(os.path.join(p,'main.hap'),'wb').write(hap())
+open(os.path.join(p,'targets.hap'),'wb').write(hap(types=[' TABLET ','Phone','tablet']))
+open(os.path.join(p,'invalid-targets.hap'),'wb').write(hap(types=['tablet',None]))
+pack('entry-targets.app',[('feature.hap',hap(module='feature',types=['phone'])),('entry.hap',hap(types=['tablet']))])
+pack('entry-union.app',[('entry.hap',hap(types=['tablet'])),('second.hap',hap(module='second',types=['phone'],module_type='entry'))])
+pack('entry-missing.app',[('entry.hap',hap(types=['tablet'])),('second.hap',hap(module='second',module_type='entry'))])
+pack('no-entry-same.app',[('first.hap',hap(module='first',types=[' TABLET ','phone'])),('second.hap',hap(module='second',types=['Phone','tablet']))])
+pack('no-entry-different.app',[('first.hap',hap(module='first',types=['tablet'])),('second.hap',hap(module='second',types=['phone']))])
+pack('no-entry-missing.app',[('first.hap',hap(module='first',types=['tablet'])),('second.hap',hap(module='second'))])
 pack('multi.app',[('feature.hap',hap(module='feature')),('entry.hap',hap())])
 large=io.BytesIO()
 with zipfile.ZipFile(large,'w',zipfile.ZIP_STORED) as z:
@@ -78,9 +99,11 @@ function local(sub,source) {
   const core = {fileIo:io,hash:{hash:async p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')},
     picker:{DocumentViewPicker: class { async select(options) {assert.match(options.fileSuffixFilters[0], /\.app,\.zip/);return [selected];}}}};
   const {LocalImport}=load('jobs/LocalImport',{'./JobStore':{JobStore:{reservePackage:()=>()=>{}}},
+    './EditedPackageProvenance':{EditedPackageProvenance:{source:async()=>({sha256:'',assetName:''})}},
+    './DownloadLibrary':library,
     './StorageBudget': storage, '@kit.CoreFileKit':core,'./PackageArchive':archive,'./InstallJob':jobs,'libhap_core.so':native});
   const store={save:async job=>saved=job,enqueueLocal:async(cachePath,signedPath,hash,bundleName,versionCode,versionName,moduleName,mainAbility)=>
-    ({cachePath,signedPath,expectedSha256:hash,bundleName,versionCode,versionName,moduleName,mainAbility})};
+    ({stage:jobs.InstallStage.PACKAGE_INSPECTED,cachePath,signedPath,expectedSha256:hash,bundleName,versionCode,versionName,moduleName,mainAbility})};
   return {context,LocalImport,store,saved:()=>saved};
 }
 test('a real two-module APP previews and commits as one APP with an entry launcher',async()=>{
@@ -92,6 +115,24 @@ test('a real two-module APP previews and commits as one APP with an entry launch
   assert.ok(job.signedPath.endsWith('.signed.app'));assert.equal(f.saved().assetName,'multi.app');
   assert.equal(native.listPackageEntries(job.cachePath).length,2);
   assert.equal(fs.readdirSync(f.context.cacheDir+'/local-hap-previews').length,0);
+});
+
+test('actual HAP manifest and APP entry modules determine canonical device declarations', async () => {
+  const sub = fixtures('device-targets');
+  assert.deepEqual(Array.from(inspector.inspectPackage(path.join(sub, 'targets.hap')).deviceTypes), ['phone', 'tablet']);
+  assert.deepEqual(Array.from(inspector.inspectPackage(path.join(sub, 'main.hap')).deviceTypes), []);
+  assert.deepEqual(Array.from(inspector.inspectPackage(path.join(sub, 'invalid-targets.hap')).deviceTypes), []);
+  const expected = {
+    'entry-targets.app': ['tablet'], 'entry-union.app': ['phone', 'tablet'],
+    'entry-missing.app': [], 'no-entry-same.app': ['phone', 'tablet'],
+    'no-entry-different.app': [], 'no-entry-missing.app': []
+  };
+  for (const [name, types] of Object.entries(expected)) {
+    const source = path.join(sub, name);
+    try { assert.deepEqual(Array.from((await archive.PackageArchive.inspect(source)).deviceTypes), types, name); }
+    finally { archive.PackageArchive.release(source); }
+  }
+  assert(!fs.readdirSync(sub).some(name => name.includes('.module-')));
 });
 test('ZIP previews enumerate valid HAP/APP candidates; selection does not enqueue',async()=>{
   const sub=fixtures('zip'),f=local(sub,path.join(sub,'apps.zip'));
@@ -186,4 +227,21 @@ test('APP inspection and icon reuse extracted modules; a changed file invalidate
     archive.PackageArchive.release(source);
     assert(!fs.readdirSync(sub).some(n => n.includes('.module-')));
   } finally { native.extractPackageEntry = original; archive.PackageArchive.release(source); }
+});
+
+test('renamed APP .app.hap is canonicalized intact, while root HAP manifests keep HAP semantics', async () => {
+  const sub=fixtures('renamed-app'), source=path.join(sub,'Petrelgram-1.5.4-unsigned.app.hap');
+  fs.copyFileSync(path.join(sub,'multi.app'),source);
+  const expected=crypto.createHash('sha256').update(fs.readFileSync(source)).digest('hex');
+  const output=source+'.package.app';
+  assert.equal(await archive.PackageArchive.installablePath(source,output,expected),output);
+  assert.deepEqual(fs.readFileSync(output),fs.readFileSync(source));
+  const identity=await archive.PackageArchive.inspect(output);
+  assert.equal(identity.bundleName,'com.example.main');assert.equal(identity.versionCode,12);
+  assert.equal((await archive.PackageArchive.modulePaths(output)).length,2);
+  archive.PackageArchive.release(output);
+  const hap=path.join(sub,'main.hap');
+  assert.equal(await archive.PackageArchive.installablePath(hap,output),hap);
+  await assert.rejects(archive.PackageArchive.installablePath(source,output,'f'.repeat(64)),/发生变化/);
+  assert(!fs.existsSync(output+'.part'));
 });

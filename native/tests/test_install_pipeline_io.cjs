@@ -1,3 +1,5 @@
+const { publicConsentModule } = require('./load_ets.cjs');
+const {InstallPreflight}=publicConsentModule('./InstallPreflight');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -10,12 +12,15 @@ function loadRuntime(mocks) {
   mocks['./ReleaseUpdate']={ReleaseUpdate:require('./release_update_fixture.cjs').releaseUpdate()};
   mocks['../data/CertificateRejection']=rejectionExports;
   mocks['./InstallTaskState'] = { InstallTaskState: { installProgress: () => {} } };
+  mocks['../data/CloudBackupConsent'] = { CloudBackupConsent: {
+    allowed: async () => mocks.__cloudAllowed?.() ?? true
+  } };
   const file = path.join(__dirname, '../entry/src/main/ets/jobs/NativeJobRuntime.ets');
   const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText;
   const exports = {};
-  vm.runInNewContext(code, { exports, require: name => mocks[name] || {},
+  vm.runInNewContext(code, { exports, require: name => mocks[name] || publicConsentModule(name),
     Date: class extends Date { static now() { return mocks.__now?.() ?? Date.now(); } },
     setTimeout: callback => setImmediate(callback), console: { warn: () => {} } });
   return exports.NativeJobRuntime;
@@ -36,7 +41,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
   const job = {
     sourceUrl: 'local', assetName: 'installer-signed.hap',
     cachePath: '/private/source.hap', signedPath: '/private/signed.hap',
-    expectedSha256: 'abc', profilePath: selfUpdate ? '' : '/private/profile.p7b',
+    expectedSha256: 'a'.repeat(64), profilePath: selfUpdate ? '' : '/private/profile.p7b',
     profileSha256: selfUpdate ? '' : 'profile',
     signedProfileSha256: '', deviceUdid: '', bundleName: 'com.example.app', versionCode: 7,
     signingCertId: '', allowDataLoss: false
@@ -44,6 +49,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
   const originalIdentity = { bundleName: job.bundleName, versionCode: job.versionCode };
   const mocks = {
     __now: () => calls.now,
+    __cloudAllowed: () => calls.cloudAllowed !== false,
     './InstalledSigningExpiry': { InstalledSigningExpiry: {
       profileExpiry: async () => calls.effectivePreviousExpiry ?? calls.previousExpiry ?? 0,
       capture: async (value, installed) => {
@@ -52,11 +58,13 @@ function fixture(installedVersion = 0, selfUpdate = false,
       },current:()=>undefined
     } },
     './StorageBudget': { StorageBudget: { require: async () => {} } },
-    './PackageArchive': { PackageArchive: { permissions: async () => [], workingBytes: () => 123, release: () => {} } },
+    './PackageArchive': { PackageArchive: { installablePath: async path => path,
+      permissions: async () => [], workingBytes: () => 123, release: () => {} } },
     './JobCancellation': { JobCancellation: { assertActive: () => {
       if (calls.cancelled) throw new Error('安装任务已取消');
     } } },
-    './InstallJob': { InstallStage: { INSTALLING: 'installing', INSTALLED: 'installed' },
+    './InstallJob': { InstallStage: { INSTALLING: 'installing', INSTALLED: 'installed',
+      WAITING_COMPATIBILITY: 'waiting_compatibility' },
       FailureKind: { INVALID_PACKAGE: 'invalid_package', DEVICE: 'device', CONFIRMATION: 'confirmation' },
       RecoveryEvidence: class {
       verifiedCache = false; validProfile = false; verifiedSignature = false;
@@ -64,7 +72,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
     } },
     './LocalBundles': { LocalBundles: { liveInstalledVersion: () => calls.liveVersion ?? installedVersion, installedVersionName: () => '',
       isKnown: version => version >= 0, isSelfBundle: () => selfUpdate, selfSigningFingerprint: () => 'A'.repeat(64),
-      selfAppIdentifier: () => 'installed-app-id' } },
+      selfAppIdentifier: () => 'installed-app-id', selfInstalledIdentity: () => calls.selfIdentity } },
     './InstalledAppRegistry': { InstalledAppRegistry: { load: async () => {}, version: () => installedVersion,
       versionName: () => '', remember: () => {}, persist: async () => {} }, InstalledSigningIdentity: class {
       fingerprint = ''; appIdentifier = ''; versionCode = 0;
@@ -88,7 +96,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
     '@kit.CoreFileKit': {
       fileIo: { statSync: () => ({ size: 123 }), accessSync: () => true, readTextSync: () => 'private key' },
       hash: { hash: async file => {
-        if (file === job.cachePath) { calls.hapHashes++; return 'abc'; }
+        if (file === job.cachePath) { calls.hapHashes++; return 'a'.repeat(64); }
         calls.profileHashes++; return 'profile';
       } }
     },
@@ -132,12 +140,14 @@ function fixture(installedVersion = 0, selfUpdate = false,
       async publishSigningIdentity() {
         calls.identityBackups++;
         if (backupFails) throw new Error('backup offline');
+        if (calls.revokeAfterBackup) calls.cloudAllowed = false;
+        return calls.backupAcknowledged !== false;
       }
     } },
     './AssetDownload': { AssetDownload: class {
       async verifiedFileExists(value) {
         calls.hapHashes++;
-        return value.expectedSha256 === 'abc';
+        return value.expectedSha256 === 'a'.repeat(64);
       }
     } },
     './PackageInspector': { inspectPackage: () => calls.inspectedIdentity ?? originalIdentity,
@@ -145,7 +155,7 @@ function fixture(installedVersion = 0, selfUpdate = false,
       requestedPermissions: () => [] },
     './JobRunner': { JobFailure: class extends Error {
       constructor(kind, message) { super(message); this.kind=kind; }
-    }, JobPaths: class {}, PackageIdentity: class {} }
+    }, JobSkip:class extends Error{constructor(reason,message){super(message);this.reason=reason;}}, JobPaths: class {}, PackageIdentity: class {} }
   };
   const Runtime = loadRuntime(mocks);
   const runtime = new Runtime({}, { save: async value => calls.saved.push({ ...value }),
@@ -328,7 +338,7 @@ test('approved incompatible renewal transfers a verified package before replacin
   const f=renewalFixture({sameCertificate:false,sameApp:false});
   await assert.rejects(()=>f.runtime.ensureProfile(f.job),/无法保留数据续签/);
   Object.assign(f.job,{allowDataLoss:true,approvedInstalledVersion:f.installed.versionCode,
-    approvedInstalledFingerprint:f.installed.fingerprint,approvedInstalledAppIdentifier:f.installed.appIdentifier});
+    approvedInstalledFingerprint:f.installed.fingerprint,approvedInstalledAppIdentifier:f.installed.appIdentifier,approvedInstalledUpdateTime:f.installed.updateTime,approvedInstallProof:InstallPreflight.packageProof(f.job)});
   await f.runtime.ensureProfile(f.job);await f.runtime.sign(f.job);await f.runtime.verifySignature(f.job);
   await f.runtime.install(f.job);
   assert.equal(f.calls.uninstalls,1);assert.deepEqual(f.calls.order,['stage','uninstall-and-install']);
@@ -339,7 +349,7 @@ test('renewal replacement rechecks consent after transmission and can recover an
   const f=renewalFixture({sameCertificate:false,sameApp:false});
   await assert.rejects(()=>f.runtime.ensureProfile(f.job),/无法保留数据续签/);
   Object.assign(f.job,{allowDataLoss:true,approvedInstalledVersion:f.installed.versionCode,
-    approvedInstalledFingerprint:f.installed.fingerprint,approvedInstalledAppIdentifier:f.installed.appIdentifier});
+    approvedInstalledFingerprint:f.installed.fingerprint,approvedInstalledAppIdentifier:f.installed.appIdentifier,approvedInstalledUpdateTime:f.installed.updateTime,approvedInstallProof:InstallPreflight.packageProof(f.job)});
   f.calls.identityChangesDuringTransfer=true;
   await assert.rejects(()=>f.runtime.install(f.job),/传输期间已安装应用发生变化/);
   assert.equal(f.calls.uninstalls,0);assert.equal(f.job.allowDataLoss,false);
@@ -528,6 +538,7 @@ test('after approval a regular app uninstalls once and installs the verified sig
   job.approvedInstalledVersion = installed.versionCode;
   job.approvedInstalledFingerprint = installed.fingerprint;
   job.approvedInstalledAppIdentifier = installed.appIdentifier;
+  job.approvedInstallProof=InstallPreflight.packageProof(job);job.approvedInstalledUpdateTime=installed.updateTime||0;
   await runtime.ensureProfile(job);
   await runtime.sign(job);
   await runtime.verifySignature(job);
@@ -557,6 +568,7 @@ test('after approval a self-update stages a device-side replacement before old a
   job.approvedInstalledVersion = installed.versionCode;
   job.approvedInstalledFingerprint = installed.fingerprint;
   job.approvedInstalledAppIdentifier = installed.appIdentifier;
+  job.approvedInstallProof=InstallPreflight.packageProof(job);job.approvedInstalledUpdateTime=installed.updateTime||0;
   job.assetName = 'installer-unsigned.hap';
   await runtime.ensureProfile(job);
   await runtime.sign(job);
@@ -574,6 +586,7 @@ test('a failed identity backup stops destructive self-update before staging', as
   job.approvedInstalledVersion = installed.versionCode;
   job.approvedInstalledFingerprint = installed.fingerprint;
   job.approvedInstalledAppIdentifier = installed.appIdentifier;
+  job.approvedInstallProof=InstallPreflight.packageProof(job);job.approvedInstalledUpdateTime=installed.updateTime||0;
   job.assetName = 'installer-unsigned.hap';
   await runtime.ensureProfile(job);
   await runtime.sign(job);
@@ -581,6 +594,23 @@ test('a failed identity backup stops destructive self-update before staging', as
   assert.equal(calls.selfStaged, '');
   assert.equal(calls.uninstalls, 0);
 });
+
+for (const failure of ['declined', 'not-acknowledged', 'revoked']) {
+  test('destructive self-update preserves the installer when optional backup is ' + failure, async () => {
+    const installed = { versionCode: 1, fingerprint: 'A'.repeat(64), appIdentifier: 'installed-app-id' };
+    const { job, calls, runtime } = fixture(1, true, false, false, installed);
+    Object.assign(job, { allowDataLoss: true, assetName: 'installer-unsigned.hap',
+      approvedInstalledVersion: installed.versionCode, approvedInstalledFingerprint: installed.fingerprint,
+      approvedInstalledAppIdentifier: installed.appIdentifier,approvedInstalledUpdateTime:installed.updateTime||0,approvedInstallProof:InstallPreflight.packageProof(job) });
+    await runtime.ensureProfile(job); await runtime.sign(job);
+    if (failure === 'declined') calls.cloudAllowed = false;
+    if (failure === 'not-acknowledged') calls.backupAcknowledged = false;
+    if (failure === 'revoked') calls.revokeAfterBackup = true;
+    await assert.rejects(runtime.install(job), /云备份/);
+    assert.equal(calls.selfStaged, ''); assert.equal(calls.uninstalls, 0); assert.equal(calls.installedPath, '');
+    assert.equal(calls.identityBackups, failure === 'declined' ? 0 : 1);
+  });
+}
 test('installer self-update rejects a package whose identity differs from its catalog row', async () => {
   const { job, runtime } = fixture(1, true);
   job.versionCode = 8;
@@ -628,7 +658,8 @@ test('cancel during identity checks prevents uninstall and install from starting
   const f = fixture(1, false, false, false,
     { versionCode: 1, fingerprint: 'A'.repeat(64), appIdentifier: 'installed-app-id' });
   Object.assign(f.job, { allowDataLoss: true, approvedInstalledVersion: 1,
-    approvedInstalledFingerprint: 'A'.repeat(64), approvedInstalledAppIdentifier: 'installed-app-id' });
+    approvedInstalledFingerprint: 'A'.repeat(64), approvedInstalledAppIdentifier: 'installed-app-id',
+    approvedInstallProof:InstallPreflight.packageProof(f.job),approvedInstalledUpdateTime:0 });
   f.runtime.device.installedSigningIdentity = async () => {
     f.calls.cancelled = true;
     return { versionCode: 1, fingerprint: 'A'.repeat(64), appIdentifier: 'installed-app-id' };
@@ -641,7 +672,8 @@ test('once uninstall starts, cancellation still completes replacement to avoid l
   const f = fixture(1, false, false, false,
     { versionCode: 1, fingerprint: 'A'.repeat(64), appIdentifier: 'installed-app-id' });
   Object.assign(f.job, { allowDataLoss: true, approvedInstalledVersion: 1,
-    approvedInstalledFingerprint: 'A'.repeat(64), approvedInstalledAppIdentifier: 'installed-app-id' });
+    approvedInstalledFingerprint: 'A'.repeat(64), approvedInstalledAppIdentifier: 'installed-app-id',
+    approvedInstallProof:InstallPreflight.packageProof(f.job),approvedInstalledUpdateTime:0 });
   f.runtime.device.uninstall = async () => {
     f.calls.uninstalls++;
     f.calls.cancelled = true;
@@ -672,7 +704,7 @@ for (const changeIdentity of [false, true]) test('replacement protects the old a
   const installed = { versionCode: 1, fingerprint: 'A'.repeat(64), appIdentifier: 'installed-app-id' };
   const { job, calls, runtime } = fixture(1, false, false, false, installed);
   Object.assign(job, { allowDataLoss: true, approvedInstalledVersion: 1,
-    approvedInstalledFingerprint: installed.fingerprint, approvedInstalledAppIdentifier: installed.appIdentifier });
+    approvedInstalledFingerprint: installed.fingerprint, approvedInstalledAppIdentifier: installed.appIdentifier,approvedInstalledUpdateTime:installed.updateTime||0,approvedInstallProof:InstallPreflight.packageProof(job) });
   calls.stageFails = !changeIdentity; calls.identityChangesDuringTransfer = changeIdentity;
   await assert.rejects(runtime.install(job), changeIdentity ? /发生变化/ : /before uninstall/);
   assert.equal(calls.uninstalls, 0); assert.equal(calls.installedPath, '');
@@ -684,7 +716,7 @@ test('staged replacement keeps a cleanup ticket when the link drops during clean
   const { runtime, job, calls } = fixture(1, false, false, false, installed);
   Object.assign(job, { allowDataLoss: true, approvedInstalledVersion: installed.versionCode,
     approvedInstalledFingerprint: installed.fingerprint,
-    approvedInstalledAppIdentifier: installed.appIdentifier });
+    approvedInstalledAppIdentifier: installed.appIdentifier,approvedInstalledUpdateTime:installed.updateTime||0,approvedInstallProof:InstallPreflight.packageProof(job) });
   runtime.device.discardStaged = async () => false;
   await runtime.install(job);
   assert.equal(calls.uninstalls, 1); assert.ok(job.stagedTicket.length > 0);
@@ -769,12 +801,12 @@ test('a spent native timeout budget is reconciled without starting another five-
   assert.equal(calls.installs, 1);
 });
 
-test('an unreadable installation result stops recovery instead of submitting blindly', async () => {
+test('an unreadable version preflight stops submission before touching the app', async () => {
   const { job, calls, runtime } = fixture();
   calls.installError = 'Response channel closed';
   runtime.installedVersion = async () => { throw new Error('status query unavailable'); };
-  await assert.rejects(runtime.install(job), /Response channel closed/);
-  assert.equal(calls.installs, 1);
+  await assert.rejects(runtime.install(job), /status query unavailable/);
+  assert.equal(calls.installs, 0);
 });
 
 test('missing certificate recovery resumes the same install with fresh Profile and no repeated download',async()=>{
@@ -832,4 +864,17 @@ test('cancellation while pinning the replacement cannot resurrect a cancelled jo
  await assert.rejects(f.runtime.ensureProfile(f.job),/取消/);
  assert.equal(f.calls.profiles.length,1);assert.equal(f.job.signingCertId,'1');
  assert.ok(!f.calls.saved.some(j=>j.signingCertId==='5'));assert.equal(f.calls.installs,0);
+});
+
+test('local self replacement persists its own baseline before submission and confirms without a wireless identity query',async()=>{
+ const f=fixture(7,true,true);
+ Object.assign(f.job,{id:'local-self',appId:0,reinstallRequired:true,stage:'installing',stageHistory:[{stage:'installing',at:2000}]});
+ f.calls.selfIdentity={versionCode:7,updateTime:1000,fingerprint:'A'.repeat(64)};
+ await f.runtime.install(f.job);assert.equal(f.job.replacementInstallBaseline,1000);
+ assert.ok(f.calls.saved.some(row=>row.replacementInstallBaseline===1000));
+ f.runtime.confirmedSubmission='';f.calls.selfIdentity.updateTime=3000;
+ f.runtime.device.installedSigningIdentity=()=>assert.fail('self confirmation requires no HDC');
+ assert.equal(await f.runtime.confirmReplacement(f.job),true);
+ const evidence=await f.runtime.inspectEvidence(f.job);
+ assert.equal(evidence.replacementConfirmed,true);assert.equal(f.calls.hapHashes,0);
 });

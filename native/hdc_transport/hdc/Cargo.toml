@@ -29,3 +29,12 @@ zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+
+# Standalone HDC release checks follow the bridge's policy. Dependency builds
+# inherit the root rust_signer release profile instead; debug builds stay intact.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 0
+strip = "debuginfo"
+panic = "unwind"

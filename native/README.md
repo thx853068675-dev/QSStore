@@ -11,6 +11,8 @@ python3 tools/check_local.py --offline --build --output /tmp/qingqi-check
 
 需要 DevEco SDK、Rust、Node、Python。发布默认使用 release，`--build-mode debug` 用于诊断。无签名包交由设备侧签装；`build_formal_candidate.py` 可用工作区外的签名材料生成设备测试包。私钥、Profile、产物和验证资料不提交到源码仓库。
 
+商店服务配置：将 `config/store.example.json` 复制为 `store.local.json`，填写自建服务的 HTTPS 地址、公钥摘要及 CA 文件路径。Hvigor 在本地生成配置；生产配置与证书不提交，未配置的构建不会连接商店服务。
+
 工程保留独立开发包名；发布脚本临时使用正式包名并在结束时恢复。保留账号、私钥、Profile 和安装记录的旧版迁移逻辑。
 
 依赖：[hapsigner-rs](https://github.com/harmony-contrib/hapsigner-rs) 固定提交见 `rust_signer/Cargo.toml`；[Muka Rust HDC](https://github.com/Attect/muka_rust_hdc) 来源与许可见 `hdc_transport/README.md`；解压依赖见 `third_party/archive/NOTICE.md`。

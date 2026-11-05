@@ -3,15 +3,28 @@ import { preferences } from '@kit.ArkData';
 import { DiscoverSort, DiscoverSortKey, SortDirection } from './DiscoverSort';
 
 export class DiscoverSortSelection {
-  key: DiscoverSortKey = 'discover';
+  key: DiscoverSortKey = 'stars';
   direction: SortDirection = 'desc';
 }
 
 export class DiscoverSortPreferences {
-  private static selected: DiscoverSortKey = 'discover';
+  private static layout: string = 'normal';
+  private static selected: DiscoverSortKey = 'stars';
   private static directions: Map<string, SortDirection> = new Map();
   private static writes: Promise<void> = Promise.resolve();
 
+  static currentLayout(): string { return DiscoverSortPreferences.layout; }
+  static async saveLayout(context: common.UIAbilityContext, layout: string): Promise<void> {
+    DiscoverSortPreferences.layout = layout === 'sidebar' ? 'sidebar' : 'normal';
+    const value = DiscoverSortPreferences.layout;
+    const write = DiscoverSortPreferences.writes.then(async (): Promise<void> => {
+      const store = await preferences.getPreferences(context, 'discover-sort');
+      await store.put('layout', value);
+      await store.flush();
+    });
+    DiscoverSortPreferences.writes = write.catch(() => {});
+    return write;
+  }
   static current(): DiscoverSortSelection {
     const selection = new DiscoverSortSelection();
     selection.key = DiscoverSortPreferences.selected;
@@ -25,9 +38,15 @@ export class DiscoverSortPreferences {
     try {
       await DiscoverSortPreferences.writes;
       const store = await preferences.getPreferences(context, 'discover-sort');
-      DiscoverSortPreferences.selected = DiscoverSort.key(String(await store.get('selected', 'discover')));
-      for (const key of ['discover', 'stars', 'downloads', 'new']) {
+      DiscoverSortPreferences.layout = String(await store.get('layout', 'normal')) === 'sidebar' ? 'sidebar' : 'normal';
+      const savedKey = String(await store.get('selected', 'stars'));
+      DiscoverSortPreferences.selected = DiscoverSort.key(savedKey);
+      for (const key of ['stars', 'downloads', 'new']) {
         DiscoverSortPreferences.directions.set(key, DiscoverSort.direction(String(await store.get(key, 'desc'))));
+      }
+      if (savedKey === 'discover') {
+        const direction = DiscoverSort.direction(String(await store.get('discover', 'desc')));
+        await DiscoverSortPreferences.save(context, 'stars', direction);
       }
     } catch (_) { /* Keep the in-memory choice if storage is temporarily unavailable. */ }
   }

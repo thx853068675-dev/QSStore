@@ -31,6 +31,18 @@ const ICON_PREFIX = 'icon-';
 export class CatalogCache {
   /** 单张图标的字节上限，超过就不缓存（不是真的图标）。 */
   private static readonly MAX_ICON_BYTES: number = 512 * 1024;
+  private static cacheGeneration: number = 0;
+  private static writeTail: Promise<void> = Promise.resolve();
+
+  /** Capture before asynchronous reads so an older result cannot refill a cleared cache. */
+  static generation(): number { return CatalogCache.cacheGeneration; }
+
+  private static write(action: () => Promise<void>): Promise<void> {
+    const next = CatalogCache.writeTail.then(action);
+    // A failed clear must not poison later writes or another explicit cleanup.
+    CatalogCache.writeTail = next.catch(() => {});
+    return next;
+  }
 
   private static async store(context: common.UIAbilityContext): Promise<preferences.Preferences> {
     return preferences.getPreferences(context, STORE_NAME);
@@ -53,17 +65,20 @@ export class CatalogCache {
   }
 
   static async clear(context: common.UIAbilityContext): Promise<void> {
-    const store = await CatalogCache.store(context);
-    await store.clear();
-    await store.flush();
+    // Invalidate old downloads immediately, before awaiting the write barrier.
+    CatalogCache.cacheGeneration++;
+    await CatalogCache.write(async (): Promise<void> => {
+      const store = await CatalogCache.store(context);
+      await store.clear();
+      await store.flush();
+    });
   }
 
-  static async load(context: common.UIAbilityContext, sort: string = 'discover', direction: string = 'desc'): Promise<CatalogApp[]> {
+  static async load(context: common.UIAbilityContext, sort: string = 'stars', direction: string = 'desc'): Promise<CatalogApp[]> {
     try {
       const store = await CatalogCache.store(context);
       const key = KEY_CATALOG + '-' + DiscoverSort.cacheKey(sort, direction);
-      let raw = await store.get(key, '') as string;
-      if (raw.length === 0 && sort === 'discover' && direction === 'desc') raw = await store.get(KEY_CATALOG, '') as string;
+      const raw = await store.get(key, '') as string;
       if (raw.length === 0 || raw.length > 1024 * 1024) return [];
       const parsed = JSON.parse(raw) as Array<Record<string, Object>>;
       if (!Array.isArray(parsed)) return [];
@@ -75,13 +90,18 @@ export class CatalogCache {
   }
 
   static async save(context: common.UIAbilityContext, apps: CatalogApp[],
-    rows: Array<Record<string, Object>>, sort: string = 'discover', direction: string = 'desc'): Promise<void> {
+    rows: Array<Record<string, Object>>, sort: string = 'stars', direction: string = 'desc',
+    expectedGeneration: number = CatalogCache.generation()): Promise<void> {
     try {
-      const store = await CatalogCache.store(context);
-      // Four modes × two directions, one first page each; never mix sort scopes.
-      await store.put(KEY_CATALOG + '-' + DiscoverSort.cacheKey(sort, direction), JSON.stringify(rows));
-      await store.delete(KEY_CATALOG);
-      await store.flush();
+      await CatalogCache.write(async (): Promise<void> => {
+        if (expectedGeneration !== CatalogCache.generation()) return;
+        const store = await CatalogCache.store(context);
+        if (expectedGeneration !== CatalogCache.generation()) return;
+        // Three modes × two directions, one first page each; never mix sort scopes.
+        await store.put(KEY_CATALOG + '-' + DiscoverSort.cacheKey(sort, direction), JSON.stringify(rows));
+        await store.delete(KEY_CATALOG);
+        await store.flush();
+      });
     } catch (_) {
       // 写缓存失败不影响本次展示
     }
@@ -89,17 +109,21 @@ export class CatalogCache {
 
   /** 每个应用单独存一条，避免整页图标挤进 preferences 的单个值。 */
   static async saveIcons(context: common.UIAbilityContext,
-    icons: CachedIcon[]): Promise<void> {
+    icons: CachedIcon[], expectedGeneration: number = CatalogCache.generation()): Promise<void> {
     if (icons.length === 0) return;
     try {
-      const store = await CatalogCache.store(context);
-      for (const icon of icons) {
-        const id = Number(icon.id);
-        if (!Number.isInteger(id) || id <= 0 || icon.rev.length === 0 ||
-          icon.data.length === 0 || icon.data.length > 700 * 1024) continue;
-        await store.put(ICON_PREFIX + id, JSON.stringify(icon));
-      }
-      await store.flush();
+      await CatalogCache.write(async (): Promise<void> => {
+        if (expectedGeneration !== CatalogCache.generation()) return;
+        const store = await CatalogCache.store(context);
+        if (expectedGeneration !== CatalogCache.generation()) return;
+        for (const icon of icons) {
+          const id = Number(icon.id);
+          if (!Number.isInteger(id) || id <= 0 || icon.rev.length === 0 ||
+            icon.data.length === 0 || icon.data.length > 700 * 1024) continue;
+          await store.put(ICON_PREFIX + id, JSON.stringify(icon));
+        }
+        await store.flush();
+      });
     } catch (_) {
       // 同上
     }

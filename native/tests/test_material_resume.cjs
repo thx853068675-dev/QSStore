@@ -12,14 +12,17 @@ function fixture(component){
   '../entry/src/main/ets/components/DiscoverCategorySlice.ets'),'utf8'),{
    compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS,experimentalDecorators:true}
   }).outputText,{exports:sliceModule,Observed:value=>value,Track:()=>{}});
- const box={afterPaint:(_,fn)=>f.frames.push(fn),DiscoverCategorySlice:sliceModule.DiscoverCategorySlice,
-  DiscoverToolbarMotion:{options:(begin,end)=>({duration:560,begin,end})}};
+ const motionBox={};
+ const toolbarSource=fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/components/DiscoverHeader.ets'),'utf8');
+ const motionSource=toolbarSource.slice(toolbarSource.indexOf('export class DiscoverToolbarMotion'),toolbarSource.indexOf('export class DiscoverToolbarViewport'));
+ vm.runInNewContext(ts.transpileModule(motionSource,{compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS}}).outputText,{exports:motionBox});
+ const box={StoreMaterial:{supported:mode=>mode!=='off'},afterPaint:(_,fn)=>f.frames.push(fn),DiscoverCategorySlice:sliceModule.DiscoverCategorySlice,DiscoverToolbarMotion:motionBox.DiscoverToolbarMotion};
  const methods=['aboutToAppear','aboutToDisappear',ready];
- if(component==='DiscoverHeader')methods.push('mainCategoryWidth','onToolbarModeChanged','searchControlWidth','categoryControlWidth',
-  'refreshCategorySlices','sliceFor','onCategoriesChanged');
+ if(component==='DiscoverHeader')methods.push('onMaterialChanged','mainCategoryWidth','onToolbarModeChanged','searchControlWidth','categoryControlWidth',
+  'refreshCategorySlices','sliceFor','onCategoriesChanged','isLandscape','onViewportChanged');
  vm.runInNewContext(ts.transpileModule('class Page{'+methods.map(method).join('\n')+'};globalThis.Page=Page;',{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
- f.ui=Object.assign(new box.Page(),{homeVisibility:{visible:true},active:true,immersiveSupported:true,routeTransitioning:false,disposed:false,popupGeneration:0,popupReady:false,
-  categories:[],categorySlices:new Map(),searchWidth:386,categoryOffset:0,
+ f.ui=Object.assign(new box.Page(),{homeVisibility:{visible:true},active:true,immersiveSupported:true,materialMode:'adaptive',routeTransitioning:false,disposed:false,popupGeneration:0,popupReady:false,
+  windowWidth:362,windowHeight:822,categories:[],categorySlices:new Map(),searchWidth:386,categoryOffset:0,
   categoryScroller:{scrollTo(options){f.scrollOffset=options.xOffset;}},
   categoriesExpanded:false,categoriesOpen:false,toolbarMotionGeneration:0,toolbarProgress:0,
   onMotionStateChanged:moving=>f.motion.push(moving),
@@ -107,6 +110,13 @@ test('API 24/25 inline search and categories never wait for a popup paint on lif
  f.ui.active=false;f.ui.routeTransitioning=true;f.refresh();
  assert.equal(f.frames.length,0,'route and control enabled state still gate the inline buttons directly');
 });
+test('changing material to off cancels queued search popup restores and reenable waits for a fresh paint',()=>{
+ const f=fixture('DiscoverHeader');f.ui.aboutToAppear();assert.equal(f.frames.length,1);
+ f.ui.materialMode='off';f.ui.onMaterialChanged();assert.equal(f.ui.immersiveSupported,false);assert.equal(f.ui.popupReady,true);
+ f.ui.active=false;f.paint();assert.equal(f.ui.popupReady,true,'retired native callbacks cannot change the inline fallback');
+ f.ui.active=true;f.ui.materialMode='adaptive';f.ui.onMaterialChanged();assert.equal(f.ui.popupReady,false);
+ f.paint();assert.equal(f.ui.popupReady,true);assert.equal(f.ui.immersiveSupported,true);
+});
 
 test('search, category and fixed sorting capsule fit compact phones throughout the morph',()=>{
  const f=fixture('DiscoverHeader');
@@ -118,4 +128,18 @@ test('search, category and fixed sorting capsule fit compact phones throughout t
    assert(f.ui.searchControlWidth()>=44);assert(f.ui.categoryControlWidth()>=44);
   }
  }
+});
+
+test('landscape keeps a quarter-width search and expanded categories beside fixed sorting',()=>{
+ const f=fixture('DiscoverHeader');f.ui.windowWidth=822;f.ui.windowHeight=362;
+ for(const width of [560,720]){
+  f.ui.searchWidth=width;f.ui.onViewportChanged();
+  assert(f.ui.categoriesOpen);assert.equal(f.ui.toolbarProgress,1);
+  assert.equal(f.ui.searchControlWidth(),width/4);
+  assert.equal(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+64,width);
+ }
+ f.paint();assert(f.ui.popupReady);
+ f.ui.windowWidth=362;f.ui.windowHeight=822;f.ui.onViewportChanged();
+ assert(!f.ui.categoriesOpen);assert.equal(f.ui.toolbarProgress,0);
+ assert(!f.ui.popupReady);f.paint();assert(f.ui.popupReady);
 });

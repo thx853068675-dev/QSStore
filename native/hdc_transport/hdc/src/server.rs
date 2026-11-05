@@ -64,6 +64,22 @@ impl ConnectMap {
         guard.map.remove(connect_key);
     }
 
+    pub async fn keys(&self) -> Vec<String> {
+        self.inner.read().await.map.keys().cloned().collect()
+    }
+
+    pub async fn remove_session(&self, connect_key: &str, session_id: u32) {
+        let mut guard=self.inner.write().await;
+        if guard.map.get(connect_key).is_some_and(|info|info.session_id==session_id) {
+            guard.map.remove(connect_key);
+        }
+    }
+
+    pub async fn connected_session(&self, connect_key: &str) -> Option<u32> {
+        self.inner.read().await.map.get(connect_key)
+            .filter(|info|info.conn_status==ConnStatus::Connected).map(|info|info.session_id)
+    }
+
     pub async fn contains_key(&self, connect_key: &str) -> bool {
         let guard = self.inner.read().await;
         guard.map.contains_key(connect_key)
@@ -221,6 +237,10 @@ impl TcpMap {
         let mut guard = self.inner.lock().await;
         guard.session_writers.insert(id, wr);
         info!("tcp session start {id}");
+    }
+
+    pub async fn has_session(&self, id: u32) -> bool {
+        self.inner.lock().await.session_writers.contains_key(&id)
     }
 
     pub async fn start_channel(&self, id: u32, wr: tokio::net::tcp::OwnedWriteHalf) {
@@ -1878,6 +1898,12 @@ async fn start_tcp_daemon_session(
         Ok(port) if port > 0 => {}
         _ => return Err(Error::new(ErrorKind::InvalidInput, "Port range incorrect")),
     }
+    // tconn is also used as a preflight. Repeated shell/install checks must
+    // reuse the authenticated session rather than opening a new auth socket.
+    if let Some(session_id)=connect_map.connected_session(addr).await {
+        if tcp_map.has_session(session_id).await {return Ok(());}
+        connect_map.remove_session(addr,session_id).await;
+    }
     let stream = TcpStream::connect(addr).await?;
     let session_id = rand::random::<u32>();
     let (mut rd, wr) = stream.into_split();
@@ -2138,7 +2164,8 @@ async fn start_tcp_daemon_session(
                 Ok(f) => f,
                 Err(e) => {
                     warn!("daemon read error: {e}");
-                    connect_map_clone.remove(&connect_key).await;
+                    // A late EOF from an old socket cannot erase its replacement.
+                    connect_map_clone.remove_session(&connect_key,session_id).await;
                     let _ = tcp_map_clone.end_session(session_id).await;
                     break;
                 }
@@ -4823,6 +4850,24 @@ async fn start_usb_session(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn repeated_tcp_preflight_reuses_authenticated_socket_and_old_eof_cannot_erase_it() {
+        let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap().to_string();
+        let peer=TcpStream::connect(&address).await.unwrap();
+        let (_accepted,_)=listener.accept().await.unwrap();
+        let (_read,write)=peer.into_split();
+        let map=ConnectMap::new();let tcp=TcpMap::new();
+        tcp.start_session(42,write).await;
+        map.put(address.clone(),DaemonInfo{session_id:42,conn_type:ConnectType::Tcp,
+            conn_status:ConnStatus::Connected,dev_name:"phone".into(),version:String::new()}).await;
+        start_tcp_daemon_session(&address,&map,&tcp,&UsbMap::new(),7).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(50),listener.accept()).await.is_err());
+        map.remove_session(&address,41).await;
+        assert_eq!(map.connected_session(&address).await,Some(42));
+        assert_eq!(map.keys().await,vec![address.clone()]);
+        map.remove_session(&address,42).await;assert!(map.keys().await.is_empty());
+    }
     #[tokio::test]
     async fn file_send_waits_for_delayed_receiver_write_receipt() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

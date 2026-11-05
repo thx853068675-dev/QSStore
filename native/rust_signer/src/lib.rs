@@ -1,6 +1,7 @@
 //! In-process HAP signing bridge. No key, profile or certificate is embedded
 //! in the application; callers supply paths inside their own sandbox.
 
+mod hdc_target;
 use std::ffi::{c_char, CStr};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -540,8 +541,8 @@ fn module_permissions(module: &serde_json::Value) -> Vec<String> {
 fn installation_permissions(input: &Path) -> Result<String, String> {
     if input.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("app")) {
         let mut names = Vec::new();
-        for (_, module) in stage_app_modules(input, input)? {
-            let row: Vec<String> = serde_json::from_str(&installation_permissions(&module.0)?)
+        for module in stage_app_modules(input, input)? {
+            let row: Vec<String> = serde_json::from_str(&installation_permissions(&module.staged.0)?)
                 .map_err(|_| "invalid APP permissions")?;
             names.extend(row);
         }
@@ -597,8 +598,9 @@ fn zip_entry(archive: &mut ZipArchive<impl Read + std::io::Seek>,
     Ok(bytes)
 }
 
-/// QuietStart installs its embedded `entry_test` HAP after the outer app starts.
-/// The outer and inner modules must therefore carry the same user's signature.
+/// Only the layered QuietStart distribution embeds an `entry_test` HAP.
+/// Invite/single-module builds use ordinary signing even with the same bundle ID.
+/// An incomplete layered package is still invalid, never a single-module fallback.
 fn quietstart_worker(input: &Path) -> Result<Option<QuietStartWorker>, String> {
     let source = fs::File::open(input).map_err(|_| "cannot open source HAP")?;
     let mut archive = ZipArchive::new(source)
@@ -612,15 +614,20 @@ fn quietstart_worker(input: &Path) -> Result<Option<QuietStartWorker>, String> {
     if main.pointer("/app/bundleName").and_then(|v| v.as_str()) != Some(QUIETSTART_BUNDLE) {
         return Ok(None);
     }
+    let worker_count = archive.file_names().filter(|path| *path == WORKER_PATH).count();
+    let manifest_count = archive.file_names().filter(|path| *path == WORKER_MANIFEST_PATH).count();
+    if worker_count == 0 && manifest_count == 0 {
+        return Ok(None);
+    }
+    for (name, count) in [(WORKER_PATH, worker_count), (WORKER_MANIFEST_PATH, manifest_count)] {
+        if count != 1 {
+            return Err(format!("QuietStart layered package must contain exactly one {name}"));
+        }
+    }
     let version = main.pointer("/app/versionCode").and_then(|v| v.as_u64())
         .ok_or("QuietStart main module has no version code")?;
     if main.pointer("/module/name").and_then(|v| v.as_str()) != Some("entry") {
         return Err("QuietStart main module name is invalid".into());
-    }
-    for name in [WORKER_PATH, WORKER_MANIFEST_PATH] {
-        if archive.file_names().filter(|path| *path == name).count() != 1 {
-            return Err(format!("QuietStart package must contain exactly one {name}"));
-        }
     }
     let bytes = zip_entry(&mut archive, WORKER_PATH, WORKER_LIMIT)?;
     let manifest: serde_json::Value = serde_json::from_slice(
@@ -689,21 +696,53 @@ fn safe_package_name(name: &str) -> bool {
     !name.contains(['\\', '\0', ':']) && name.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-fn stage_app_modules(input: &Path, destination: &Path) -> Result<Vec<(String, PendingOutput)>, String> {
+/// Installable module extensions inside an APP. `.hsp` carries a shared module
+/// (a bundled runtime such as an embedded JRE) and must travel with the APP;
+/// dropping it removes libraries the application loads while starting up.
+fn package_kind(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".hap") { Some("hap") } else if lower.ends_with(".hsp") { Some("hsp") } else { None }
+}
+
+/// A module staged out of an APP, together with the identity read from its own manifest.
+struct StagedModule {
+    /// Entry name inside the APP; may differ from the staged file's name.
+    entry: String,
+    kind: &'static str,
+    /// Read to enforce the duplicate-module rule; asserted by the unit tests.
+    #[allow(dead_code)]
+    module: String,
+    staged: PendingOutput,
+}
+
+fn verify_staged_module_kind(module_type: &str, kind: &str) -> Result<(), String> {
+    // A `.hsp` file that is not a shared module, or a `.hap` that claims to be
+    // one, would be installed into the wrong module slot.
+    if kind == "hsp" && module_type != "shared" {
+        return Err("APP module declared as .hsp is not a shared module".into());
+    }
+    if kind == "hap" && module_type == "shared" {
+        return Err("APP shared module must use the .hsp extension".into());
+    }
+    Ok(())
+}
+
+fn stage_app_modules(input: &Path, destination: &Path) -> Result<Vec<StagedModule>, String> {
     if fs::metadata(input).map_err(|_| "cannot inspect APP size")?.len() > APP_LIMIT {
         return Err("APP file exceeds size limit".into());
     }
     let mut archive = ZipArchive::new(fs::File::open(input).map_err(|_| "cannot open APP")?)
         .map_err(|_| "APP is not a ZIP")?;
-    let mut result = Vec::new();
+    let mut result: Vec<StagedModule> = Vec::new();
     let mut total: u64 = 0;
     let mut identity = None;
     let mut names = std::collections::HashSet::new();
     let mut modules = std::collections::HashSet::new();
+    let mut has_entry = false;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| format!("APP entry: {e}"))?;
         let name = entry.name().to_owned();
-        if !name.to_ascii_lowercase().ends_with(".hap") { continue; }
+        let Some(kind) = package_kind(&name) else { continue };
         total = total.checked_add(entry.size()).ok_or("APP module size overflow")?;
         if !safe_package_name(&name) || !names.insert(name.clone()) || entry.is_dir() ||
            entry.size() == 0 || total > APP_LIMIT || result.len() >= 32 ||
@@ -717,16 +756,21 @@ fn stage_app_modules(input: &Path, destination: &Path) -> Result<Vec<(String, Pe
             .map_err(|e| format!("APP extraction: {e}"))?;
         if copied != expected { return Err("APP module length mismatch".into()); }
         drop(file);
-        let mut hap = ZipArchive::new(fs::File::open(&staged.0).map_err(|_| "cannot inspect APP module")?)
-            .map_err(|_| "APP module is not a HAP")?;
-        let manifest: serde_json::Value = serde_json::from_slice(&zip_entry(&mut hap, "module.json", 256 * 1024)?)
+        let mut module_archive = ZipArchive::new(
+            fs::File::open(&staged.0).map_err(|_| "cannot inspect APP module")?)
+            .map_err(|_| "APP module is not a HAP or HSP")?;
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &zip_entry(&mut module_archive, "module.json", 256 * 1024)?)
             .map_err(|_| "APP module manifest is invalid")?;
         let bundle = manifest.pointer("/app/bundleName").and_then(|v| v.as_str()).unwrap_or("");
         validate_bundle_name(bundle)?;
+        let module_type = manifest.pointer("/module/type").and_then(|v| v.as_str()).unwrap_or("");
+        verify_staged_module_kind(module_type, kind)?;
         let mut version = manifest.pointer("/app/versionCode").and_then(|v| v.as_u64()).unwrap_or(0);
-        let has_pack = hap.file_names().any(|name| name == "pack.info");
+        let has_pack = module_archive.file_names().any(|name| name == "pack.info");
         if has_pack {
-            let pack: serde_json::Value = serde_json::from_slice(&zip_entry(&mut hap, "pack.info", 256 * 1024)?)
+            let pack: serde_json::Value = serde_json::from_slice(
+                &zip_entry(&mut module_archive, "pack.info", 256 * 1024)?)
                 .map_err(|_| "APP module pack.info is invalid")?;
             if pack.pointer("/summary/app/bundleName").and_then(|v| v.as_str()) != Some(bundle) {
                 return Err("APP module pack.info bundle differs from manifest".into());
@@ -739,15 +783,40 @@ fn stage_app_modules(input: &Path, destination: &Path) -> Result<Vec<(String, Pe
             if identity.as_ref().is_some_and(|old| old != &current) { return Err("APP modules have different bundle or version".into()); }
             identity = Some(current);
         } else { return Err("APP module name or version is invalid or duplicated".into()); }
-        result.push((name, staged));
+        has_entry = has_entry || module_type == "entry";
+        result.push(StagedModule { entry: name, kind, module: module.to_owned(), staged });
     }
     if result.is_empty() { return Err("APP contains no HAP modules".into()); }
+    // Every installable APP needs its entry module; accepting an APP without one
+    // would produce a package the device can never launch.
+    if !has_entry { return Err("APP contains no entry module".into()); }
     Ok(result)
 }
 
+/// Preserve the APP's own metadata (pack.info, pac.json, ...) verbatim, while
+/// never carrying a source module's bytes or signature into the new archive.
+fn preserve_app_metadata(writer: &mut ZipWriter<fs::File>, input: &Path,
+                          modules: &[StagedModule]) -> Result<u32, String> {
+    let entries: std::collections::HashSet<&str> = modules.iter().map(|row| row.entry.as_str()).collect();
+    let mut original = ZipArchive::new(fs::File::open(input).map_err(|_| "cannot reopen APP")?)
+        .map_err(|_| "invalid APP")?;
+    let mut preserved = 0;
+    for i in 0..original.len() {
+        let entry = original.by_index(i).map_err(|_| "invalid APP metadata")?;
+        let name = entry.name().to_owned();
+        if entry.is_dir() || entries.contains(name.as_str()) || package_kind(&name).is_some() { continue; }
+        if !safe_package_name(&name) || entry.size() > 4 * 1024 * 1024 {
+            return Err("APP metadata entry is unsafe or oversized".into());
+        }
+        writer.raw_copy_file(entry).map_err(|_| format!("cannot preserve APP metadata {name}"))?;
+        preserved += 1;
+    }
+    Ok(preserved)
+}
+
 fn verify_app(input: &Path, destination: &Path) -> Result<(), String> {
-    for (_, module) in stage_app_modules(input, destination)? {
-        verify_installable_hap(&module.0)?;
+    for module in stage_app_modules(input, destination)? {
+        verify_installable_hap(&module.staged.0)?;
     }
     Ok(())
 }
@@ -759,25 +828,17 @@ fn sign_app(input: &Path, output: &Path, key: *const c_char, cert: *const c_char
     let file = fs::File::create(&pending.0).map_err(|_| "cannot create signed APP")?;
     let mut writer = ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    for (name, module) in &modules {
+    for module in &modules {
         let signed = PendingOutput::beside(output)?;
-        let from = std::ffi::CString::new(module.0.to_string_lossy().as_bytes()).map_err(|_| "invalid APP module path")?;
+        let from = std::ffi::CString::new(module.staged.0.to_string_lossy().as_bytes()).map_err(|_| "invalid APP module path")?;
         let to = std::ffi::CString::new(signed.0.to_string_lossy().as_bytes()).map_err(|_| "invalid APP signed path")?;
         sign(from.as_ptr(), to.as_ptr(), key, cert, profile)?;
-        writer.start_file(name, options).map_err(|e| format!("APP output: {e}"))?;
+        writer.start_file(module.entry.as_str(), options).map_err(|e| format!("APP output: {e}"))?;
         let mut source = fs::File::open(&signed.0).map_err(|_| "cannot read signed APP module")?;
         std::io::copy(&mut source, &mut writer).map_err(|_| "cannot write signed APP module")?;
     }
     // Preserve APP package metadata; never carry source HAP bytes/signatures through.
-    let mut original = ZipArchive::new(fs::File::open(input).map_err(|_| "cannot reopen APP")?)
-        .map_err(|_| "invalid APP")?;
-    for i in 0..original.len() {
-        let entry = original.by_index(i).map_err(|_| "invalid APP metadata")?;
-        if entry.name().eq("pack.info") {
-            if entry.size() > 4 * 1024 * 1024 { return Err("APP pack.info exceeds limit".into()); }
-            writer.raw_copy_file(entry).map_err(|_| "cannot preserve APP pack.info")?;
-        }
-    }
+    preserve_app_metadata(&mut writer, input, &modules)?;
     writer.finish().map_err(|_| "cannot finish APP")?.sync_all().map_err(|_| "cannot sync APP")?;
     verify_app(&pending.0, output)?;
     fs::rename(&pending.0, output).map_err(|_| "cannot commit signed APP")?;
@@ -939,8 +1000,12 @@ fn validate_bundle_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn target_command(port: u16, args: &[String], timeout: Duration) -> std::io::Result<String> {
+    qingqi_hdc_transport::command(port, &hdc_target::arguments(args), timeout)
+}
+
 fn remote_command(port: u16, args: &[String], seconds: u64) -> Result<String, String> {
-    qingqi_hdc_transport::command(port, args, Duration::from_secs(seconds))
+    target_command(port, args, Duration::from_secs(seconds))
         .map_err(|e| format!("APP device operation: {e}"))
 }
 
@@ -948,21 +1013,23 @@ fn stage_app_remote(port: u16, input: &Path) -> Result<(String, Vec<String>), St
     let modules = stage_app_modules(input, input)?;
     let folder = format!("/data/local/tmp/qingqi-app-{}-{}", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed));
     remote_command(port, &["shell".into(), "mkdir".into(), "-p".into(), folder.clone()], 15)?;
-    let total = modules.iter().try_fold(0u64, |sum, (_, m)| fs::metadata(&m.0).map(|meta| sum + meta.len()))
+    let total = modules.iter().try_fold(0u64, |sum, row| fs::metadata(&row.staged.0).map(|meta| sum + meta.len()))
         .map_err(|_| "cannot inspect APP module sizes")?;
     let mut sent = 0;
     let mut paths = Vec::new();
     let result = (|| {
-        for (i, (_, module)) in modules.iter().enumerate() {
-            verify_installable_hap(&module.0)?;
-            let remote = format!("{folder}/module-{i}.hap");
+        for (i, module) in modules.iter().enumerate() {
+            verify_installable_hap(&module.staged.0)?;
+            // Shared modules must keep a .hsp name on the device: `bm install`
+            // dispatches on the module type it reads from the package.
+            let remote = format!("{folder}/module-{i}.{}", module.kind);
             qingqi_hdc_transport::report_install_progress(&input.to_string_lossy(), "transfer", sent, total);
             let output = remote_command(port, &["file".into(), "send".into(),
-                module.0.to_string_lossy().into(), remote.clone()], 300)?;
+                module.staged.0.to_string_lossy().into(), remote.clone()], 300)?;
             if output.contains("[Fail]") || !output.contains("FileTransfer finish") {
                 return Err(format!("APP module transfer did not finish: {output}"));
             }
-            let mut file = fs::File::open(&module.0).map_err(|_| "cannot hash APP module")?;
+            let mut file = fs::File::open(&module.staged.0).map_err(|_| "cannot hash APP module")?;
             let mut digest = Sha256::new();
             let mut bytes = [0u8; 64 * 1024];
             loop {
@@ -974,7 +1041,7 @@ fn stage_app_remote(port: u16, input: &Path) -> Result<(String, Vec<String>), St
             if !checksum.to_ascii_lowercase().contains(&format!("{:x}", digest.finalize())) {
                 return Err("APP module transfer checksum differs".into());
             }
-            sent += fs::metadata(&module.0).map_err(|_| "cannot inspect APP module")?.len();
+            sent += fs::metadata(&module.staged.0).map_err(|_| "cannot inspect APP module")?.len();
             qingqi_hdc_transport::report_install_progress(&input.to_string_lossy(), "transfer", sent, total);
             paths.push(remote);
         }
@@ -1008,7 +1075,10 @@ fn parse_staged_ticket(text: &str) -> Result<(String, Vec<String>), String> {
     let mut files = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let file = row.as_str().ok_or("invalid staged module")?;
-        if file != format!("{folder}/module-{index}.hap") { return Err("invalid staged module path".into()); }
+        // A staged module is either a `.hap` or a shared `.hsp`; the index must
+        // still match the ticket so a file cannot be substituted for another.
+        let accepted = ["hap", "hsp"].iter().any(|kind| file == &format!("{folder}/module-{index}.{kind}"));
+        if !accepted { return Err("invalid staged module path".into()); }
         files.push(file.to_owned());
     }
     Ok((folder.to_owned(), files))
@@ -1075,6 +1145,7 @@ pub extern "C" fn qingqi_hdc_disconnect(
     error_buffer: *mut c_char,
     error_capacity: usize,
 ) -> i32 {
+    let Ok(_lock) = hdc_target::COMMAND_LOCK.try_lock() else { return -2; };
     match panic::catch_unwind(|| qingqi_hdc_transport::disconnect()) {
         Ok(Ok(dropped)) => {
             write_error(error_buffer, error_capacity, "");
@@ -1131,12 +1202,121 @@ pub extern "C" fn qingqi_hdc_command(
 ) -> i32 {
     let result = panic::catch_unwind(|| -> Result<String, String> {
         let root = path(key_root)?;
-        let argument = if parameter.is_null() { String::new() } else { path(parameter)? };
+        let raw = if parameter.is_null() { String::new() } else { path(parameter)? };
+        if operation==25{if raw!="peers"{qingqi_hdc_transport::local_discover::cancel_local_discovery();}qingqi_hdc_transport::lan_scan::cancel_health();return Ok(String::new());}
+        // Start/poll/stop discovery outside the installer command lock. A
+        // bounded background search must not stall installation or dismissal.
+        if operation == 24 {
+            let endpoints:Vec<String>=serde_json::from_str(&raw).map_err(|_|"invalid heartbeat request")?;
+            let probes=qingqi_hdc_transport::lan_scan::probe_endpoints(endpoints).map_err(|e|e.to_string())?;
+            let samples:Vec<_>=probes.iter().map(|row|serde_json::json!({"endpoint":row.endpoint,"reachable":row.reachable,
+                "first_error":row.first_error,"retried":row.retried,"elapsed_ms":row.elapsed_ms})).collect();
+            let timestamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+            // Bounded latest report only; no keys, UDID, auth messages or growing log history.
+            static HEALTH_LOG:std::sync::Mutex<Option<(std::time::Instant,String)>>=std::sync::Mutex::new(None);
+            let summary=probes.iter().map(|row|format!("{}:{}",row.endpoint,row.reachable)).collect::<Vec<_>>().join(",");
+            let write_log=if let Ok(mut previous)=HEALTH_LOG.lock(){
+                if previous.as_ref().is_some_and(|(at,old)|*old==summary&&at.elapsed()<Duration::from_secs(30)){false}
+                else{*previous=Some((std::time::Instant::now(),summary));true}
+            }else{false};
+            if write_log{let _=fs::write(Path::new(&root).join("hdc-peer-health.log"),serde_json::json!({"at":timestamp,"samples":samples}).to_string());}
+            let reachable:Vec<_>=probes.into_iter().filter_map(|row|row.reachable.then_some(row.endpoint)).collect();
+            return serde_json::to_string(&reachable).map_err(|e|e.to_string());
+        }
+        if operation == 21 && !raw.is_empty() {
+            let (action,detail)=raw.split_once(':').ok_or("invalid LAN discovery request")?;
+            let (id,hints)=detail.split_once('|').map(|(id,text)|(id,Some(text))).unwrap_or((detail,None));
+            let options:serde_json::Value=hints.map(|text|serde_json::from_str(text).map_err(|_|"invalid LAN discovery options")).transpose()?.unwrap_or(serde_json::Value::Null);
+            let hints:Vec<String>=if options.is_array(){serde_json::from_value(options.clone()).map_err(|_|"invalid LAN discovery hints")?}
+                else{serde_json::from_value(options.get("hints").cloned().unwrap_or(serde_json::json!([]))).map_err(|_|"invalid LAN discovery hints")?};
+            let budget=Duration::from_millis(options.get("budgetMs").and_then(|v|v.as_u64()).unwrap_or(30000).clamp(1,30000));
+            let deep=options.get("deep").and_then(|v|v.as_bool()).unwrap_or(true);
+            let allow_arp=options.get("allowArp").and_then(|v|v.as_bool()).unwrap_or(false);
+            let exact_port=options.get("port").map(|value|value.as_u64().filter(|port|(10000..=65535).contains(port)).map(|port|port as u16).ok_or("invalid manual port")).transpose()?;
+            let exact_host=options.get("host").map(|value|value.as_str().and_then(|host|host.parse::<std::net::Ipv4Addr>().ok()).filter(|ip|ip.is_private()).ok_or("invalid selected LAN address")).transpose()?;
+            if hints.len()>24 {return Err("too many LAN discovery hints".into());}
+            match action {
+                "start" => {
+                    let root=root.clone();let search_id=id.to_string();
+                    qingqi_hdc_transport::lan_scan::start_with_target_options(id,hints,budget,deep,exact_port,exact_host,move||{
+                        let mut arp=fs::read_to_string("/proc/net/arp").unwrap_or_default();
+                        if allow_arp&&arp.lines().count()<2 {
+                            let deadline=std::time::Instant::now()+Duration::from_millis(1500);
+                            let mut reason="local command busy".to_string();
+                            while std::time::Instant::now()<deadline &&
+                                qingqi_hdc_transport::lan_scan::snapshot(&search_id).is_ok_and(|s|s.searching) {
+                                if let Ok(_guard)=hdc_target::COMMAND_LOCK.try_lock() {
+                                    if !qingqi_hdc_transport::lan_scan::snapshot(&search_id).is_ok_and(|s|s.searching){break;}
+                                    let _scope=hdc_target::Scope::enter(None);
+                                    match qingqi_hdc_transport::start(Path::new(&root),port).and_then(|actual_port|
+                                        target_command(actual_port,&["shell".into(),"cat".into(),"/proc/net/arp".into()],Duration::from_millis(700))) {
+                                        Ok(table)=>{arp=table;reason=format!("rows={}",arp.lines().count());},
+                                        Err(error)=>{reason=error.to_string();},
+                                    }
+                                    if arp.lines().count()>1 {break;}
+                                }
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                            let _=fs::write(Path::new(&root).join("hdc-lan-arp.log"),reason);
+                        }
+                        arp
+                    }).map_err(|e|e.to_string())?;
+                },
+                "stop" => qingqi_hdc_transport::lan_scan::stop(id),
+                "poll" => {},
+                _ => return Err("invalid LAN discovery action".into()),
+            }
+            let row=qingqi_hdc_transport::lan_scan::snapshot(id).map_err(|e|e.to_string())?;
+            if action!="poll"||!row.searching {let _=fs::write(Path::new(&root).join("hdc-lan-discovery.log"),format!("id={id}; searching={}; checked={}; total={}; devices={:?}; error={}; {}\n",row.searching,row.checked,row.total,row.devices,row.error,format!("first_peer_ms={:?}; first_device_ms={:?}; {}",row.first_peer_ms,row.first_found_ms,row.diagnostic)));}
+            return serde_json::to_string(&serde_json::json!({"devices":row.devices,"peers":row.peers,"searching":row.searching,
+                "checked":row.checked,"covered":row.covered,"complete":row.complete,"total":row.total,"error":row.error})).map_err(|e|e.to_string());
+        }
+        if operation==19 {qingqi_hdc_transport::lan_scan::quiesce();}
+        let scoped = if operation == 19 { Some(hdc_target::request(&raw)?) } else { None };
+        let peer_lock = scoped.as_ref().map(|row| hdc_target::peer_lock(&row.target)).transpose()?;
+        let command_lock = peer_lock.as_deref().unwrap_or(&hdc_target::COMMAND_LOCK);
+        let _lock = command_lock.lock().map_err(|_| "HDC command lock poisoned")?;
+        let operation = scoped.as_ref().map(|row| row.operation).unwrap_or(operation);
+        let argument = scoped.as_ref().map(|row| row.parameter.clone()).unwrap_or(raw);
+        let _scope = hdc_target::Scope::enter(scoped.as_ref().map(|row|row.target.clone()));
         let operation_argument = argument.clone();
+        if operation == 23 {
+            let dropped=match hdc_target::local() {
+                Some(target)=>qingqi_hdc_transport::disconnect_target(&target),
+                None=>Ok(0),
+            }.map_err(|e|format!("local disconnect: {e}"))?;
+            return Ok(dropped.to_string());
+        }
+        if operation == 21 {
+            return qingqi_hdc_transport::discover_lan_devices()
+                .map_err(|e|format!("LAN discovery: {e}"))
+                .and_then(|devices|serde_json::to_string(&devices).map_err(|e|e.to_string()));
+        }
+        if operation == 20 {
+            if let Ok(ip)=argument.parse::<std::net::Ipv4Addr>() {
+                if ip.is_private() {
+                    if let Some(port)=qingqi_hdc_transport::lan_scan::known_port(ip) {return Ok(port.to_string());}
+                }
+            }
+            return qingqi_hdc_transport::discover_lan_port(&argument)
+                .map(|port|port.map(|value|value.to_string()).unwrap_or_default()).map_err(|e|format!("LAN port discovery: {e}"));
+        }
+        if operation == 18 {
+            let started = std::time::Instant::now();
+            let result = qingqi_hdc_transport::discover_local_port()
+                .map(|port| port.map(|value| value.to_string()).unwrap_or_default())
+                .map_err(|error| format!("local HDC discovery: {error}"));
+            // Keep only the latest local discovery outcome, never keys or auth
+            // material. Useful when release devices suppress console logs.
+            let _ = fs::write(Path::new(&root).join("hdc-local-discovery.log"),
+                format!("{result:?}; elapsed_ms={}\n", started.elapsed().as_millis()));
+            return result;
+        }
         let args = match operation {
             0 => vec!["list".into(), "targets".into()],
-            1 => {
-                if !argument.starts_with("127.0.0.1:") &&
+            1 | 16 => {
+                if scoped.is_some() { hdc_target::private_endpoint(&argument)?; }
+                else if !argument.starts_with("127.0.0.1:") &&
                     !argument.starts_with("localhost:") {
                     return Err("HDC target must be this device".into());
                 }
@@ -1144,8 +1324,10 @@ pub extern "C" fn qingqi_hdc_command(
                     .ok_or("HDC target has no port")?;
                 let target_port: u16 = port_text.parse().map_err(|_| "invalid HDC target port")?;
                 if target_port < 1024 { return Err("invalid HDC target port".into()); }
+                if scoped.is_none() { hdc_target::remember_local(&argument); }
                 vec!["tconn".into(), argument]
             }
+            22 => vec!["shell".into(), "param".into(), "get".into(), "const.product.devicetype".into()],
             2 => vec!["shell".into(), "bm".into(), "get".into(), "--udid".into()],
             3 => {
                 validate_bundle_name(&argument)?;
@@ -1198,12 +1380,53 @@ pub extern "C" fn qingqi_hdc_command(
                 validate_bundle_name(&argument)?;
                 vec!["shell".into(), "bm".into(), "dump".into(), "-l".into(), "-n".into(), argument]
             }
+            15 => {
+                let target_port = fixed_debug_port(&argument)?;
+                vec!["tmode".into(), "port".into(), target_port.to_string()]
+            }
+            17 => vec!["tmode".into(), "port".into(), "close".into()],
+            // Same batched label listing used by Qingqi Router's grouped apps.
+            26 => vec!["shell".into(), "sh".into(), "-c".into(),
+                "'bm dump -a -l && printf \"\\n__QINGQI_APP_LABELS_END__\\n\"'".into()],
             _ => return Err("unsupported HDC operation".into()),
         };
         // start() 返回实际监听端口：首选端口被别的程序占用时它会换一个空闲的
         let actual_port = qingqi_hdc_transport::start(Path::new(&root), port)
             .map_err(|error| format!("HDC server: {error}"))?;
+        if let Some(row) = &scoped {
+            if operation != 1 && operation != 16 {
+                let linked = qingqi_hdc_transport::command(actual_port, &["tconn".into(), row.target.clone()], Duration::from_secs(4))
+                    .map_err(|e|format!("target reconnect: {e}"))?;
+                if linked.contains("[Fail]") && !linked.to_lowercase().contains("already") { return Err(linked); }
+                if !row.udid.is_empty() {
+                    let actual = remote_command(actual_port, &["shell".into(),"bm".into(),"get".into(),"--udid".into()],8)?;
+                    let identity=actual.split(|c:char|!c.is_ascii_hexdigit())
+                        .find(|value|(40..=128).contains(&value.len()))
+                        .ok_or_else(||format!("target device identity unavailable: {actual}"))?;
+                    if !identity.eq_ignore_ascii_case(&row.udid) {
+                        return Err("target device identity changed; installation stopped".into());
+                    }
+                    if operation == 2 { return Ok(actual); }
+                }
+            }
+        }
         if operation == 10 { return stage_replacement(actual_port, Path::new(&operation_argument)); }
+        if operation == 22 {
+            let kind=remote_command(actual_port,&args,8)?;
+            // During first trust, the daemon reports E000003 before the user
+            // has decided. Return immediately instead of repeating three more
+            // denied shell queries and packaging the boilerplate as metadata.
+            if kind.is_empty(){return Err("device metadata not ready".into());}
+            if kind.contains("[E000003]")||kind.contains("[Fail]")||kind.to_ascii_lowercase().contains("unauthorized"){
+                return Err(kind);
+            }
+            let name=remote_command(actual_port,&["shell".into(),"param".into(),"get".into(),"const.product.name".into()],8)?;
+            let udid=remote_command(actual_port,&["shell".into(),"bm".into(),"get".into(),"--udid".into()],8)?;
+            // Optional product model: unavailable art metadata cannot reject an authenticated device.
+            let model=remote_command(actual_port,&["shell".into(),"param".into(),"get".into(),"const.product.model".into()],2).unwrap_or_default();
+            let _=fs::write(Path::new(&root).join("hdc-peer-metadata.log"),format!("kind={kind:?}; name={name:?}; udid={udid:?}\n"));
+            return serde_json::to_string(&serde_json::json!({"kind":kind.trim(),"name":name.trim(),"udid":udid.trim(),"model":model.trim()})).map_err(|e|e.to_string());
+        }
         if operation == 11 || operation == 12 {
             let (folder, modules) = parse_staged_ticket(&operation_argument)?;
             if operation == 12 {
@@ -1245,7 +1468,7 @@ pub extern "C" fn qingqi_hdc_command(
             }
             let expected = format!("{:x}", digest.finalize());
             let send = |args: &[String]| -> Result<String, String> {
-                let output = qingqi_hdc_transport::command(actual_port, args,
+                let output = target_command(actual_port, args,
                     Duration::from_secs(300)).map_err(|error| format!("HDC transfer: {error}"))?;
                 if output.contains("[Fail]") || !output.contains("FileTransfer finish") {
                     return Err(format!("HDC file transfer did not finish: {output}"));
@@ -1264,14 +1487,14 @@ pub extern "C" fn qingqi_hdc_command(
             let local_script = format!("{root}/qingqi-self-update.sh");
             fs::write(&local_script, &script).map_err(|error| error.to_string())?;
             send(&["file".into(), "send".into(), local_script, SELF_UPDATE_SCRIPT.into()])?;
-            let script_checksum = qingqi_hdc_transport::command(actual_port,
+            let script_checksum = target_command(actual_port,
                 &["shell".into(), "sha256sum".into(), SELF_UPDATE_SCRIPT.into()],
                 Duration::from_secs(15)).map_err(|error| format!("remote script checksum: {error}"))?;
             let script_expected = format!("{:x}", Sha256::digest(script.as_bytes()));
             if !script_checksum.to_ascii_lowercase().contains(&script_expected) {
                 return Err("staged self-update script checksum does not match".into());
             }
-            let checksum = qingqi_hdc_transport::command(actual_port,
+            let checksum = target_command(actual_port,
                 &["shell".into(), "sha256sum".into(), SELF_UPDATE_HAP.into()],
                 Duration::from_secs(45)).map_err(|error| format!("remote checksum: {error}"))?;
             if !checksum.to_ascii_lowercase().contains(&expected) {
@@ -1279,18 +1502,28 @@ pub extern "C" fn qingqi_hdc_command(
             }
             return Ok("self-update staged and verified".into());
         }
-        qingqi_hdc_transport::command(actual_port, &args,
+        target_command(actual_port, &args,
             Duration::from_secs(if operation == 4 { 300 }
                 else if operation == 7 { 90 }
                 else if operation == 9 { 15 }
-                else if operation == 1 { 15 }
+                // A first remote trust dialog may wait up to 60 seconds in
+                // the daemon handshake. Do not time out its channel at 15s
+                // and start a competing auth session just before approval.
+                else if operation == 1 { if scoped.is_some() { 75 } else { 15 } }
+                else if operation == 16 { 4 }
+                else if operation == 15 || operation == 17 { 8 }
                 else if operation == 2 { 8 }
                 else { 30 }))
             .map_err(|error| format!("HDC command: {error}"))
     });
     let text = match result {
         Ok(Ok(text)) => text,
-        Ok(Err(error)) => { write_error(error_buffer, error_capacity, &error); return 1; }
+        Ok(Err(error)) => {
+            if operation==19 {
+                if let Ok(root)=path(key_root) {let _=fs::write(Path::new(&root).join("hdc-peer-error.log"),&error);}
+            }
+            write_error(error_buffer, error_capacity, &error); return 1;
+        }
         Err(_) => {
             write_error(error_buffer, error_capacity, "HDC transport stopped unexpectedly");
             return 2;
@@ -1308,13 +1541,32 @@ pub extern "C" fn qingqi_hdc_command(
     0
 }
 
+fn fixed_debug_port(text: &str) -> Result<u16, String> {
+    if text.len() != 5 || !text.bytes().all(|value| value.is_ascii_digit()) {
+        return Err("fixed debug port must be five digits".into());
+    }
+    let port: u16 = text.parse().map_err(|_| "invalid fixed debug port")?;
+    if port < 10000 { return Err("invalid fixed debug port".into()); }
+    Ok(port)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{quietstart_worker, repack_quietstart, PendingOutput, NEXT_TEMP,
+    use super::{quietstart_worker, repack_quietstart, zip_entry, PendingOutput, NEXT_TEMP,
         WORKER_MANIFEST_PATH, WORKER_PATH};
     use sha2::{Digest, Sha256};
     use std::{fs, io::{Cursor, Write}, sync::atomic::Ordering};
     use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
+
+    #[test]
+    fn fixed_port_only_accepts_a_five_digit_unprivileged_port() {
+        for valid in ["10000", "45678", "65535"] {
+            assert!(super::fixed_debug_port(valid).is_ok());
+        }
+        for invalid in ["9999", "65536", "01234", "12345;id", "12345\n", "-1000"] {
+            assert!(super::fixed_debug_port(invalid).is_err());
+        }
+    }
 
     #[test]
     fn bundle_list_completion_is_only_emitted_after_success() {
@@ -1332,6 +1584,103 @@ mod tests {
             writer.write_all(content).unwrap();
         }
         writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn quietstart_single_module_hap_and_app_do_not_require_a_worker() {
+        let dir = std::env::temp_dir().join(format!("qingqi-plain-{}-{}",
+            std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let entry = app_module(super::QUIETSTART_BUNDLE, "entry", 124030, 124030,
+            "ohos.permission.INTERNET");
+        let hap = dir.join("entry.hap");
+        fs::write(&hap, &entry).unwrap();
+        assert!(quietstart_worker(&hap).unwrap().is_none());
+        assert_eq!(super::installation_permissions(&hap).unwrap(), r#"["ohos.permission.INTERNET"]"#);
+        let app = dir.join("invite.app");
+        fs::write(&app, sample_zip(&[("entry-default.hap", &entry), ("pac.json", b"{}")])).unwrap();
+        assert_eq!(super::installation_permissions(&app).unwrap(), r#"["ohos.permission.INTERNET"]"#);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2, "APP permission inspection releases staged modules");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn quietstart_partial_worker_is_not_silently_treated_as_single_module() {
+        let dir = std::env::temp_dir().join(format!("qingqi-partial-{}-{}",
+            std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("partial.hap");
+        let main = br#"{"app":{"bundleName":"com.tonghongxiang.quietstart","versionCode":124030},"module":{"name":"entry","type":"entry"}}"#;
+        for present in [WORKER_PATH, WORKER_MANIFEST_PATH] {
+            fs::write(&input, sample_zip(&[("module.json", main), (present, b"incomplete")])).unwrap();
+            assert!(quietstart_worker(&input).err().unwrap().contains("layered package must contain exactly one"));
+            assert!(super::installation_permissions(&input).is_err());
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn quietstart_plain_and_layered_distributions_sign_and_verify_with_their_actual_structure() {
+        use std::ffi::CString;
+        use hapsigner::{ProfileSigner, SigningKey};
+        use x509_cert::der::{pem::LineEnding, Decode, EncodePem};
+        let dir = std::env::temp_dir().join(format!("qingqi-distribution-sign-{}-{}",
+            std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let (key, certificates) = synthetic_chain(false);
+        let chain = SigningKey::cert_chain_from_bytes(certificates.as_bytes()).unwrap();
+        let pem = x509_cert::Certificate::from_der(&chain[0]).unwrap().to_pem(LineEnding::LF).unwrap();
+        let content = serde_json::to_vec(&serde_json::json!({
+            "type":"debug", "bundle-info":{"bundle-name":super::QUIETSTART_BUNDLE,"development-certificate":pem}
+        })).unwrap();
+        let profile = ProfileSigner::new(SigningKey {
+            private_key_der: super::parse_ec_private_key(&key).unwrap().to_pkcs8_der().unwrap(),
+            cert_chain: chain
+        }, super::SigningAlgorithm::EcdsaSha256).sign(&content).unwrap();
+        let key_path=dir.join("key.pem");let cert_path=dir.join("chain.pem");let profile_path=dir.join("profile.p7b");
+        fs::write(&key_path,key).unwrap();fs::write(&cert_path,certificates).unwrap();fs::write(&profile_path,profile).unwrap();
+        let key_arg=CString::new(key_path.to_str().unwrap()).unwrap();
+        let cert_arg=CString::new(cert_path.to_str().unwrap()).unwrap();
+        let profile_arg=CString::new(profile_path.to_str().unwrap()).unwrap();
+        let plain=app_module(super::QUIETSTART_BUNDLE,"entry",124030,124030,"ohos.permission.INTERNET");
+        let worker=app_module(super::QUIETSTART_BUNDLE,"entry_test",124030,124030,"ohos.permission.CAMERA");
+        let descriptor=serde_json::to_vec(&serde_json::json!({
+            "bundleName":super::QUIETSTART_BUNDLE,"moduleName":"entry_test","versionCode":124030,
+            "size":worker.len(),"sha256":format!("{:x}",Sha256::digest(&worker))
+        })).unwrap();
+        let mut plain_zip=ZipArchive::new(Cursor::new(&plain)).unwrap();
+        let main=super::zip_entry(&mut plain_zip,"module.json",256*1024).unwrap();
+        let pack=super::zip_entry(&mut plain_zip,"pack.info",256*1024).unwrap();
+        let layered=sample_zip(&[("module.json",&main),("pack.info",&pack),(WORKER_PATH,&worker),(WORKER_MANIFEST_PATH,&descriptor)]);
+        let mut cases = vec![
+            ("single.hap",plain.clone(),false),
+            ("invite.app",sample_zip(&[("entry-default.hap",&plain),("pac.json",b"{}")]),false),
+            ("layered.hap",layered.clone(),true),
+            ("layered.app",sample_zip(&[("entry-default.hap",&layered)]),true),
+        ];
+        // Optional private regression artifact; never bundle a user's APP or signing material in the repository.
+        if let Ok(path) = std::env::var("QINGQI_SINGLE_MODULE_APP") {
+            cases.push(("real-invite.app",fs::read(path).expect("read supplied single-module APP"),false));
+        }
+        for (name,bytes,has_worker) in cases {
+            let input=dir.join(name);let output=dir.join(format!("signed-{name}"));
+            fs::write(&input,bytes).unwrap();
+            let from=CString::new(input.to_str().unwrap()).unwrap();let to=CString::new(output.to_str().unwrap()).unwrap();
+            super::sign(from.as_ptr(),to.as_ptr(),key_arg.as_ptr(),cert_arg.as_ptr(),profile_arg.as_ptr()).unwrap();
+            if name.ends_with(".app") {
+                super::verify_app(&output,&output).unwrap();
+                let mut archive=ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+                let signed_module=super::zip_entry(&mut archive,"entry-default.hap",16*1024*1024).unwrap();
+                let module_path=dir.join("inspect.hap");fs::write(&module_path,signed_module).unwrap();
+                assert_eq!(quietstart_worker(&module_path).unwrap().is_some(),has_worker);
+                fs::remove_file(module_path).unwrap();
+            } else {
+                super::verify_installable_hap(&output).unwrap();
+                assert_eq!(quietstart_worker(&output).unwrap().is_some(),has_worker);
+            }
+        }
+        assert!(fs::read_dir(&dir).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().contains(".qingqi-")));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1606,13 +1955,20 @@ mod tests {
         fs::remove_file(destination).unwrap();
         fs::remove_dir(dir).unwrap();
     }
-    fn app_module(bundle: &str, module: &str, manifest_code: u64, pack_code: u64, permission: &str) -> Vec<u8> {
+    /// Build a module fixture. `module_type` mirrors `module.type`, which decides
+    /// whether the entry is installable as a `.hap` or must be a `.hsp`.
+    fn typed_app_module(bundle: &str, module: &str, module_type: &str, manifest_code: u64,
+                        pack_code: u64, permission: &str) -> Vec<u8> {
         let manifest = serde_json::to_vec(&serde_json::json!({
             "app":{"bundleName":bundle,"versionCode":manifest_code},
-            "module":{"name":module,"requestPermissions":[{"name":permission}]}})).unwrap();
+            "module":{"name":module,"type":module_type,"requestPermissions":[{"name":permission}]}})).unwrap();
         let pack = serde_json::to_vec(&serde_json::json!({
             "summary":{"app":{"bundleName":bundle,"version":{"code":pack_code}}}})).unwrap();
         sample_zip(&[("module.json", &manifest), ("pack.info", &pack)])
+    }
+    fn app_module(bundle: &str, module: &str, manifest_code: u64, pack_code: u64, permission: &str) -> Vec<u8> {
+        let module_type = if module == "entry" { "entry" } else { "feature" };
+        typed_app_module(bundle, module, module_type, manifest_code, pack_code, permission)
     }
 
     #[test]
@@ -1626,11 +1982,101 @@ mod tests {
         fs::write(&input, sample_zip(&[("entry.hap", &a), ("feature.hap", &b)])).unwrap();
         let staged = super::stage_app_modules(&input, &input).unwrap();
         assert_eq!(staged.len(), 2);
-        assert!(staged.iter().all(|(_, file)| file.0.exists()));
+        assert!(staged.iter().all(|row| row.staged.0.exists()));
+        assert_eq!(staged.iter().filter(|row| row.kind == "hap").count(), 2);
         drop(staged);
         assert_eq!(super::installation_permissions(&input).unwrap(),
             r#"["ohos.permission.CAMERA","ohos.permission.INTERNET"]"#);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn app_keeps_shared_hsp_modules_instead_of_dropping_the_bundled_runtime() {
+        let dir = std::env::temp_dir().join(format!("qingqi-app-hsp-{}-{}",
+            std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("input.app");
+        let entry = typed_app_module("com.example.app", "entry", "entry", 12, 12, "ohos.permission.INTERNET");
+        let shared = typed_app_module("com.example.app", "jre25", "shared", 12, 12, "");
+        fs::write(&input, sample_zip(&[
+            ("pac.json", br#"{"dataProcess":[],"specialAPIs":[]}"#),
+            ("pack.info", br#"{"summary":{"app":{"bundleName":"com.example.app"}}}"#),
+            ("entry-default.hap", &entry),
+            ("jre25-default.hsp", &shared),
+        ])).unwrap();
+        let staged = super::stage_app_modules(&input, &input).unwrap();
+        assert_eq!(staged.len(), 2, "a shared .hsp module must be staged with the APP");
+        assert_eq!(staged.iter().filter(|row| row.kind == "hsp").count(), 1);
+        assert_eq!(staged.iter().find(|row| row.kind == "hsp").unwrap().module, "jre25");
+        // A shared module carries no permissions of its own.
+        assert_eq!(super::installation_permissions(&input).unwrap(),
+            r#"["ohos.permission.INTERNET"]"#);
+        drop(staged);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn app_repack_preserves_pack_metadata_and_never_copies_source_module_bytes() {
+        let dir = std::env::temp_dir().join(format!("qingqi-app-meta-{}-{}",
+            std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("input.app");
+        let output = dir.join("output.app");
+        let pac = br#"{"dataProcess":[],"specialAPIs":[]}"#;
+        let pack = br#"{"summary":{"app":{"bundleName":"com.example.app"},"modules":[{"distro":{"moduleName":"jre25"}}]}}"#;
+        let entry = typed_app_module("com.example.app", "entry", "entry", 12, 12, "ohos.permission.INTERNET");
+        let shared = typed_app_module("com.example.app", "jre25", "shared", 12, 12, "");
+        fs::write(&input, sample_zip(&[
+            ("pac.json", pac), ("pack.info", pack),
+            ("entry-default.hap", &entry), ("jre25-default.hsp", &shared),
+        ])).unwrap();
+        let modules = super::stage_app_modules(&input, &input).unwrap();
+        assert_eq!(modules.len(), 2);
+        // The signer rewrites every module, so only metadata may be raw-copied:
+        // a source module must never reach the output with its old bytes.
+        let mut writer = zip::ZipWriter::new(fs::File::create(&output).unwrap());
+        assert_eq!(super::preserve_app_metadata(&mut writer, &input, &modules).unwrap(), 2);
+        writer.finish().unwrap();
+        drop(modules);
+        let mut written = ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+        let names: Vec<String> = written.file_names().map(str::to_owned).collect();
+        assert_eq!(names, vec!["pac.json".to_string(), "pack.info".to_string()]);
+        assert_eq!(zip_entry(&mut written, "pac.json", 4096).unwrap(), pac);
+        assert_eq!(zip_entry(&mut written, "pack.info", 4096).unwrap(), pack);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2, "staged modules are cleaned separately");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn app_rejects_hsp_or_hap_entries_whose_declared_module_type_disagrees() {
+        let dir = std::env::temp_dir().join(format!("qingqi-app-kind-{}-{}",
+            std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("input.app");
+        let entry = typed_app_module("com.example.app", "entry", "entry", 12, 12, "");
+        // A shared module shipped as .hap would be installed as an entry/feature slot.
+        let shared_as_hap = typed_app_module("com.example.app", "jre25", "shared", 12, 12, "");
+        fs::write(&input, sample_zip(&[("entry.hap", &entry), ("jre25.hap", &shared_as_hap)])).unwrap();
+        assert!(super::stage_app_modules(&input, &input).is_err());
+        // A module that is not shared may not claim the .hsp slot either.
+        let entry_as_hsp = typed_app_module("com.example.app", "feature", "feature", 12, 12, "");
+        fs::write(&input, sample_zip(&[("entry.hap", &entry), ("feature.hsp", &entry_as_hsp)])).unwrap();
+        assert!(super::stage_app_modules(&input, &input).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn app_requires_an_entry_module() {
+        let dir = std::env::temp_dir().join(format!("qingqi-app-entry-{}-{}",
+            std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("input.app");
+        let shared = typed_app_module("com.example.app", "jre25", "shared", 12, 12, "");
+        let feature = typed_app_module("com.example.app", "feature", "feature", 12, 12, "");
+        fs::write(&input, sample_zip(&[("jre25-default.hsp", &shared), ("feature.hap", &feature)])).unwrap();
+        assert!(super::stage_app_modules(&input, &input).is_err(),
+            "an APP without an entry module could never be launched");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1669,7 +2115,25 @@ mod staging_tests {
             assert!(parse_staged_ticket(&staged_ticket(bad, &files)).is_err());
         }
         assert!(parse_staged_ticket(&staged_ticket(folder, &["/data/local/tmp/other.hap".into()])).is_err());
+        // A valid APP ticket mixes slots by index. Slot order is not a secret:
+        // the ticket is generated here and every file is checksum-bound after
+        // transfer, so only the folder and the slot shape need validating.
+        let mixed = vec![format!("{folder}/module-0.hap"), format!("{folder}/module-1.hsp")];
+        assert_eq!(parse_staged_ticket(&staged_ticket(folder, &mixed)).unwrap(), (folder.into(), mixed.clone()));
+        assert!(parse_staged_ticket(&staged_ticket(folder, &[format!("{folder}/module-0.hspx")])).is_err());
+        assert!(parse_staged_ticket(&staged_ticket(folder, &[format!("{folder}/module-1.hap")])).is_err());
     }
+
+    #[test]
+    fn app_ticket_accepts_both_hap_and_hsp_slots_in_order() {
+        let folder = "/data/local/tmp/qingqi-app-123-1";
+        let files = vec![format!("{folder}/module-0.hap"), format!("{folder}/module-1.hsp")];
+        assert_eq!(parse_staged_ticket(&staged_ticket(folder, &files)).unwrap(), (folder.into(), files.clone()));
+        let command = replacement_command("com.example.app", &files).unwrap();
+        assert!(command.contains(&files[0]), "the entry module must be installed");
+        assert!(command.contains(&files[1]), "the bundled runtime must be installed too");
+    }
+
     #[test]
     fn replacement_installs_only_after_successful_uninstall() {
         let cmd = replacement_command("com.example.app", &["/data/local/tmp/qingqi-install-123-1/module-0.hap".into()]).unwrap();

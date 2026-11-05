@@ -7,6 +7,7 @@ import { InstallJob } from './InstallJob';
 import { JobStore } from './JobStore';
 import { JobCancellation } from './JobCancellation';
 import { BackgroundInstallTask } from './BackgroundInstallTask';
+import { I18n } from '../data/I18n';
 
 /**
  * 同一安装任务的唯一互斥点。
@@ -19,7 +20,17 @@ import { BackgroundInstallTask } from './BackgroundInstallTask';
  * 页面只负责调用，不再自己充当锁。
  */
 export class JobScheduler {
-  private static serial: Promise<void> = Promise.resolve();
+  private static lanes: Map<string, Promise<void>> = new Map();
+  private static slots: number = 0;
+  private static waiters: Array<() => void> = [];
+  private static acquireSlot(): Promise<void> | undefined {
+    if (JobScheduler.slots < 3) { JobScheduler.slots++; return; }
+    return new Promise<void>((resolve) => JobScheduler.waiters.push(resolve));
+  }
+  private static releaseSlot(): void {
+    const next = JobScheduler.waiters.shift();
+    if (next) next(); else JobScheduler.slots--;
+  }
   private static reserved: Set<string> = new Set<string>();
   private static inFlight: Set<string> = new Set<string>();
   private static queueWakeup: (() => void) | undefined = undefined;
@@ -99,17 +110,20 @@ export class JobScheduler {
 
   /** 超时结束界面等待；互斥一直保留到实际执行退出。 */
   static async runExclusive<T>(jobId: string, body: () => Promise<T>,
-    timeoutMs: number = JobScheduler.DEFAULT_TIMEOUT_MS): Promise<T> {
+    timeoutMs: number = JobScheduler.DEFAULT_TIMEOUT_MS, lane: string = 'local'): Promise<T> {
+    JobStore.setExecutionGuard?.((id:string)=>JobScheduler.isRunning(id));
     if (JobScheduler.reserved.has(jobId) || JobScheduler.inFlight.has(jobId)) {
       throw new Error(JobScheduler.stillFinishing(jobId) ?
-        '上一次执行仍在收尾，请稍候再试' : '该安装任务正在执行，未重复启动');
+        I18n.t('上一次执行仍在收尾，请稍候再试') : '该安装任务正在执行，未重复启动');
     }
-    const waiting = JobScheduler.inFlight.size > 0 || JobScheduler.reserved.size > 0;
+    const previous = JobScheduler.lanes.get(lane);
     JobScheduler.reserved.add(jobId);
-    const previous = JobScheduler.serial;
-    let release: () => void = () => {};
-    JobScheduler.serial = new Promise<void>((resolve: () => void) => { release = resolve; });
-    if (waiting) await previous;
+        let release: () => void = () => {};
+    const tail = new Promise<void>((resolve: () => void) => { release = resolve; });
+    JobScheduler.lanes.set(lane, tail);
+    if (previous) await previous;
+    const permit=JobScheduler.acquireSlot();
+    if (permit) await permit;
     JobScheduler.reserved.delete(jobId);
     JobScheduler.inFlight.add(jobId);
     InstallTaskState.setRunning(jobId, true);
@@ -134,7 +148,11 @@ export class JobScheduler {
       InstallTaskState.setRunning(jobId, false);
       // 超时或取消只结束界面等待，保活一直保留到真实执行和残留清理退出。
       try { await BackgroundInstallTask.release(jobId); }
-      finally { release(); JobScheduler.requestQueue(); }
+      finally {
+        JobScheduler.releaseSlot(); release();
+        if (JobScheduler.lanes.get(lane) === tail) JobScheduler.lanes.delete(lane);
+        JobScheduler.requestQueue();
+      }
     });
     const timeout = new Promise<T>((_resolve, reject) => {
       let remaining = timeoutMs;
@@ -152,7 +170,7 @@ export class JobScheduler {
         }
         JobScheduler.timedOut.add(jobId);
         InstallTaskState.setRunning(jobId, true, true);
-        reject(new Error('等待设备响应超时，本次执行仍在收尾，请勿重复安装'));
+        reject(new Error(I18n.t('等待设备响应超时，本次执行仍在收尾，请勿重复安装')));
       };
       timer = setTimeout(tick, Math.min(1000, remaining));
     });
@@ -176,7 +194,7 @@ export class JobScheduler {
    * 单独开一个入口是为了用 [INSTALL_TIMEOUT_MS]：默认的 4 分钟小于底层 `hdc install`
    * 自己的 5 分钟预算，会出现「外层已超时、底层还在装」的错位。
    */
-  static runInstall<T>(jobId: string, body: () => Promise<T>): Promise<T> {
-    return JobScheduler.runExclusive(jobId, body, JobScheduler.INSTALL_TIMEOUT_MS);
+  static runInstall<T>(jobId: string, body: () => Promise<T>, lane: string = 'local'): Promise<T> {
+    return JobScheduler.runExclusive(jobId, body, JobScheduler.INSTALL_TIMEOUT_MS, lane);
   }
 }

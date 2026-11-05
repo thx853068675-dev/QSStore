@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm');
 const ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
@@ -6,7 +7,7 @@ function method(name){const a=source.search(new RegExp('^  private async '+name+
 function fixture(){
  const f={saved:{userId:'one'},work:new Map(),ready:0,drains:0,identity:0,published:0};
  f.refresh=async a=>a;
- const box={getContext:()=>({}),AccountSession:{load:async()=>f.saved},AccountService:{configure(){},refresh:a=>f.refresh(a)},
+ const box={PrivacyConsent:publicConsentModule('../data/PrivacyConsent').PrivacyConsent,getContext:()=>({}),AccountSession:{load:async()=>f.saved},AccountService:{configure(){},refresh:a=>f.refresh(a)},
   ForegroundIdle:{defer:(key,action)=>f.work.set(key,action)},FailureKind:{NETWORK:'network'},InstallStage:{WAITING_ACCOUNT:'account'},
   InstallCoordinator:{conditionReady(){f.ready++;}}};
  vm.runInNewContext(ts.transpileModule('class Page{'+method('restoreAccount')+method('refreshRestoredAccount')+'};globalThis.Page=Page;', {compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);

@@ -1,4 +1,5 @@
 import { repositoryCount } from '../data/RepositoryCount';
+import { I18n } from '../data/I18n';
 
 @Component
 export struct RepositoryStats {
@@ -21,7 +22,7 @@ export struct RepositoryStats {
           .backgroundColor(this.tagBackground).borderRadius(6)
       }
     }.alignItems(VerticalAlign.Center).justifyContent(this.compact ? FlexAlign.End : FlexAlign.Start)
-      .accessibilityText('GitHub 星星数 ' + this.stars +
-        (this.downloads >= 0 ? '，Release 附件累计下载量 ' + this.downloads : ''))
+      .accessibilityText(I18n.t('GitHub 星星数 ') + this.stars +
+        (this.downloads >= 0 ? I18n.t('，Release 附件累计下载量 ') + this.downloads : ''))
   }
 }

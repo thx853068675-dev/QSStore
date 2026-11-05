@@ -1,0 +1,14 @@
+# Official ArkGuard, release builds only. Keep wire/storage contracts separately.
+-enable-property-obfuscation
+-enable-toplevel-obfuscation
+-enable-filename-obfuscation
+-enable-export-obfuscation
+-remove-comments
+
+# String properties carry JSON/AGC/NAPI/ArkUI contracts. Do not enable string
+# property obfuscation or remove diagnostic logging from installation failures.
+# NAPI declarations are collected into obfuscation-contracts.txt with exact names.
+
+# Mapping files are private diagnostics and must never be packaged/published.
+-print-namecache ./obfuscation-namecache.json
+-print-kept-names ./obfuscation-kept-names.json

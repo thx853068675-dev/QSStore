@@ -8,11 +8,13 @@ export struct StoreSelect {
   @Prop selectedIndex: number = 0;
   @Prop selectedValue: string = '';
   @Prop active: boolean = true;
+  @Prop darkSurface: boolean = false;
+  @Prop cornerRadius: number = 12;
   controlId: string = '';
   action: (index: number) => void = () => {};
   @StorageProp('darkMode') private darkMode: boolean = false;
 
-  private colors(): Palette { return Palette.forMode(this.darkMode); }
+  private colors(): Palette { return Palette.forMode(this.darkMode || this.darkSurface); }
 
   @Builder
   private selectControl() {
@@ -27,16 +29,16 @@ export struct StoreSelect {
       .selectedOptionBgColor(this.colors().accentSoft).optionBgColor(this.colors().surface)
       .menuBackgroundColor(this.colors().surface).menuBackgroundBlurStyle(BlurStyle.NONE)
       .divider({ strokeWidth: 0.5, color: this.colors().border })
-      .backgroundColor(this.colors().fill).borderRadius(12).clip(true)
-      .border({ width: 1, color: this.colors().border, radius: 12 })
+      .backgroundColor(this.colors().fill).borderRadius(this.cornerRadius).clip(true)
+      .border({ width: 1, color: this.colors().border, radius: this.cornerRadius })
       .width('100%').height(44).id(this.controlId).enabled(this.active)
       .onSelect((index: number) => this.action(index))
   }
 
   build() {
-    WithTheme({ colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT }) {
+    WithTheme({ colorMode: this.darkMode || this.darkSurface ? ThemeColorMode.DARK : ThemeColorMode.LIGHT }) {
       // 主题切换时重建原生菜单，选中值由调用页面保存。
-      if (this.darkMode) {
+      if (this.darkMode || this.darkSurface) {
         this.selectControl()
       } else {
         this.selectControl()

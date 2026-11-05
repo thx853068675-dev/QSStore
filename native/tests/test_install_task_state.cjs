@@ -19,7 +19,7 @@ function fixture(kits = {}) {
     }).outputText;
     vm.runInNewContext(code, { exports, setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {},
       JSON: { parse: JSON.parse, stringify: (...args) => { stats.serializations++; return JSON.stringify(...args); } },
-      require: dep => dep.startsWith('.') ? load(path.posix.join(path.posix.dirname(name), dep)) : (kits[dep] || {}) });
+      require: dep => kits[dep] || (dep.startsWith('.') ? load(path.posix.join(path.posix.dirname(name), dep)) : {}) });
     return exports;
   }
   const { InstallJob, InstallStage } = load('jobs/InstallJob');
@@ -42,13 +42,13 @@ function pageClass(name, methods, globals) {
   const code = ts.transpileModule(`class Page { ${parts.join('\n')} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText;
-  const sandbox = { ...globals }; vm.runInNewContext(code, sandbox);
+  const sandbox = { MultiDeviceTargets:{snapshots:()=>['']}, MultiDeviceInstall:{enqueue:async(_store,job)=>[job]}, DeviceInstallTarget: require('./load_ets.cjs').loadEts('jobs/DeviceInstallTarget').DeviceInstallTarget, ...globals }; vm.runInNewContext(code, sandbox);
   return new sandbox.Page();
 }
 function pages(f) {
   const globals = { CatalogPackageVariant: f.load('data/CatalogPackageVariant').CatalogPackageVariant, InstallTaskState: f.state, InstallStage: f.InstallStage,
     ReleaseUpdate: f.load('jobs/ReleaseUpdate').ReleaseUpdate,
-    InstalledAppRegistry: { versionName: () => '', signingIdentity: () => undefined },
+    InstalledAppRegistry: { isAppGallery: () => false, hasApplicationOrigin: () => true, persist: async () => {}, versionName: () => '', signingIdentity: () => undefined },
     LocalInstallTimeline: f.load('jobs/LocalInstallTimeline').LocalInstallTimeline,
     setInterval: () => 1, clearInterval: () => {},
     isPending: f.load('jobs/RecoveryPlanner').isPending };
@@ -60,12 +60,12 @@ function pages(f) {
   function detail() {
     const ui = pageClass('Detail', ['observeInstallTasks', 'currentInstallTask', 'syncInstallTask',
       'installButtonLabel', 'updateAvailable', 'selectedDowngrade', 'installButtonEnabled'], globals);
-    Object.assign(ui, { installSubscription: -1, detailAppId: 42,
+    Object.assign(ui, { installSubscription: -1, detailAppId: 42,updatePolicyReady:true,updatesPaused:false,
       selectedAsset: { name: 'app.hap', sha256: 'a'.repeat(64),
         bundleName: 'test.bundle', versionCode: 2 },
       releases: [], showPreviewReleases: false, installTasks: [], installedJobs: [], downloadBusy: false, downloadPercent: 0,
       paintInstallButton() {}, refreshInstalledVersion() {}, installedForApp() { return this.installedJobs[0]; },
-      selectedVersionLabel: () => '2' });
+      selectedBundleName() { return this.selectedAsset.bundleName; }, selectedVersionLabel: () => '2' });
     ui.observeInstallTasks(); return ui;
   }
   function local() {
@@ -355,7 +355,8 @@ test('enqueueing an already completed asset retains its identity and installed j
   const writes = f.writes.length;
   const again = await f.store.enqueue(f.job.appId, f.job.assetName, f.job.sourceUrl, f.job.expectedSha256);
   assert.equal(again, f.job); assert.equal(again.stage, f.InstallStage.INSTALLED);
-  assert.equal(again.bundleName, 'test.bundle'); assert.equal(f.writes.length, writes);
+  assert.equal(again.bundleName, 'test.bundle'); assert.equal(f.writes.filter(([sql])=>sql.includes('INSERT OR REPLACE INTO install_jobs')).length,
+    f.writes.slice(0,writes).filter(([sql])=>sql.includes('INSERT OR REPLACE INTO install_jobs')).length);
 });
 
 test('catalog asset without SHA-256 can still enter the install queue', async () => {
@@ -471,9 +472,14 @@ test('cancel cleanup removes task files and partials while retaining shared file
   f.job.signedPath = '/sandbox/install-jobs/signed.hap';
   f.job.profilePath = '/sandbox/signing-identity/key.pem';
   f.store.listAll = async () => [{ id: 'other', cachePath: f.job.cachePath, signedPath: '' }];
-  let read = false;
-  f.store.db.querySql = async () => ({ goToNextRow: () => !read && (read = true),
-    getColumnIndex: k => k, getString: () => JSON.stringify(f.job), close() {} });
+  const payload = JSON.stringify(f.job);
+  const receiptQuery = () => {
+    let read = false;
+    return { goToNextRow: () => !read && (read = true), getColumnIndex: k => k,
+      getString: () => payload, close() {} };
+  };
+  f.store.db.querySql = async () => receiptQuery();
+  f.store.db.querySqlSync = receiptQuery;
   await f.store.cleanupCancelled({ filesDir: '/sandbox' });
   assert(files.has(f.job.cachePath), 'a retained task still owns the original package');
   assert(files.has(f.job.cachePath + '.part'), 'shared download is retained');
@@ -483,7 +489,7 @@ test('cancel cleanup removes task files and partials while retaining shared file
 });
 
 test('Management moves installed apps with queued updates into the task section, then restores them on cancel', () => {
-  const ui = pageClass('Index', ['managementInstalledJobs'], {});
+  const ui = pageClass('Index', ['managementInstalledJobs'], {ManagementSort:require('./load_ets.cjs').loadEts('data/ManagementSort').ManagementSort,InstalledAppRegistry:{signingIdentity:()=>undefined},ReleaseUpdate:{completedAt:job=>job.updatedAt||0}});
   const installed = [{ id: 'local', appId: 0, bundleName: 'test.bundle' },
     { id: 'other', appId: 12, bundleName: 'another.bundle' }];
   ui.allInstalledJobs = () => installed;
@@ -491,11 +497,12 @@ test('Management moves installed apps with queued updates into the task section,
   ui.renewalDeadline = () => 1800000000;
   ui.updateApps = () => [{ latestAssets: installed.map(job => ({ bundleName: job.bundleName })) }];
   ui.installedAssets = app => app.latestAssets;
+  ui.catalogForJob = job => ui.updateApps().find(app => app.latestAssets.some(asset => asset.bundleName === job.bundleName));
   ui.installedLocalOnly = false;
   ui.pendingJobs = [{ appId: 42, bundleName: '', catalogBundleName: 'test.bundle' }];
   assert.deepEqual(Array.from(ui.managementInstalledJobs(), job => job.id), ['other']);
   ui.pendingJobs = [];
-  assert.deepEqual(Array.from(ui.managementInstalledJobs(), job => job.id), ['local', 'other']);
+  assert.deepEqual(Array.from(ui.managementInstalledJobs(), job => job.id), ['other', 'local']);
 });
 
 test('failed transfer cancellation preserves its cleanup entry and files for retry', async () => {
@@ -592,19 +599,26 @@ test('Detail submits another selected package to the shared FIFO without startin
   let queued = 0, downloaded = 0;
   const d = pageClass('Detail', ['downloadSelected'], {
     getContext: () => ({}), InstallStage: { QUEUED: 'QUEUED' },
+    InstallDeviceCompatibility: { confirm: async () => true, confirmedFingerprint: () => '' },
     JobStore: { open: async () => ({ enqueue: async () => ({ id: 'new', stage: 'QUEUED' }) }) },
     InstallCoordinator: { recovered: () => { queued++; } },
     JobScheduler: { requestQueue: () => { queued++; return true; }, runDownload: () => { downloaded++; } },
     errorText: e => e.message
   });
   Object.assign(d, { selectedAsset: { name: 'other.hap', url: 'https://example.com/other.hap' }, app: { id: 42 },
-    currentInstallTask: () => undefined, installButtonEnabled: () => true, notify() {}, syncInstallTask() {},
+    installedVersion: 0, installedUnknown: false,
+    currentInstallTask: () => undefined, installButtonEnabled: () => true, installedForApp:()=>undefined, notify() {}, syncInstallTask() {},
     resumeInstall: () => { throw Error('parallel installation'); } });
   await d.downloadSelected(); assert.equal(queued, 1); assert.equal(downloaded, 0);
 });
 
 test('confirmed installation releases even fresh packages, retaining identity and pending task inputs', async () => {
-  const f = fixture({ '@kit.CoreFileKit': { fileIo: {
+  class RdbPredicates {
+    constructor() { this.matches = []; }
+    equalTo(key, value) { this.matches.push([key, value]); return this; }
+  }
+  const f = fixture({ './DownloadLibrary': { DownloadLibrary: { keep: async () => {} } },
+    '@kit.ArkData': { relationalStore: { RdbPredicates } }, '@kit.CoreFileKit': { fileIo: {
     accessSync: () => true, statSync: () => ({ size: 10 }) } } });
   const now = Date.now();
   const old = { ...f.job, id: 'old', stage: f.InstallStage.INSTALLED,
@@ -614,7 +628,24 @@ test('confirmed installation releases even fresh packages, retaining identity an
   const pending = { ...old, id: 'pending', stage: f.InstallStage.DOWNLOADING };
   const journal = [], saved = [];
   f.store.listAll = async () => [old, recent, pending];
+  f.store.cancelledFiles = async id => journal.filter(row => !id || row.id === id);
   f.store.rememberCancelledFiles = async job => journal.push({ ...job });
+  f.store.db.querySqlSync = (_sql, args) => {
+    const rows = journal.filter(row => row.id === args[0]); let at = -1;
+    return { goToNextRow: () => ++at < rows.length, getColumnIndex: () => 0,
+      getString: () => JSON.stringify(rows[at]), close() {} };
+  };
+  const columns = { id: 'id', stage: 'stage', updated_at: 'updatedAt', cache_path: 'cachePath',
+    signed_path: 'signedPath', transfer_task_id: 'transferTaskId', staged_ticket: 'stagedTicket' };
+  f.store.db.updateSync = (values, predicates) => {
+    const row = [old, recent, pending].find(job => predicates.matches.every(([key, value]) => (job[columns[key]] ?? '') === value));
+    if (!row) return 0;
+    for (const [key, value] of Object.entries(values)) {
+      if (key === 'stage_history') row.stageHistory = JSON.parse(value);
+      else row[columns[key]] = value;
+    }
+    saved.push({ ...row }); return 1;
+  };
   f.store.save = async job => saved.push({ ...job }); f.store.cleanupCancelled = async () => {};
   await f.store.pruneCompleted({ filesDir: '/sandbox' });
   assert.deepEqual(journal.map(j => j.id), ['recent', 'old']);

@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
@@ -7,7 +8,7 @@ function load(file, mocks) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, file + '.ets'), 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS }
-  }).outputText, { exports, require: dep => mocks[dep] || {}, setTimeout, clearTimeout });
+  }).outputText, { exports, require: dep => mocks[dep] || publicConsentModule(dep), setTimeout, clearTimeout });
   return exports;
 }
 const { FailureKind } = load('jobs/InstallJob', {});

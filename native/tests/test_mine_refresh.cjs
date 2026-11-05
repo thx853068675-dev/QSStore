@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
@@ -11,8 +12,8 @@ function deferred() { let resolve, reject; const promise = new Promise((a, b) =>
 function fixture() {
   const f = { probe: deferred(), identity: deferred(), probes: 0, reads: 0, linked: false, timers: new Map(), synced: 0 };
   let timerId = 0;
-  const box = { getContext: () => ({}), errorText: e => e.message, setTimeout: fn => { f.timers.set(++timerId, fn); return timerId; }, clearTimeout: id => f.timers.delete(id),
-    HdcDeviceBridge: class { static deviceLinked() { return f.linked; } static releaseDevice() { f.linked = false; return true; } connected() { f.probes++; return f.probe.promise; } },
+  const box = { PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent, getContext: () => ({}), errorText: e => e.message, setTimeout: fn => { f.timers.set(++timerId, fn); return timerId; }, clearTimeout: id => f.timers.delete(id),
+    JobScheduler:{runningJobIds:()=>[]}, HdcDeviceBridge: class { static busy(){return false;} static deviceLinked() { return f.linked; } static releaseDevice() { f.linked = false; return true; } connected() { f.probes++; return f.probe.promise; } },
     SigningIdentityRecovery: { restore() { f.reads++; return f.identity.promise; }, load: async () => undefined } };
   vm.runInNewContext(ts.transpileModule('class Page {' + ['checkDevice', 'readDeviceStatus', 'releaseDeviceLink', 'recoverSigningIdentity', 'readSigningIdentity'].map(method).join('\n') + '};globalThis.Page=Page;', { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, box);
   f.ui = Object.assign(new box.Page(), { deviceConnected: true, deviceStatusKnown: true, deviceBusy: false, deviceCheckGeneration: 0,

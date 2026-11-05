@@ -7,6 +7,7 @@ import { InstallCoordinator } from './InstallCoordinator';
 import { InstallCertificateSlots } from './InstallCertificateSlots';
 import { InstallJob, InstallStage } from './InstallJob';
 import { JobStore } from './JobStore';
+import { I18n } from '../data/I18n';
 
 export class CertificateSlotRow {
   id: string = '';
@@ -22,7 +23,7 @@ export class CertificateSlotRecovery {
     teamId: string): Promise<DeveloperAccount> {
     const account = await AccountService.current(context);
     if (!account || account.userId !== userId || account.teamId !== teamId) {
-      throw new Error('开发者账号已改变，请关闭窗口后重新安装');
+      throw new Error(I18n.t('开发者账号已改变，请关闭窗口后重新安装'));
     }
     return account;
   }
@@ -75,7 +76,7 @@ export class CertificateSlotRecovery {
   static async deleteAndResume(context: common.UIAbilityContext, id: string, userId: string,
     teamId: string, certId: string): Promise<InstallJob> {
     const key = context.filesDir + ':' + id;
-    if (CertificateSlotRecovery.operations.has(key)) throw new Error('证书操作正在处理中，请稍候');
+    if (CertificateSlotRecovery.operations.has(key)) throw new Error(I18n.t('证书操作正在处理中，请稍候'));
     const task = CertificateSlotRecovery.deleteLocked(context, id, userId, teamId, certId);
     CertificateSlotRecovery.operations.set(key, task);
     try { return await task; }
@@ -100,7 +101,7 @@ export class CertificateSlotRecovery {
         // A lost response is not proof of rejection. Keep the tombstone until AGC confirms.
         let remaining: Array<Record<string, Object>>;
         try { remaining = await agc.certificates(); }
-        catch (_) { throw new Error('证书删除结果暂时无法确认，请刷新核对后继续安装'); }
+        catch (_) { throw new Error(I18n.t('证书删除结果暂时无法确认，请刷新核对后继续安装')); }
         if (remaining.some((row: Record<string, Object>) => String(row['id'] ?? '') === certId)) {
           await SigningIdentityRecovery.cancelCertificateDeletion(context, account, certId);
           throw error as Error;

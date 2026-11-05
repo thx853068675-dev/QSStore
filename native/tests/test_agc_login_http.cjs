@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -12,7 +13,7 @@ function load(name, http, accountService = {}) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText;
   const exports = {};
-  vm.runInNewContext(code, { exports, require: id => id === '@kit.NetworkKit' ? { http } : id === './AccountService' ? { AccountService: accountService } : {} });
+  vm.runInNewContext(code, { exports, require: id => id === '@kit.NetworkKit' ? { http } : id === './AccountService' ? { AccountService: accountService } : publicConsentModule(id) });
   return exports[name];
 }
 
@@ -55,6 +56,21 @@ test('first login GET does not send empty extraData', async () => {
   const Login = load('DevEcoLogin', t.http);
   await Login.requestJson('https://example.invalid/login', 'GET');
   assert.equal(t.calls[0].options.extraData, undefined);
+});
+
+test('account HTTP 401 asks for login, while 403 and 503 do not claim expiry', async () => {
+  for (const [status, pattern, marker] of [
+    [401, /登录已过期，请重新登录/, 'AUTHFAILED|'],
+    [403, /检查账号权限/, 'TRANSIENT|'],
+    [503, /华为账号服务暂不可用/, 'TRANSIENT|']
+  ]) {
+    const http = { RequestMethod: { GET: 'GET' }, createHttp: () => ({
+      request: async () => ({ responseCode: status, result: '' }), destroy: () => {}
+    }) };
+    const Login = load('DevEcoLogin', http);
+    await assert.rejects(() => Login.requestJson('https://example.invalid/login', 'GET'), error =>
+      pattern.test(String(error)) && String(error).includes(marker));
+  }
 });
 
 test('public profile POST retains its form body', async () => {

@@ -3,6 +3,7 @@ import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
 import { InstallJob, InstallStage } from './InstallJob';
 import { JobStore } from './JobStore';
+import { I18n } from '../data/I18n';
 
 // Preserve the Flutter store's installed history when the same bundle is
 // upgraded. A marker prevents an intentionally removed row reappearing later.
@@ -13,8 +14,8 @@ export class LegacyInstalledMigration {
     const path = context.filesDir + '/installed.json';
     if (!fileIo.accessSync(path)) return 0;
     const parsed = JSON.parse(fileIo.readTextSync(path)) as Array<Record<string, Object>>;
-    if (!Array.isArray(parsed)) throw new Error('旧版安装记录格式无效');
-    if (parsed.length > 200) throw new Error('旧版安装记录数量异常');
+    if (!Array.isArray(parsed)) throw new Error(I18n.t('旧版安装记录格式无效'));
+    if (parsed.length > 200) throw new Error(I18n.t('旧版安装记录数量异常'));
     let migrated = 0;
     for (let index = 0; index < parsed.length; index++) {
       const row = parsed[index];

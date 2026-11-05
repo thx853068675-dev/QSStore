@@ -11,57 +11,8 @@ import { AgcManagedProfile } from './AgcManagedProfile';
 import { DeveloperAccount } from './DeveloperAccount';
 import { LocalSigningIdentity, SigningIdentityRecovery } from './SigningIdentity';
 import { isMissingCertificate } from './CertificateRejection';
-
-// Match the existing client's AGC allowlist. Normal HAP permissions must not
-// be sent as ACLs; unknown privileged permissions need explicit review.
-const GRANTABLE_ACLS: string[] = [
-  'ohos.permission.SYSTEM_FLOAT_WINDOW', 'ohos.permission.READ_CONTACTS',
-  'ohos.permission.WRITE_CONTACTS', 'ohos.permission.READ_AUDIO',
-  'ohos.permission.WRITE_AUDIO', 'ohos.permission.READ_IMAGEVIDEO',
-  'ohos.permission.WRITE_IMAGEVIDEO', 'ohos.permission.READ_WRITE_DESKTOP_DIRECTORY',
-  'ohos.permission.ACCESS_DDK_USB', 'ohos.permission.ACCESS_DDK_HID',
-  'ohos.permission.ACCESS_DDK_USB_SERIAL',
-  'ohos.permission.READ_PASTEBOARD', 'ohos.permission.FILE_ACCESS_PERSIST',
-  'ohos.permission.INTERCEPT_INPUT_EVENT', 'ohos.permission.INPUT_MONITORING',
-  'ohos.permission.SHORT_TERM_WRITE_IMAGEVIDEO', 'ohos.permission.READ_WRITE_USER_FILE',
-  'ohos.permission.READ_WRITE_USB_DEV', 'ohos.permission.GET_WIFI_PEERS_MAC',
-  'ohos.permission.SET_TELEPHONY_ESIM_STATE_OPEN',
-  'ohos.permission.kernel.DISABLE_CODE_MEMORY_PROTECTION',
-  'ohos.permission.kernel.ALLOW_WRITABLE_CODE_MEMORY',
-  'ohos.permission.kernel.ALLOW_EXECUTABLE_FORT_MEMORY',
-  'ohos.permission.MANAGE_PASTEBOARD_APP_SHARE_OPTION',
-  'ohos.permission.MANAGE_UDMF_APP_SHARE_OPTION',
-  'ohos.permission.ACCESS_DISK_PHY_INFO', 'ohos.permission.PRELOAD_FILE',
-  'ohos.permission.SET_PAC_URL', 'ohos.permission.PERSONAL_MANAGE_RESTRICTIONS',
-  'ohos.permission.START_PROVISIONING_MESSAGE',
-  'ohos.permission.USE_FRAUD_CALL_LOG_PICKER',
-  'ohos.permission.USE_FRAUD_MESSAGES_PICKER',
-  'ohos.permission.PERSISTENT_BLUETOOTH_PEERS_MAC',
-  'ohos.permission.ACCESS_VIRTUAL_SCREEN', 'ohos.permission.MANAGE_APN_SETTING',
-  'ohos.permission.GET_WIFI_LOCAL_MAC',
-  'ohos.permission.kernel.ALLOW_USE_JITFORT_INTERFACE',
-  'ohos.permission.GET_ETHERNET_LOCAL_MAC',
-  'ohos.permission.kernel.DISABLE_GOTPLT_RO_PROTECTION',
-  'ohos.permission.USE_FRAUD_APP_PICKER', 'ohos.permission.ACCESS_DDK_DRIVERS',
-  'ohos.permission.ACCESS_DDK_SCSI_PERIPHERAL',
-  'ohos.permission.kernel.SUPPORT_PLUGIN', 'ohos.permission.CUSTOM_SANDBOX',
-  'ohos.permission.MANAGE_SCREEN_TIME_GUARD',
-  'ohos.permission.CUSTOMIZE_SAVE_BUTTON', 'ohos.permission.GET_ABILITY_INFO',
-  'ohos.permission.ACCESS_FIDO2_ONLINEAUTH', 'ohos.permission.USE_FLOAT_BALL',
-  'ohos.permission.DLP_GET_HIDE_STATUS',
-  'ohos.permission.READ_LOCAL_DEVICE_NAME',
-  'ohos.permission.KEEP_BACKGROUND_RUNNING_SYSTEM', 'ohos.permission.LINKTURBO',
-  'ohos.permission.ACCESS_NET_TRACE_INFO',
-  'ohos.permission.READ_WHOLE_CALENDAR',
-  'ohos.permission.WRITE_WHOLE_CALENDAR',
-  'ohos.permission.SET_SYSTEMSHARE_APPLAUNCHTRUSTLIST',
-  'ohos.permission.HOOK_KEY_EVENT', 'ohos.permission.WEB_NATIVE_MESSAGING',
-  'ohos.permission.SUBSCRIBE_NOTIFICATION',
-  'ohos.permission.CUSTOM_SCREEN_RECORDING',
-  'ohos.permission.GET_IP_MAC_INFO', 'ohos.permission.ACCESS_USER_FULL_DISK',
-  'ohos.permission.kernel.LOAD_INDEPENDENT_LIBRARY',
-  'ohos.permission.CRYPTO_EXTENSION_REGISTER'
-];
+import { SideloadAclPolicy } from './SideloadAclPolicy';
+import { I18n } from './I18n';
 
 class DeviceRegistration {
   ids: string[] = [];
@@ -83,6 +34,48 @@ export class AgcProfile {
       /sign\s+ide\s+test\s+provision\s+number\s+exceeds?\s+limit/i.test(String(error));
   }
 
+  /** AGC 205389941: a requested ACL is not in the automatic signing support scope. */
+  private static isScopeRefusal(error: Error): boolean {
+    return Number((error as ServiceFailure).status ?? 0) === 205389941 ||
+      /permission\s+not\s+in\s+support\s+scope/i.test(String(error));
+  }
+
+  /**
+   * A scope refusal means the IDE auto-signing path cannot request one of the
+   * declared ACLs. Re-registering the device cannot change that, so fall back to
+   * the approved-ACL route when it covers the requirement and otherwise report
+   * exactly which permissions need an AGC approval.
+   */
+  private static async recoverFromScopeRefusal(context: common.UIAbilityContext, agc: AgcClient,
+    account: DeveloperAccount, identity: LocalSigningIdentity, bundleName: string, udid: string, ids: string[],
+    acls: string[], requiringApproval: string[], temporary: string, valid: (path: string) => boolean,
+    refreshRequest: string): Promise<void> {
+    // The SDK catalog can recognize an ACL that the IDE scope still refuses.
+    // Distinguish that drift from an ACL this build never catalogued at all.
+    const outsideCatalog = SideloadAclPolicy.unrecognized(requiringApproval);
+    const blocker = outsideCatalog.length > 0 ? outsideCatalog : requiringApproval;
+    try {
+      const appId = await AgcManagedProfile.appId(agc, bundleName, account);
+      const approved = await agc.approvedAcls(appId);
+      if (!SideloadAclPolicy.covered(acls, approved)) throw AgcProfile.scopeFailure(blocker, acls, approved);
+      await AgcManagedProfile.obtain(agc, account, identity.certId, ids, acls, bundleName, temporary, valid, udid,
+        refreshRequest);
+    } catch (error) {
+      if (AgcProfile.isAutomaticLimit(error as Error)) throw error as Error;
+      if ((error as ClassifiedFailure).failureKind === FailureKind.ACCOUNT ||
+        (error as ClassifiedFailure).failureKind === FailureKind.NETWORK) throw error as Error;
+      throw AgcProfile.scopeFailure(blocker, acls, []);
+    }
+  }
+
+  private static scopeFailure(blocker: string[], acls: string[], approved: string[]): ServiceFailure {
+    const pending = blocker.filter((acl: string) => !approved.includes(acl));
+    return new ServiceFailure(FailureKind.ACCOUNT,
+      I18n.t('AGC 不支持自动签名申请这些权限：') + (pending.length > 0 ? pending : blocker).join(I18n.t('、')) +
+      I18n.t('。自动签名只能申请 IDE 自动授权范围内的 ACL，其余权限需先在 AGC 为此应用申请并获批；当前已保留全部 ') +
+      acls.length + I18n.t(' 项权限声明和现有应用，未降级签名。'), 205389941);
+  }
+
   private static async registeredDeviceIds(agc: AgcClient, udid: string): Promise<string[]> {
     let devices = await agc.devices();
     if (!devices.some((item: Record<string, Object>) => String(item['udid'] ?? '') === udid)) {
@@ -92,12 +85,12 @@ export class AgcProfile {
     const ids = devices.filter((item: Record<string, Object>) =>
       String(item['udid'] ?? '') === udid).map((item: Record<string, Object>) =>
       String(item['id'] ?? '')).filter((id: string) => id.length > 0).sort();
-    if (ids.length === 0) throw new Error('AGC 设备登记尚未生效');
+    if (ids.length === 0) throw new Error(I18n.t('AGC 设备登记尚未生效'));
     return ids;
   }
   private static async fingerprintOfPem(pem: string): Promise<string> {
     const match = /-----BEGIN CERTIFICATE-----([A-Za-z0-9+/=\s]+)-----END CERTIFICATE-----/.exec(pem);
-    if (!match) throw new Error('签名证书格式无效');
+    if (!match) throw new Error(I18n.t('签名证书格式无效'));
     const der = new util.Base64Helper().decodeSync(match[1].replace(/\s/g, ''));
     const md = cryptoFramework.createMd('SHA256');
     await md.update({ data: der });
@@ -126,12 +119,12 @@ export class AgcProfile {
   /** The signing certificate can expire before the Profile's advertised end. */
   static effectiveExpiry(path: string, certificateExpiry: number): number {
     if (!Number.isFinite(certificateExpiry) || certificateExpiry <= 0) {
-      throw new Error('无法核对签名证书有效期，请刷新证书信息后重试');
+      throw new Error(I18n.t('无法核对签名证书有效期，请刷新证书信息后重试'));
     }
     const profile = JSON.parse(readSignedProfile(path)) as Record<string, Object>;
     const validity = profile['validity'] as Record<string, Object> | undefined;
     const expiry = Number(validity?.['not-after'] ?? 0);
-    if (!Number.isFinite(expiry) || expiry <= 0) throw new Error('设备授权未提供有效的到期时间');
+    if (!Number.isFinite(expiry) || expiry <= 0) throw new Error(I18n.t('设备授权未提供有效的到期时间'));
     return Math.floor(Math.min(expiry, certificateExpiry));
   }
 
@@ -158,14 +151,21 @@ export class AgcProfile {
   }
 
   static effectiveAcls(requested: string[]): string[] {
-    return requested.filter((name: string, index: number) =>
-      GRANTABLE_ACLS.includes(name) && requested.indexOf(name) === index).sort();
+    return SideloadAclPolicy.effective(requested);
+  }
+
+  private static missingAcls(path: string, required: string[]): string[] {
+    const profile = JSON.parse(readSignedProfile(path)) as Record<string, Object>;
+    const grants = profile['acls'] as Record<string, Object> | undefined;
+    const allowed = grants?.['allowed-acls'];
+    const names = Array.isArray(allowed) ? allowed as string[] : [];
+    return required.filter((acl: string) => !names.includes(acl));
   }
 
   /** Durable, content-addressed material; install journals never share a mutable file. */
   private static async retain(path: string, prefix: string): Promise<string> {
     const digest = (await hash.hash(path, 'sha256')).toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error('无法核对本机授权文件');
+    if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error(I18n.t('无法核对本机授权文件'));
     const archived = prefix + '-p-' + digest + '.p7b';
     if (path === archived) return archived;
     if (fileIo.accessSync(archived) &&
@@ -200,8 +200,10 @@ export class AgcProfile {
         String(bundle?.['bundle-name'] ?? '') === bundleName &&
         Number(validity?.['not-before'] ?? 0) <= now &&
         Number(validity?.['not-after'] ?? 0) > now + 3600 &&
-        (deviceIds ?? []).includes(udid) &&
-        acls.every((acl: string) => (allowed ?? []).includes(acl)) &&
+        // Reject old lower-case authorizations too, so a paused task cannot
+        // reuse the same signed package that BMS already refused.
+        Array.isArray(deviceIds) && deviceIds.includes(udid.toUpperCase()) &&
+        (acls.length === 0 || (Array.isArray(allowed) && acls.every((acl: string) => allowed.includes(acl)))) &&
         profileMatchesCertificate(path, certificatePath);
     } catch (_) {
       return false;
@@ -231,24 +233,24 @@ export class AgcProfile {
     identity: LocalSigningIdentity, bundleName: string, udid: string,
     requestedPermissions: string[], refresh?: ProfileRefreshOptions): Promise<string> {
     if (identity.accountId !== account.userId || !/^\d{1,64}$/.test(identity.certId)) {
-      throw new Error('签名证书与当前账号不一致');
+      throw new Error(I18n.t('签名证书与当前账号不一致'));
     }
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName) ||
       !/^[0-9a-fA-F]{32,128}$/.test(udid)) {
-      throw new Error('应用包名或设备 UDID 无效');
+      throw new Error(I18n.t('应用包名或设备 UDID 无效'));
     }
     const dir = context.filesDir + '/signing-profiles';
     if (refresh && (!/^[a-z0-9]{1,24}$/.test(refresh.requestId) ||
       !Number.isFinite(refresh.minimumExpiry) || refresh.minimumExpiry <= 0)) {
-      throw new Error('续签请求信息无效');
+      throw new Error(I18n.t('续签请求信息无效'));
     }
     if (refresh && (!Number.isFinite(identity.certExpiry) || identity.certExpiry <= 0)) {
       throw new ServiceFailure(FailureKind.ACCOUNT,
-        '无法核对签名证书有效期，请刷新证书信息后重试');
+        I18n.t('无法核对签名证书有效期，请刷新证书信息后重试'));
     }
     if (refresh && identity.certExpiry <= refresh.minimumExpiry) {
       throw new ServiceFailure(FailureKind.INVALID_PACKAGE,
-        '签名证书有效期不足以续签，旧应用已保留，请更新证书后重试');
+        I18n.t('签名证书有效期不足以续签，旧应用已保留，请更新证书后重试'));
     }
     if (!fileIo.accessSync(dir)) fileIo.mkdirSync(dir, true);
     const path = dir + '/' + bundleName + '-' + identity.certId + '-' +
@@ -312,6 +314,12 @@ export class AgcProfile {
           await AgcManagedProfile.obtain(agc, account, identity.certId, ids, acls, bundleName, temporary, valid, udid,
             refresh?.requestId ?? '');
           managed = true;
+        } else if (AgcProfile.isScopeRefusal(error as Error)) {
+          // A device re-registration cannot widen the IDE support scope, so the
+          // ordinary retry below would only add a doomed cloud request.
+          await AgcProfile.recoverFromScopeRefusal(context, agc, account, identity, bundleName, udid, ids, acls,
+            SideloadAclPolicy.requiringApproval(requestedPermissions), temporary, valid, refresh?.requestId ?? '');
+          managed = true;
         } else {
           // An ordinary Profile failure must not retry the exhausted IDE path.
           if (AgcManagedProfile.automaticLimited(context, account)) throw error as Error;
@@ -334,18 +342,23 @@ export class AgcProfile {
         }
       }
       if (!managed) {
-        if (created === undefined) throw new Error('AGC 未返回设备授权');
+        if (created === undefined) throw new Error(I18n.t('AGC 未返回设备授权'));
         if (created.id.length > 0) AgcProfileLease.remember(context, account, created.id);
-        if (created.downloadUrl.length === 0) throw new Error('AGC 未返回设备授权下载地址');
+        if (created.downloadUrl.length === 0) throw new Error(I18n.t('AGC 未返回设备授权下载地址'));
         const bytes = await agc.download(created.downloadUrl);
         SigningIdentityRecovery.writeFile(temporary, bytes);
       }
       if (!AgcProfile.valid(temporary, bundleName, udid, identity.certificatePath, acls)) {
-        throw new Error('AGC 返回的设备授权与应用、设备或证书不匹配');
+        if (acls.length > 0 && AgcProfile.valid(temporary, bundleName, udid, identity.certificatePath, [])) {
+          throw new ServiceFailure(FailureKind.ACCOUNT,
+            I18n.t('AGC 返回的签名授权缺少应用所需 ACL：') + AgcProfile.missingAcls(temporary, acls).join(I18n.t('、')) +
+            I18n.t('。请核对该账号和应用的权限授权后重试'));
+        }
+        throw new Error(I18n.t('AGC 返回的设备授权与应用、设备或证书不匹配'));
       }
       if (refresh && !AgcProfile.reusableForRenewal(temporary, identity.certExpiry, refresh.minimumExpiry)) {
         throw new ServiceFailure(FailureKind.INVALID_PACKAGE,
-          '新的授权有效期未延长或已经过半，已保留旧应用。请核对授权与证书有效期后再续签');
+          I18n.t('新的授权有效期未延长或已经过半，已保留旧应用。请核对授权与证书有效期后再续签'));
       }
       const archived = await AgcProfile.retain(temporary, dir + '/' + prefix);
       const registration = new DeviceRegistration();

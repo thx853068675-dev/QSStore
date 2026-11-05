@@ -3,6 +3,7 @@ import { AccountSession, DeveloperAccount } from './DeveloperAccount';
 import { DevEcoLogin, isTransientAuthError, authErrorText } from './DevEcoLogin';
 import { ServiceFailure } from './ServiceFailure';
 import { FailureKind } from '../jobs/InstallJob';
+import { PrivacyConsent } from './PrivacyConsent';
 
 /** One refresh per identity, shared by pages, AGC and the install executor. */
 export class AccountService {
@@ -12,19 +13,24 @@ export class AccountService {
   static configure(context: common.UIAbilityContext): void { AccountService.context = context; }
 
   static async current(context: common.UIAbilityContext): Promise<DeveloperAccount | undefined> {
+    if (!PrivacyConsent.isBusinessAllowed()) return undefined;
     AccountService.configure(context);
-    return AccountSession.load(context);
+    const account = await AccountSession.load(context);
+    return PrivacyConsent.isBusinessAllowed() ? account : undefined;
   }
 
   static async refresh(account: DeveloperAccount, force: boolean = false): Promise<DeveloperAccount> {
+    PrivacyConsent.assertBusinessAllowed();
     const key = account.userId + ':' + account.jwtToken;
     if (!force && Date.now() - (AccountService.refreshedAt.get(key) ?? 0) < 300000) return account;
     let task = AccountService.pending.get(key);
     if (task === undefined) {
       task = DevEcoLogin.refresh(account).then(async (fresh: DeveloperAccount) => {
+        PrivacyConsent.assertBusinessAllowed();
         const context = AccountService.context;
         if (context !== undefined) {
           const current = await AccountSession.load(context);
+          PrivacyConsent.assertBusinessAllowed();
           // A late refresh must never restore a logged-out or switched account.
           if (current?.userId === account.userId && current.jwtToken === account.jwtToken) {
             await AccountSession.save(context, fresh);
@@ -40,6 +46,7 @@ export class AccountService {
       AccountService.pending.set(key, task);
     }
     const fresh = await task;
+    PrivacyConsent.assertBusinessAllowed();
     account.accessToken = fresh.accessToken;
     account.teamId = fresh.teamId;
     account.displayName = fresh.displayName;

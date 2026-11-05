@@ -3,6 +3,8 @@ import { router, promptAction, UIContext } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { LocalImport } from './LocalImport';
 import { StorePageMotion } from '../theme/StorePageMotion';
+import { PrivacyConsent } from '../data/PrivacyConsent';
+import { I18n } from '../data/I18n';
 
 /** One pending user selection; receiving a file never creates or starts an install. */
 export class ExternalInstallOpen {
@@ -47,9 +49,12 @@ export class ExternalInstallOpen {
     return true;
   }
   static take(): string {
+    if (!PrivacyConsent.isBusinessAllowed()) return '';
     const uri = ExternalInstallOpen.uri; ExternalInstallOpen.uri = ''; return uri;
   }
   static openPending(): void {
+    // Preserve the granted URI until the user signs the hosted agreement.
+    if (!PrivacyConsent.isBusinessAllowed()) return;
     if (!ExternalInstallOpen.uri || ExternalInstallOpen.routeTimer !== -1 || ExternalInstallOpen.routing) return;
     const current = ExternalInstallOpen.ui ? ExternalInstallOpen.ui.getRouter().getState() : router.getState();
     // loadContent 的完成回调早于首个页面注册。此时 pushUrl 不报错，
@@ -60,7 +65,7 @@ export class ExternalInstallOpen {
           ExternalInstallOpen.routeTimer = -1;
           ExternalInstallOpen.openPending();
         }, 32);
-      } else promptAction.showToast({ message: '页面尚未就绪，请重新打开文件' });
+      } else promptAction.showToast({ message: I18n.t('页面尚未就绪，请重新打开文件') });
       return;
     }
     hilog.info(0x0000, 'QingqiFileOpen', 'route current=%{public}s name=%{public}s', current.path, current.name);

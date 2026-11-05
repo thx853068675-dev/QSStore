@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 // Run: node --test native/tests/test_store_client_http.cjs
 //
 // 盯住 StoreClient 交给 HarmonyOS http 模块的请求参数。
@@ -42,7 +43,7 @@ const code = ts.transpileModule(`class StoreClient {
 /** 抓取每次 request() 的 (url, options)，并返回一个成功信封。 */
 function harness(payload = { ok: true, data: {} }) {
   const calls = [];
-  const sandbox = {
+  const sandbox = { PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent,
     ServiceFailure: class extends Error { constructor(kind, message) { super(message); this.failureKind = kind; } },
     FailureKind: { ACCOUNT: 'account', INTERNAL: 'internal', NETWORK: 'network' },
     console,

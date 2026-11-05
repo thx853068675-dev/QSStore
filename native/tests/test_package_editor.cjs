@@ -10,6 +10,7 @@ const cli = path.join(dir, 'reader');
 before(() => execFileSync('c++', ['-std=c++17', '-Wall', '-Wextra', '-Werror', '-I', path.join(root,'entry/src/main/cpp/hap_core'), path.join(root,'entry/src/main/cpp/hap_core/zip_reader.cpp'), path.join(root,'entry/src/main/cpp/hap_core/signing_block.cpp'), path.join(root,'tests/hap_inspect_cli.cpp'), '-lz','-o',cli]));
 after(() => fs.rmSync(dir,{recursive:true,force:true}));
 function load(file,mocks={},globals={}) {
+  mocks = { '../data/I18n': { I18n: { t: value => value } }, './I18n': { I18n: { t: value => value } }, ...mocks };
   const box={exports:{},require:n=>mocks[n]||{},Uint8Array,ArrayBuffer,DataView,Map,Set,Date,console,...globals};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root,'entry/src/main/ets',file+'.ets'),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,box);return box.exports;
 }
@@ -50,14 +51,19 @@ test('malformed resource lengths fail without changing input',()=>{
   assert.throws(()=>new resource.ResourceIndex(bad).replace(new Map([[16777216,'新']])));assert.deepEqual(bad,old);
 });
 const native={listProfileEntries:p=>execFileSync(cli,[p,'profiles'],{encoding:'utf8'}).trim().split('\n').filter(Boolean).map(x=>{const [size,name]=x.split('\t');return {size:Number(size),name};}),readModuleJson:p=>execFileSync(cli,[p],{encoding:'utf8'}),readPackInfo:p=>execFileSync(cli,[p,'pack'],{encoding:'utf8'}),readArchiveFile:(p,n)=>new Uint8Array(execFileSync(cli,[p,'read',n])),readHapIcon:(p,n)=>new Uint8Array(execFileSync(cli,[p,'icon',n])),readInstallPermissions:()=> '[]',
-  listPackageEntries:p=>execFileSync(cli,[p,'list'],{encoding:'utf8'}).trim().split('\n').filter(Boolean).map(x=>{const [size,name]=x.split('\t');return {size:Number(size),name};}),extractPackageEntry:async(p,n,o)=>execFileSync(cli,[p,'extract',n,o]),rewriteArchive:async(p,o,names,files,previous,next)=>execFileSync(cli,[p,previous?'rename':'rewrite',o,...(previous?[previous,next]:[]),...names.flatMap((n,i)=>[n,files[i]])])};
+  listPackageEntries:(p,shared=false)=>execFileSync(cli,[p,shared?'modules':'list'],{encoding:'utf8'}).trim().split('\n').filter(Boolean).map(x=>{const [size,name]=x.split('\t');return {size:Number(size),name};}),extractPackageEntry:async(p,n,o)=>execFileSync(cli,[p,'extract',n,o]),rewriteArchive:async(p,o,names,files,previous,next)=>execFileSync(cli,[p,previous?'rename':'rewrite',o,...(previous?[previous,next]:[]),...names.flatMap((n,i)=>[n,files[i]])])};
 const presentation=load('jobs/PackagePresentation',{'libhap_core.so':native,'./ResourceIndex':resource,'@kit.ArkTS':{util}});
 const inspector=load('jobs/PackageInspector',{'libhap_core.so':native,'./PackagePresentation':presentation});
 const io={accessSync:fs.existsSync,statSync:p=>typeof p==='number'?fs.fstatSync(p):fs.statSync(p),unlinkSync:fs.unlinkSync,renameSync:fs.renameSync,listFileSync:fs.readdirSync,mkdirSync:p=>fs.mkdirSync(p,{recursive:true}),OpenMode:{READ_ONLY:1,WRITE_ONLY:2,CREATE:4,TRUNC:8},openSync:(p,flags)=>({fd:fs.openSync(p,flags&2?(flags&4?'w':'r+'):'r')}),closeSync:f=>fs.closeSync(f.fd),writeSync:(fd,b)=>fs.writeSync(fd,new Uint8Array(b)),copyFile:async(from,to)=>{const b=fs.readFileSync(from);typeof to==='number'?fs.writeFileSync(to,b):fs.writeFileSync(to,b);}};
 const storage={StorageBudget:{require:async()=>{}}};
 const archive=load('jobs/PackageArchive',{'libhap_core.so':native,'@kit.CoreFileKit':{fileIo:io},'./StorageBudget':storage,'./PackageInspector':inspector,'./PackagePresentation':presentation});
+const proofStores=new Map();
+const provenance=load('jobs/EditedPackageProvenance',{'@kit.ArkData':{preferences:{getPreferences:async(context,name)=>{
+  assert.equal(name,'qingqi-package-edits');if(!proofStores.has(context.filesDir))proofStores.set(context.filesDir,new Map());const values=proofStores.get(context.filesDir);
+  return {get:async(key,fallback)=>values.get(key)??fallback,put:async(key,value)=>values.set(key,value),delete:async key=>values.delete(key),flush:async()=>{}};
+}}}});
 let saveTargets=[];
-const editor=load('jobs/PackageEditor',{'libhap_core.so':native,'@kit.CoreFileKit':{fileIo:io,picker:{DocumentViewPicker:class{async save(options){assert.equal(options.newFileNames.length,saveTargets.length||options.newFileNames.length);return saveTargets;}}}},'@kit.ArkTS':{util},'./ResourceIndex':resource,'./BundleReferences':bundleRefs,'./StorageBudget':storage,'./PackageArchive':archive,'./PackageInspector':inspector});
+const editor=load('jobs/PackageEditor',{'libhap_core.so':native,'@kit.CoreFileKit':{fileIo:io,hash:{hash:async p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')},picker:{DocumentViewPicker:class{async save(options){assert.equal(options.newFileNames.length,saveTargets.length||options.newFileNames.length);return saveTargets;}}}},'@kit.ArkTS':{util},'./ResourceIndex':resource,'./BundleReferences':bundleRefs,'./StorageBudget':storage,'./PackageArchive':archive,'./PackageInspector':inspector,'./EditedPackageProvenance':provenance});
 function fixture(stem,extension) {
   const sub=path.join(dir,stem);fs.mkdirSync(sub);fs.writeFileSync(path.join(sub,'index'),indexV2([[16777216,'原名称'],[16777217,'entry/resources/base/media/icon.png']]));
   execFileSync('python3',['-c',`import zipfile,json,sys,io,pathlib
@@ -72,8 +78,11 @@ with zipfile.ZipFile(p/'original.app','w') as z:z.writestr('entry.hap',b.getvalu
 }
 for(const ext of ['.hap','.app'])test(ext+' rename and icon edit roundtrip; identity, payload and original preserved',async()=>{
   const p=fixture(ext.substring(1),ext),row=new editor.EditablePackage();row.path=p;row.filename=path.basename(p);row.identity=await archive.PackageArchive.inspect(p);
+  const context={filesDir:path.dirname(p)+'/files',cacheDir:path.dirname(p)+'/cache'};
   const original=crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');const icon=path.join(path.dirname(p),'new.png');fs.writeFileSync(icon,Buffer.from('PNG-icon'));
-  const edited=await editor.PackageEditor.edit(row,'修改后的中文应用',icon);const info=await archive.PackageArchive.inspect(edited);assert.equal(info.bundleName,row.identity.bundleName);assert.equal(info.versionCode,20);assert.equal(info.displayName,'修改后的中文应用');assert.equal(original,crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'));
+  const edited=await editor.PackageEditor.edit(row,'修改后的中文应用',icon,'',context);const info=await archive.PackageArchive.inspect(edited);assert.equal(info.bundleName,row.identity.bundleName);assert.equal(info.versionCode,20);assert.equal(info.versionName,'1.0');assert.equal(info.displayName,'修改后的中文应用');assert.equal(original,crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'));
+  const outputDigest=crypto.createHash('sha256').update(fs.readFileSync(edited)).digest('hex');
+  const proof=await provenance.EditedPackageProvenance.source(context,outputDigest,info);assert.equal(proof.sha256,original);assert.equal(proof.assetName,row.filename);
   const [module]=await archive.PackageArchive.modulePaths(edited);const idx=new resource.ResourceIndex(native.readArchiveFile(module,'resources.index'));assert.equal(idx.value(16777216),'修改后的中文应用');assert.equal(idx.value(16777217),'entry/resources/base/media/qingqi_edited_icon.png');assert.deepEqual(Buffer.from(await archive.PackageArchive.icon(edited)),Buffer.from('PNG-icon'));
   execFileSync('python3',['-c',`import zipfile,struct,sys
 with zipfile.ZipFile(sys.argv[1]) as z:
@@ -83,6 +92,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
 `,module]);
   saveTargets=[];assert.equal(await editor.PackageEditor.saveMany({},[row]),0);assert.equal(row.status,'');
   const out=path.join(path.dirname(p),'export'+ext);fs.writeFileSync(out,'');saveTargets=[out];assert.equal(await editor.PackageEditor.saveMany({},[row]),1);assert.deepEqual(fs.readFileSync(out),fs.readFileSync(edited));
+  const exportedProof=await provenance.EditedPackageProvenance.source(context,crypto.createHash('sha256').update(fs.readFileSync(out)).digest('hex'),await archive.PackageArchive.inspect(out));assert.equal(exportedProof.sha256,original);assert.equal(exportedProof.assetName,row.filename);
   archive.PackageArchive.release(edited);archive.PackageArchive.release(p);assert(!fs.readdirSync(path.dirname(p)).some(n=>n.endsWith('.part')||n.includes('.edit-')));
 });
 test('ZIP rewrite rejects traversal and leaves no partial output',async()=>{
@@ -96,6 +106,25 @@ test('a failed re-edit cannot export the previous output; the original stays int
   await assert.rejects(editor.PackageEditor.edit(row,'x'.repeat(65),''));
   assert.equal(row.editedPath,'');assert.equal(fs.existsSync(previous),false);assert.deepEqual(fs.readFileSync(p),original);
   await assert.rejects(editor.PackageEditor.saveMany({},[row]));archive.PackageArchive.release(p);
+});
+
+test('a presentation edit cannot publish proof if its raw version name changes',async()=>{
+  const p=fixture('version-name-guard','.hap'),row=new editor.EditablePackage();row.path=p;row.filename=path.basename(p);row.identity=await archive.PackageArchive.inspect(p);
+  const inspect=archive.PackageArchive.inspect,original=fs.readFileSync(p);
+  archive.PackageArchive.inspect=async(file,extension)=>{const identity=await inspect(file,extension);if(file.endsWith('.part'))identity.versionName='1.0-forged';return identity;};
+  try{await assert.rejects(editor.PackageEditor.edit(row,'改名称','','',{filesDir:path.dirname(p)+'/files'}),/版本校验失败/);}
+  finally{archive.PackageArchive.inspect=inspect;}
+  assert.equal(row.editedPath,'');assert.deepEqual(fs.readFileSync(p),original);
+  assert.equal(fs.readdirSync(path.dirname(p)).some(name=>name.endsWith('.part')||name.endsWith('-edited.hap')),false);
+});
+
+test('a failed provenance write cannot expose an edited output for export or direct install',async()=>{
+  const p=fixture('proof-write-guard','.hap'),row=new editor.EditablePackage();row.path=p;row.filename=path.basename(p);row.identity=await archive.PackageArchive.inspect(p);
+  const record=provenance.EditedPackageProvenance.record;
+  provenance.EditedPackageProvenance.record=async()=>{throw Error('proof storage failed');};
+  try{await assert.rejects(editor.PackageEditor.edit(row,'改名称','','',{filesDir:path.dirname(p)+'/files'}),/proof storage failed/);}
+  finally{provenance.EditedPackageProvenance.record=record;}
+  assert.equal(row.editedPath,'');assert.equal(fs.readdirSync(path.dirname(p)).some(name=>name.endsWith('.part')||name.endsWith('-edited.hap')),false);
 });
 
 const inspection=load('data/InstalledInspection',{}).InstalledInspection;
@@ -156,8 +185,10 @@ test('installed selection uses the device name instead of a linked catalog title
 
 for(const ext of ['.hap','.app'])test(ext+' bundle rename updates manifests and pack metadata without touching compiled bytes',async()=>{
   const p=fixture('bundle-'+ext.substring(1),ext),row=new editor.EditablePackage();row.path=p;row.filename=path.basename(p);row.identity=await archive.PackageArchive.inspect(p);
-  const original=fs.readFileSync(p),result=await editor.PackageEditor.edit(row,'独立应用','', 'com.example.renamed');
+  const context={filesDir:path.dirname(p)+'/files',cacheDir:path.dirname(p)+'/cache'};
+  const original=fs.readFileSync(p),result=await editor.PackageEditor.edit(row,'独立应用','', 'com.example.renamed',context);
   const actual=await archive.PackageArchive.inspect(result);assert.equal(actual.bundleName,'com.example.renamed');assert.equal(actual.versionCode,20);assert.equal(actual.displayName,'独立应用');
+  assert.equal((await provenance.EditedPackageProvenance.source(context,crypto.createHash('sha256').update(fs.readFileSync(result)).digest('hex'),actual)).sha256,'');
   for(const module of await archive.PackageArchive.modulePaths(result)){
     assert.equal(JSON.parse(native.readModuleJson(module)).app.bundleName,'com.example.renamed');
     assert.equal(JSON.parse(native.readPackInfo(module)).summary.app.bundleName,'com.example.renamed');
@@ -191,6 +222,36 @@ with zipfile.ZipFile(p,'w') as outer:
   const modules=await archive.PackageArchive.modulePaths(result);assert.equal(modules.length,2);
   for(const path of modules){const manifest=JSON.parse(native.readModuleJson(path));assert.equal(manifest.app.bundleName,'com.example.newbundle');assert.equal(manifest.module.dependencies[0].bundleName,'com.example.newbundle');assert.equal(manifest.module.dependencies[1].bundleName,'com.other.library');assert.equal(manifest.module.metadata[0].value,'com.example.newbundle');}
   archive.PackageArchive.release(result);archive.PackageArchive.release(p);
+});
+
+test('APP bundle editing includes shared HSP modules while standalone archive selection excludes them',async()=>{
+  const p=fixture('shared-app','.app');
+  execFileSync('python3',['-c',`import zipfile,json,io,sys
+p=sys.argv[1]
+with zipfile.ZipFile(p) as src:data=src.read('entry.hap')
+b=io.BytesIO()
+with zipfile.ZipFile(io.BytesIO(data)) as src,zipfile.ZipFile(b,'w') as z:
+ for item in src.infolist():
+  raw=src.read(item.filename)
+  if item.filename=='module.json':
+   m=json.loads(raw);m['module']['name']='jre25';m['module']['type']='shared';m['module'].pop('mainElement',None);m['module']['abilities']=[];raw=json.dumps(m).encode()
+  z.writestr(item,raw)
+with zipfile.ZipFile(p,'w') as z:
+ z.writestr('entry.hap',data);z.writestr('runtime/JRE25.HSP',b.getvalue());z.writestr('pack.info',json.dumps({'summary':{'app':{'bundleName':'com.example.editor'}}}))
+`,p]);
+  assert.equal(native.listPackageEntries(p).length,1);
+  assert.equal(native.listPackageEntries(p,true).length,2);
+  const row=new editor.EditablePackage();row.path=p;row.identity=await archive.PackageArchive.inspect(p);
+  const output=await editor.PackageEditor.edit(row,'新名称','','com.example.sharedclone');
+  const modules=await archive.PackageArchive.modulePaths(output);assert.equal(modules.length,2);
+  assert(modules.some(p=>p.endsWith('.hsp')));
+  for(const file of modules){
+    assert.equal(JSON.parse(native.readModuleJson(file)).app.bundleName,'com.example.sharedclone');
+    assert.equal(JSON.parse(native.readPackInfo(file)).summary.app.bundleName,'com.example.sharedclone');
+    assert.deepEqual(Buffer.from(native.readArchiveFile(file,'payload.bin')),Buffer.from('unchanged'.repeat(2000)));
+  }
+  assert.equal(native.listPackageEntries(output,true)[1].name,'runtime/JRE25.HSP');
+  archive.PackageArchive.release(output);archive.PackageArchive.release(p);
 });
 
 test('invalid bundle names fail before creating an output',async()=>{
@@ -260,6 +321,148 @@ for(const kind of ['checksum','version','unclassified-pointer','record-name'])te
   assert.equal(row.editedPath,'');assert.deepEqual(fs.readFileSync(p),original);assert(!fs.readdirSync(path.dirname(p)).some(name=>name.endsWith('.part')||name.endsWith('.edited.hap')));
   const result=await editor.PackageEditor.edit(row,'只改名称','');assert.equal((await archive.PackageArchive.inspect(result)).displayName,'只改名称');
   assert.deepEqual(Buffer.from(native.readArchiveFile(result,'ets/modules.abc')),bytes);archive.PackageArchive.release(result);archive.PackageArchive.release(p);
+});
+
+function annotatedAbc(tag = '7', scalar = 200) {
+  const source = abcFixture(), bytes = Buffer.alloc(1024); source.copy(bytes);
+  bytes.writeUInt32LE(bytes.length,16);bytes.writeUInt32LE(bytes.length,64);
+  bytes.writeUInt32LE(1,28);bytes.writeUInt32LE(116,32);bytes.writeUInt32LE(600,116);
+  let at=600;const name='LTest;';bytes[at++]=(name.length*2)|1;bytes.write(name,at);at+=name.length+1;
+  bytes.writeUInt32LE(0,at);at+=4;bytes[at++]=0;bytes[at++]=0;bytes[at++]=1;
+  bytes[at++]=4;bytes.writeUInt32LE(720,at);at+=4;bytes[at++]=0;
+  at+=4;bytes.writeUInt32LE(160,at);at+=4;bytes[at++]=0;bytes[at++]=6;bytes.writeUInt32LE(740,at);at+=4;bytes[at]=0;
+  for (const [id,type,value] of [[720,tag,scalar],[740,'C',850]]) {
+    bytes.writeUInt16LE(0,id);bytes.writeUInt16LE(1,id+2);bytes.writeUInt32LE(160,id+4);
+    bytes.writeUInt32LE(value,id+8);bytes[id+12]=type.charCodeAt(0);
+  }
+  const text='@bundle:com.example.editor/entry/widget/Index';bytes[850]=(text.length*2)|1;bytes.write(text,851);
+  bytes.writeUInt32LE(adler32(bytes.subarray(12)),8);return bytes;
+}
+for(const ext of ['.hap','.app'])test(ext+' recognizes typed annotations, retains scalar collisions and relocates annotation-only strings',async()=>{
+  const p=fixture('abc-annotation-'+ext.slice(1),ext),source=annotatedAbc();withAbc(p,source);
+  const row=new editor.EditablePackage();row.path=p;row.identity=await archive.PackageArchive.inspect(p);
+  for(const bundle of ['com.example.longerclone','org.new.app']){
+    const edited=await editor.PackageEditor.edit(row,'新名称','',bundle);
+    for(const module of await archive.PackageArchive.modulePaths(edited))for(const entry of ['ets/modules.abc','ets/widgets.abc']){
+      const b=Buffer.from(native.readArchiveFile(module,entry));
+      assert.equal(b.readUInt32LE(728),200,'numeric annotation is not a string pointer');
+      assert.equal(abcString(b,b.readUInt32LE(748)),'@bundle:'+bundle+'/entry/widget/Index');
+      assert.equal(abcString(b,b.readUInt32LE(104)),bundle);
+      assert.deepEqual(b.subarray(450,512),source.subarray(450,512));
+      assert.equal(b.readUInt32LE(8),adler32(b.subarray(12)));
+    }
+  }
+  archive.PackageArchive.release(row.editedPath);archive.PackageArchive.release(p);
+});
+test('annotation exceptions cannot hide references outside the typed region or malformed annotation strings',async()=>{
+  for(const kind of ['outside','invalid-string','truncated']){
+    const p=fixture('abc-annotation-guard-'+kind,'.hap'),bytes=annotatedAbc();
+    if(kind==='outside')bytes.writeUInt32LE(200,780);
+    if(kind==='invalid-string')bytes.writeUInt32LE(0xffffffff,748);
+    if(kind==='truncated')bytes.writeUInt16LE(65535,722);
+    bytes.writeUInt32LE(adler32(bytes.subarray(12)),8);withAbc(p,bytes);
+    const original=fs.readFileSync(p),row=new editor.EditablePackage();row.path=p;row.identity=await archive.PackageArchive.inspect(p);
+    await assert.rejects(editor.PackageEditor.edit(row,'新名称','','com.example.clone'),/Ark|字节码/);
+    assert.equal(row.editedPath,'');assert.deepEqual(fs.readFileSync(p),original);archive.PackageArchive.release(p);
+  }
+});
+
+function lebBytes(value) { const out=[];do{out.push((value&127)|(value>127?128:0));value>>>=7;}while(value);return Buffer.from(out); }
+function readLeb(bytes,at) { let value=0,shift=0,c;do{c=bytes[at++];value|=(c&127)<<shift;shift+=7;}while(c&128);return [value,at]; }
+function boundClassAbc() {
+  const b=Buffer.alloc(400000);abcFixture().copy(b);b.writeUInt32LE(b.length,16);b.writeUInt32LE(b.length,64);
+  const string=(id,text)=>Buffer.concat([lebBytes(text.length*2+1),Buffer.from(text+'\0')]).copy(b,id);
+  b.writeUInt32LE(1,28);b.writeUInt32LE(580,32);b.writeUInt32LE(600,580);
+  b.writeUInt32LE(1,68);b.writeUInt32LE(580,72);b.writeUInt32LE(6,76);
+  b.writeUInt32LE(1,84);b.writeUInt32LE(584,88);
+  b.writeUInt32LE(400,120);string(400,'com.example.editor/intent');
+  string(600,'Lcom.example.editor/entry/ets/EntryAbility;');
+  let at=b.indexOf(0,601)+1;const body=at;b.writeUInt32LE(0,at);at+=4;
+  for(const v of [0,1,1,0])b[at++]=v;
+  string(180,'moduleRecordIdx');
+  const field=at;at+=4;b.writeUInt32LE(180,at);at+=4;b[at++]=0;b[at++]=2;b.writeUInt32LE(2200,at);at+=4;b[at++]=0;
+  const method=at;at+=4;b.writeUInt32LE(300,at);at+=4;b[at++]=0;b[at++]=1;b.writeUInt32LE(4000,at);at+=4;b[at++]=5;
+  const debugPointer=at;b.writeUInt32LE(1000,at);at+=4;b[at++]=0;
+  b.writeUInt32LE(field,584);b.writeUInt32LE(method,116);
+  b.writeUInt32LE(8,128);b[147]=6;b.writeUInt32LE(method,148);
+  // A four-byte sequence in a numeric catch table equals this UNUSED string ID.
+  string(315392,'com.example.editor/entry/unused.#method');
+  Buffer.from([0,0,0xe8,7,1]).copy(b,4000);b.fill(0x65,4005,5005);
+  b[4005]=0x62;b.writeUInt32LE(200,4006); // ldai scalar happens to equal a string ID
+  Buffer.from([0,0,1,0,0xd0,4,0]).copy(b,5005);
+  b.writeUInt32LE(1,36);b.writeUInt32LE(1600,40);b.writeUInt32LE(1700,1600);
+  const cp=Buffer.concat([lebBytes(350),lebBytes(200),lebBytes(600)]);
+  Buffer.concat([lebBytes(1),lebBytes(1),lebBytes(200),lebBytes(cp.length),cp,lebBytes(0)]).copy(b,1000);
+  Buffer.from([9,3,0,0]).copy(b,1700);
+  string(2000,'@bundle:com.example.editor/entry@plugin/Component');
+  let m=2200;const u32=v=>{b.writeUInt32LE(v,m);m+=4;},u16=v=>{b.writeUInt16LE(v,m);m+=2;};
+  u32(0);u32(1);u32(2000); // request exists only in module data, not the ordinary index
+  u32(1);u32(160);u32(300);u16(0);
+  u32(1);u32(160);u16(0);
+  u32(1);u32(160);u32(300);
+  u32(1);u32(160);u32(300);u16(0);
+  u32(1);u16(0);
+  b.writeUInt32LE(adler32(b.subarray(12)),8);return {b,body,field,method,debugPointer};
+}
+test('Flutter class/member relocation preserves code, numeric exceptions and custom Dart channels; debug LEB widths grow safely',async()=>{
+  const p=fixture('abc-bound-class','.hap'),source=boundClassAbc();withAbc(p,source.b);
+  const row=new editor.EditablePackage();row.path=p;row.identity=await archive.PackageArchive.inspect(p);
+  for(const bundle of ['com.example.longerclone','org.new.app']) {
+    const edited=await editor.PackageEditor.edit(row,'新名称','',bundle),b=Buffer.from(native.readArchiveFile(edited,'ets/modules.abc'));
+    const cls=b.readUInt32LE(580),name='L'+bundle+'/entry/ets/EntryAbility;';assert.equal(abcString(b,cls),name);
+    const newBody=b.indexOf(0,cls+1)+1,delta=newBody-source.body;
+    assert.equal(b.readUInt32LE(584),source.field+delta);assert.equal(b.readUInt32LE(116),source.method+delta);
+    assert.equal(b.readUInt32LE(148),source.method+delta);assert.equal(b.readUInt32LE(source.debugPointer-5+delta),4000);
+    assert.deepEqual(b.subarray(4000,5012),source.b.subarray(4000,5012));
+    assert.equal(abcString(b,b.readUInt32LE(120)),'com.example.editor/intent');
+    assert.equal(abcString(b,b.readUInt32LE(2208)),'@bundle:'+bundle+'/entry@plugin/Component');
+    let at=b.readUInt32LE(source.debugPointer+delta);assert.ok(at>=source.b.length);
+    let v;[v,at]=readLeb(b,at);assert.equal(v,1);[v,at]=readLeb(b,at);assert.equal(v,1);
+    [v,at]=readLeb(b,at);assert.equal(abcString(b,v),bundle);[v,at]=readLeb(b,at);assert.equal(v,9);
+    for(const expected of ['@bundle:'+bundle+'/entry/pages/Main',bundle,name]){[v,at]=readLeb(b,at);assert.equal(abcString(b,v),expected);}
+    assert.equal(b.readUInt32LE(16),b.length);assert.equal(b.readUInt32LE(8),adler32(b.subarray(12)));
+  }
+  archive.PackageArchive.release(row.editedPath);archive.PackageArchive.release(p);
+});
+test('class relocation rejects broken catch/debug tables and unknown references outside typed scalar regions',async()=>{
+  for(const kind of ['catch','debug','module','unknown']) {
+    const p=fixture('abc-bound-bad-'+kind,'.hap'),{b}=boundClassAbc();
+    if(kind==='catch')b[5005]=0xff;
+    if(kind==='debug')b[1004]=1;
+    if(kind==='module')b[2224]=1;
+    if(kind==='unknown')b.writeUInt32LE(315392,7000);
+    b.writeUInt32LE(adler32(b.subarray(12)),8);withAbc(p,b);
+    const row=new editor.EditablePackage();row.path=p;row.identity=await archive.PackageArchive.inspect(p);
+    await assert.rejects(editor.PackageEditor.edit(row,'新名称','','com.example.clone'),/Ark|字节码/);
+    assert.equal(row.editedPath,'');archive.PackageArchive.release(p);
+  }
+});
+
+test('real package passes the complete editor pipeline and preserves native libraries',{
+  skip: !process.env.QINGQI_EDITOR_REAL_APP
+},async()=>{
+  const source=process.env.QINGQI_EDITOR_REAL_APP,sub=path.join(dir,'real-app');fs.mkdirSync(sub);
+  const p=path.join(sub,'original'+path.extname(source));fs.copyFileSync(source,p);
+  const original=fs.readFileSync(source),row=new editor.EditablePackage();row.path=p;row.filename=path.basename(source);
+  row.identity=await archive.PackageArchive.inspect(p);
+  const next=row.identity.bundleName+'.clone',result=await editor.PackageEditor.edit(row,row.identity.displayName,'',next);
+  const actual=await archive.PackageArchive.inspect(result),pack=JSON.parse(native.readPackInfo(result));
+  assert.equal(actual.bundleName,next);assert.equal(actual.versionCode,row.identity.versionCode);
+  assert.equal(pack.summary.app.bundleName,next);assert.equal(actual.versionName,row.identity.versionName);
+  const before=await archive.PackageArchive.modulePaths(p),after=await archive.PackageArchive.modulePaths(result);
+  assert.equal(before.length,after.length);
+  for(let i=0;i<before.length;i++){
+    assert.equal(JSON.parse(native.readModuleJson(after[i])).app.bundleName,next);
+    execFileSync('python3',['-c',`import sys,zipfile
+with zipfile.ZipFile(sys.argv[1]) as a,zipfile.ZipFile(sys.argv[2]) as b:
+ assert b.testzip() is None
+ for n in a.namelist():
+  if n.startswith('libs/'): assert a.read(n)==b.read(n),n
+`,before[i],after[i]]);
+  }
+  assert.deepEqual(fs.readFileSync(source),original);
+  if(process.env.QINGQI_EDITOR_REAL_OUTPUT)fs.copyFileSync(result,process.env.QINGQI_EDITOR_REAL_OUTPUT);
+  archive.PackageArchive.release(result);archive.PackageArchive.release(p);
 });
 
 for(const extension of ['.hap','.app'])test('bundle rename synchronizes route profiles in '+extension+' without changing foreign bundles',async()=>{

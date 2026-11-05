@@ -4,6 +4,7 @@ import { LocalProfileGroup, LocalProfileStore } from '../data/LocalProfileStore'
 import { errorText } from '../jobs/ErrorText';
 import { Palette } from '../theme/Palette';
 import { StoreIconButton, StoreLayout } from '../theme/StoreDesign';
+import { I18n } from '../data/I18n';
 
 @Component
 export struct LocalProfileDialog {
@@ -37,30 +38,30 @@ export struct LocalProfileDialog {
   }
 
   private title(row: LocalProfileGroup): string {
-    return row.bundleName ? this.titleForBundle(row.bundleName) : '无法识别的 Profile';
+    return row.bundleName ? this.titleForBundle(row.bundleName) : I18n.t('无法识别的 Profile');
   }
   private summary(row: LocalProfileGroup): string {
-    let text = row.files.length + ' 份授权';
+    let text = row.files.length + I18n.t(' 份授权');
     if (row.expiresAt > 0) {
       const date = new Date(row.expiresAt * 1000);
-      text += ' · 最晚到期 ' + date.getFullYear() + '-' +
+      text += I18n.t(' · 最晚到期 ') + date.getFullYear() + '-' +
         String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0');
     }
     return text;
   }
   private confirmRemove(row: LocalProfileGroup): void {
     if (this.deleting) return;
-    AlertDialog.show({ title: '删除 ' + this.title(row) + ' 的本地 Profile？',
-      message: '将删除 ' + row.files.length + ' 份本机授权。已安装应用和签名证书不受影响，下次签装可能需要重新申请授权。',
-      primaryButton: { value: '取消', action: () => {} },
-      secondaryButton: { value: '删除', fontColor: this.colors().danger, action: () => { this.remove(row); } } });
+    AlertDialog.show({ title: I18n.t('删除 ') + this.title(row) + I18n.t(' 的本地 Profile？'),
+      message: I18n.t('将删除 ') + row.files.length + I18n.t(' 份本机授权。已安装应用和签名证书不受影响，下次签装可能需要重新申请授权。'),
+      primaryButton: { value: I18n.t('取消'), action: () => {} },
+      secondaryButton: { value: I18n.t('删除'), fontColor: this.colors().danger, action: () => { this.remove(row); } } });
   }
   private async remove(row: LocalProfileGroup): Promise<void> {
     if (this.deleting || this.disposed) return;
     this.deleting = row.key; this.message = '';
     try {
       const count = await LocalProfileStore.remove(getContext(this) as common.UIAbilityContext, row.key);
-      promptAction.showToast({ message: count > 0 ? '已删除 ' + count + ' 份本地 Profile' : '该 Profile 已不存在' });
+      promptAction.showToast({ message: count > 0 ? I18n.t('已删除 ') + count + I18n.t(' 份本地 Profile') : I18n.t('该 Profile 已不存在') });
     } catch (error) { if (!this.disposed) this.message = errorText(error); }
     finally { await this.load(); if (!this.disposed) this.deleting = ''; }
   }
@@ -68,10 +69,10 @@ export struct LocalProfileDialog {
   @Builder private deleteAction(row: LocalProfileGroup) {
     Column({ space: 6 }) {
       SymbolGlyph($r('sys.symbol.trash')).fontSize(18).fontColor([this.colors().onAccent])
-      Text(this.deleting === row.key ? '删除中' : '删除').fontSize(12).fontColor(this.colors().onAccent)
+      Text(this.deleting === row.key ? I18n.t('删除中') : I18n.t('删除')).fontSize(12).fontColor(this.colors().onAccent)
     }.width(64).height('100%').margin({ left: 8 }).justifyContent(FlexAlign.Center)
       .backgroundColor(this.colors().danger).borderRadius(16).enabled(!this.deleting)
-      .accessibilityText('删除 ' + this.title(row) + ' 的本地 Profile')
+      .accessibilityText(I18n.t('删除 ') + this.title(row) + I18n.t(' 的本地 Profile'))
       .id('local-profile-delete-' + row.key).onClick(() => this.confirmRemove(row))
   }
 
@@ -81,9 +82,9 @@ export struct LocalProfileDialog {
       Column({ space: 16 }) {
           Row({ space: 12 }) {
             Column({ space: 4 }) {
-              Text('本地 Profile').fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
-              Text(this.loading ? '正在读取本机授权…' : this.rows.length + ' 个应用 · ' +
-                this.rows.reduce((total: number, row: LocalProfileGroup) => total + row.files.length, 0) + ' 份授权')
+              Text(I18n.t('本地 Profile')).fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+              Text(this.loading ? I18n.t('正在读取本机授权…') : this.rows.length + I18n.t(' 个应用 · ') +
+                this.rows.reduce((total: number, row: LocalProfileGroup) => total + row.files.length, 0) + I18n.t(' 份授权'))
                 .fontSize(12).fontColor(this.colors().textSecondary)
             }.alignItems(HorizontalAlign.Start).layoutWeight(1)
             StoreIconButton({ action: () => this.onClose() })
@@ -91,7 +92,7 @@ export struct LocalProfileDialog {
           List({ space: 12 }) {
           if (this.loading) { ListItem() { Row() { LoadingProgress().width(28).height(28).color(this.colors().accent) }.width('100%').justifyContent(FlexAlign.Center) } }
           else if (this.rows.length === 0 && !this.message) {
-            ListItem() { Text('还没有保存的本地 Profile').fontSize(14).fontColor(this.colors().textSecondary).padding({ top: 20, bottom: 20 }).width('100%').textAlign(TextAlign.Center) }
+            ListItem() { Text(I18n.t('还没有保存的本地 Profile')).fontSize(14).fontColor(this.colors().textSecondary).padding({ top: 20, bottom: 20 }).width('100%').textAlign(TextAlign.Center) }
           } else {
             ForEach(this.rows, (row: LocalProfileGroup) => {
               ListItem() {

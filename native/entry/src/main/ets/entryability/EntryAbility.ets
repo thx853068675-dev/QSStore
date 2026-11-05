@@ -1,15 +1,24 @@
+import { NotificationOpen } from '../jobs/NotificationOpen';
+import { DeviceOrbHost } from '../components/DeviceOrbHost';
+import { DeviceOrbGestureGuard } from '../jobs/DeviceOrbGestureGuard';
 import { InstallCoordinator } from '../jobs/InstallCoordinator';
 import { WirelessDebugLifecycle } from '../jobs/WirelessDebugLifecycle';
 import { UIAbility, Want, AbilityConstant, Configuration, ConfigurationConstant } from '@kit.AbilityKit';
 import { window, display } from '@kit.ArkUI';
 import { BackgroundInstallTask } from '../jobs/BackgroundInstallTask';
+import { DeviceDiscovery } from '../jobs/DeviceDiscovery';
+import { DeviceInstallTarget } from '../jobs/DeviceInstallTarget';
+import { deviceInfo } from '@kit.BasicServicesKit';
 import { ExternalInstallOpen } from '../jobs/ExternalInstallOpen';
 import { ForegroundIdle } from '../jobs/ForegroundIdle';
 import { AppearancePreferences } from '../data/AppearancePreferences';
+import { AppLanguagePreferences } from '../data/AppLanguagePreferences';
+import { MaterialPreferences } from '../data/MaterialPreferences';
 import { ManagementPreferences } from '../data/ManagementPreferences';
 import { DiscoverSortPreferences } from '../data/DiscoverSortPreferences';
 import { Palette } from '../theme/Palette';
 import { ResumeFramePacing } from '../theme/ResumeFramePacing';
+import { PrivacyConsent } from '../data/PrivacyConsent';
 
 // 背景交给页面连续绘制，系统栏仅按主题切换文字颜色。
 const BARS_LIGHT: window.SystemBarProperties = {
@@ -27,17 +36,21 @@ const BARS_DARK: window.SystemBarProperties = {
 
 export default class EntryAbility extends UIAbility {
   private mainWindow?: window.Window;
+  private fileOpenWindow?: window.Window;
   private backgroundWindow?: window.Window;
   private backgroundColor: string = '';
   private contentReady: boolean = false;
+  private businessConfigured: boolean = false;
+  private privacySubscription: number = -1;
   private appearanceTail: Promise<void> = Promise.resolve();
   private onAppearanceChanged = (): void => { this.applyAppearance(); };
+  private onWindowSizeChange = (size: window.Size): void => { this.syncStatusBarInset(size); };
   private onAvoidAreaChange = (options: window.AvoidAreaOptions): void => {
     if (options.type === window.AvoidAreaType.TYPE_SYSTEM ||
       options.type === window.AvoidAreaType.TYPE_CUTOUT) this.syncStatusBarInset();
   };
 
-  private syncStatusBarInset(): void {
+  private syncStatusBarInset(size?: window.Size): void {
     const mainWindow = this.mainWindow;
     if (!mainWindow) return;
     try {
@@ -45,10 +58,26 @@ export default class EntryAbility extends UIAbility {
       const cutout = mainWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
       const top = Math.max(system.topRect.height, cutout.topRect.height);
       // onForeground / 避让回调可早于 loadContent，不能提前取得 UIContext。
-      const screen = display.getDisplayByIdSync(mainWindow.getWindowProperties().displayId);
-      const inset = top / screen.densityPixels;
+      const properties = mainWindow.getWindowProperties();
+      const screen = display.getDisplayByIdSync(properties.displayId);
+      const density = screen.densityPixels;
+      if (!Number.isFinite(density) || density <= 0) return;
+      const inset = top / density;
       if (AppStorage.get<number>('statusBarInset') !== inset) {
         AppStorage.setOrCreate<number>('statusBarInset', inset);
+      }
+      const bottom = Math.max(system.bottomRect?.height ?? 0, cutout.bottomRect?.height ?? 0) / density;
+      if (AppStorage.get<number>('navigationBottomInset') !== bottom) {
+        AppStorage.setOrCreate<number>('navigationBottomInset', bottom);
+      }
+      // Resize callbacks carry the new physical size before some window properties update.
+      const width = (size?.width ?? properties.windowRect?.width ?? 0) / density;
+      const height = (size?.height ?? properties.windowRect?.height ?? 0) / density;
+      if (Number.isFinite(width) && width > 0 && AppStorage.get<number>('windowWidth') !== width) {
+        AppStorage.setOrCreate<number>('windowWidth', width);
+      }
+      if (Number.isFinite(height) && height > 0 && AppStorage.get<number>('windowHeight') !== height) {
+        AppStorage.setOrCreate<number>('windowHeight', height);
       }
     } catch (_) {
       // 窗口切换或销毁中的暂态保留上一次安全区，下一次前台/避让回调重新读取。
@@ -114,27 +143,87 @@ export default class EntryAbility extends UIAbility {
   }
 
   onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+    DeviceInstallTarget.localKind=DeviceInstallTarget.kind(deviceInfo.deviceType)||'phone';
+    DeviceInstallTarget.localModel=DeviceInstallTarget.displayFact(deviceInfo.productModel);
+    DeviceInstallTarget.localMarketName=DeviceInstallTarget.displayFact(deviceInfo.marketName);
     this.context.eventHub.on('appearance-changed', this.onAppearanceChanged);
-    BackgroundInstallTask.configure(this.context);
-    InstallCoordinator.configure(this.context);
-    WirelessDebugLifecycle.configure(this.context);
+    if (PrivacyConsent.isManaged()) this.privacySubscription = PrivacyConsent.subscribe(() => {
+      this.syncBusinessServices();
+      DeviceDiscovery.onPrivacyChanged();
+      if (this.contentReady && PrivacyConsent.isBusinessAllowed()) WirelessDebugLifecycle.onForeground();
+    });
+    PrivacyConsent.configure(this.context);
+    this.syncBusinessServices();
     AppStorage.setOrCreate<string>('qingqiFilesDir', this.context.filesDir);
+    NotificationOpen.receive(want);
     ExternalInstallOpen.receive(want);
   }
 
+  private syncBusinessServices(): void {
+    if (!PrivacyConsent.isBusinessAllowed()) {
+      DeviceDiscovery.onPrivacyChanged();
+      DeviceOrbHost.dispose();
+      if (this.businessConfigured) { WirelessDebugLifecycle.onBackground(); }
+      return;
+    }
+    if (!this.businessConfigured) {
+      BackgroundInstallTask.configure(this.context);
+      InstallCoordinator.configure(this.context);
+      WirelessDebugLifecycle.configure(this.context);
+      this.businessConfigured = true;
+    }
+    if (this.contentReady && this.mainWindow) {
+      // Keep the routing context on warm foreground returns; obtaining it again
+      // adds work inside the desktop's scale animation without changing it.
+      if (this.fileOpenWindow !== this.mainWindow) {
+        const ui=this.mainWindow.getUIContext();
+        ExternalInstallOpen.configure(ui); NotificationOpen.configure(ui);
+        DeviceOrbHost.install(ui,this.context);
+        this.fileOpenWindow = this.mainWindow;
+      }
+      if(!DeviceOrbHost.attached())DeviceOrbHost.install(this.mainWindow.getUIContext(),this.context);
+      ExternalInstallOpen.openPending(); NotificationOpen.openPending();
+    }
+  }
+
   onNewWant(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+    if(NotificationOpen.receive(want)){if(this.contentReady)NotificationOpen.openPending();return;}
     if (ExternalInstallOpen.receive(want) && this.contentReady) ExternalInstallOpen.openPending();
   }
 
+  /**
+   * 语言偏好必须在首页加载前就绪；单元测试或预览器没有该模块时直接跳过，
+   * 保持默认中文，不能因为可选配置让整个 ability 初始化失败。
+   */
+  private loadLanguage(): Promise<void> {
+    try {
+      const task = AppLanguagePreferences.load(this.context);
+      return task === undefined ? Promise.resolve() : task.catch(() => {});
+    } catch (_) {
+      return Promise.resolve();
+    }
+  }
+
   onWindowStageCreate(windowStage: window.WindowStage): void {
+    if(AppStorage.get<boolean>('deviceOrbForeground')===undefined)AppStorage.setOrCreate('deviceOrbForeground',true);
     const mainWindow = windowStage.getMainWindowSync();
     this.mainWindow = mainWindow;
+    DeviceOrbGestureGuard.attach(mainWindow);
     mainWindow.on('avoidAreaChange', this.onAvoidAreaChange);
+    mainWindow.on('windowSizeChange', this.onWindowSizeChange);
     // 先完成全屏，再设置透明系统栏，避免全屏切换覆盖之前的颜色。
-    mainWindow.setWindowLayoutFullScreen(true).catch((error: Error) => {
+    Promise.all([
+      // Set the live window policy explicitly as well as the ability manifest.
+      // Respect rotation lock and the orientations supported by this device.
+      mainWindow.setPreferredOrientation(window.Orientation.AUTO_ROTATION_UNSPECIFIED).catch((error: Error) => {
+        console.warn('Unable to set automatic rotation: ' + JSON.stringify(error));
+      }),
+      mainWindow.setWindowLayoutFullScreen(true).catch((error: Error) => {
       console.warn('Unable to enable full-screen layout: ' + JSON.stringify(error));
-    }).then(() => Promise.all([
-      AppearancePreferences.load(this.context), ManagementPreferences.load(this.context), DiscoverSortPreferences.load(this.context)
+      })
+    ]).then(() => Promise.all([
+      AppearancePreferences.load(this.context), ManagementPreferences.load(this.context), DiscoverSortPreferences.load(this.context),
+      MaterialPreferences.load(this.context), this.loadLanguage()
     ])).then(() => this.applyAppearance()).then(() => {
       if (this.mainWindow !== mainWindow) return;
       this.syncStatusBarInset();
@@ -149,16 +238,19 @@ export default class EntryAbility extends UIAbility {
         // 页面加载后再同步，覆盖组件初始化和系统主题切换的窗口默认值。
         this.applyAppearance();
         this.syncStatusBarInset();
-        ExternalInstallOpen.configure(mainWindow.getUIContext());
-        ExternalInstallOpen.openPending();
+        this.syncBusinessServices();
       });
     });
   }
 
   onWindowStageDestroy(): void {
+    DeviceOrbGestureGuard.detach();
+    DeviceOrbHost.dispose();
     ResumeFramePacing.stop();
-    ExternalInstallOpen.suspendRouting();
+    ExternalInstallOpen.suspendRouting(); NotificationOpen.suspendRouting();
+    this.fileOpenWindow = undefined;
     this.mainWindow?.off('avoidAreaChange', this.onAvoidAreaChange);
+    this.mainWindow?.off('windowSizeChange', this.onWindowSizeChange);
     this.mainWindow = undefined;
     this.backgroundWindow = undefined;
     this.backgroundColor = '';
@@ -169,23 +261,39 @@ export default class EntryAbility extends UIAbility {
     // 系统深浅色切换：更新系统栏并通知页面重渲染。
     this.context.config = config;
     this.applyAppearance();
+    this.syncStatusBarInset();
   }
 
   onForeground(): void {
+    DeviceOrbGestureGuard.release();
+    if(AppStorage.get<boolean>('deviceOrbForeground')!==true)AppStorage.setOrCreate('deviceOrbForeground',true);
     if (this.contentReady) ResumeFramePacing.start();
     ForegroundIdle.onForeground();
-    BackgroundInstallTask.onForeground();
-    WirelessDebugLifecycle.onForeground();
+    PrivacyConsent.refresh();
+    DeviceDiscovery.onForeground();
+    if (PrivacyConsent.isBusinessAllowed()) {
+      this.syncBusinessServices();
+      BackgroundInstallTask.onForeground();
+      WirelessDebugLifecycle.onForeground();
+    }
     // 从系统设置返回时也同步，覆盖部分设备在后台没有送达主题回调的情况。
     this.applyAppearance();
     this.syncStatusBarInset();
   }
 
   onBackground(): void {
+    DeviceOrbGestureGuard.release();
+    if(AppStorage.get<boolean>('deviceOrbForeground')!==false)AppStorage.setOrCreate('deviceOrbForeground',false);
+    DeviceDiscovery.onBackground();
     ResumeFramePacing.stop();
     ForegroundIdle.onBackground();
-    WirelessDebugLifecycle.onBackground();
+    if (this.businessConfigured) {WirelessDebugLifecycle.onBackground();}
   }
 
-  onDestroy(): void { this.context.eventHub.off('appearance-changed', this.onAppearanceChanged); }
+  onDestroy(): void {
+    DeviceDiscovery.dispose();
+    DeviceOrbHost.dispose();
+    PrivacyConsent.unsubscribe(this.privacySubscription);
+    this.context.eventHub.off('appearance-changed', this.onAppearanceChanged);
+  }
 }

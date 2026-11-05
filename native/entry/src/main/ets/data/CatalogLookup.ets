@@ -24,9 +24,12 @@ export class CatalogLookup {
         continue;
       }
       const at = Number(app.updatedAt), previousAt = Number(original.updatedAt);
-      if ((Number.isFinite(at) && at > (Number.isFinite(previousAt) ? previousAt : 0)) ||
+      const newer = (Number.isFinite(at) && at > (Number.isFinite(previousAt) ? previousAt : 0)) ||
         ((!Number.isFinite(at) || !Number.isFinite(previousAt) || at === previousAt) &&
-          (app.latestAsset?.versionCode ?? 0) > (original.latestAsset?.versionCode ?? 0))) sources.set(app.id, app);
+          (app.latestAsset?.versionCode ?? 0) > (original.latestAsset?.versionCode ?? 0));
+      // The selected row still owns the catalog/package set. A matching digest
+      // may only supply a missing declaration; it cannot revive another asset.
+      sources.set(app.id, CatalogLookup.enrichDeviceMetadata(newer ? app : original, newer ? original : app));
     }
     this.rows = Array.from(sources.values()).map(project);
     for (const app of this.rows) {
@@ -66,5 +69,35 @@ export class CatalogLookup {
     return app.knownAssets !== undefined && app.knownAssets.length > 0 ? app.knownAssets :
       app.latestAssets !== undefined && app.latestAssets.length > 0 ? app.latestAssets :
         app.latestAsset !== undefined ? [app.latestAsset] : [];
+  }
+
+  /** Metadata can be backfilled without changing the package or catalog timestamp. */
+  private static enrichDeviceMetadata(previous: CatalogApp, fresh: CatalogApp): CatalogApp {
+    if (previous === fresh) return previous;
+    const newAssets = (fresh.latestAssets ?? []).concat(fresh.latestAsset !== undefined ? [fresh.latestAsset] : []);
+    if (!newAssets.length) return previous;
+    const same = (left: HapAsset, right: HapAsset): boolean =>
+      (left.name ?? '').length > 0 && (left.url ?? '').length > 0 && (left.bundleName ?? '').length > 0 &&
+      Number.isSafeInteger(left.versionCode) && left.versionCode > 0 &&
+      /^[a-f0-9]{64}$/i.test(left.sha256 ?? '') && left.sha256.toLowerCase() === right.sha256?.toLowerCase() &&
+      left.bundleName === right.bundleName && left.versionCode === right.versionCode &&
+      left.name === right.name && left.url === right.url;
+    let changed = false;
+    const upgrade = (asset: HapAsset): HapAsset => {
+      if (HapAsset.normalizeDeviceTypes(asset.deviceTypes).length > 0) return asset;
+      const matching = newAssets.find((candidate: HapAsset) => same(asset, candidate) &&
+        HapAsset.normalizeDeviceTypes(candidate.deviceTypes).length > 0);
+      if (matching === undefined) return asset;
+      changed = true;
+      return HapAsset.copyWithDeviceTypes(asset, matching.deviceTypes);
+    };
+    const latest = previous.latestAsset !== undefined ? upgrade(previous.latestAsset) : undefined;
+    const assets = (previous.latestAssets ?? []).map(upgrade);
+    const known = (previous.knownAssets ?? []).map(upgrade);
+    if (!changed) return previous;
+    const copy = CatalogApp.copy(previous);
+    copy.latestAsset = latest; copy.latestAssets = assets; copy.knownAssets = known;
+    copy.previewChannel = previous.previewChannel; copy.channelUnavailable = previous.channelUnavailable;
+    return copy;
   }
 }

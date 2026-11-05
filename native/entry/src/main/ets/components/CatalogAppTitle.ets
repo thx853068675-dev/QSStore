@@ -1,6 +1,7 @@
 import { fitVersionBadge } from '../data/VersionBadgeLayout';
 import { displayVersion } from '../data/DisplayVersion';
 import { BouncingAppName } from './BouncingAppName';
+import { I18n } from '../data/I18n';
 
 /** Size the inverse background to the visible version, including its ellipsis. */
 @Component
@@ -60,7 +61,7 @@ export struct CatalogAppTitle {
           .textAlign(TextAlign.Center)
           // 对齐名称的字面中心，补偿紧凑字体行盒的视觉偏差。
           .translate({ y: this.titleSize / 17 })
-          .accessibilityText('版本 ' + this.version)
+          .accessibilityText(I18n.t('版本 ') + this.version)
       }
     }.width('100%').onSizeChange((_old: SizeOptions, size: SizeOptions) => {
       const width = Number(size.width);

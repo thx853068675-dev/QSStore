@@ -39,6 +39,11 @@ def main():
     if not cargo:
         raise SystemExit('Rust cargo is required; install the project toolchain first')
     env['PATH'] = str(Path(cargo).parent) + os.pathsep + env.get('PATH', '')
+    # Localization templates call I18n.t directly; legacy vm-based tests share
+    # one deterministic zh stub instead of duplicating mocks in every file.
+    harness = './native/tests/i18n_harness.cjs'
+    env['NODE_OPTIONS'] = (env.get('NODE_OPTIONS', '') + ' --require=' + harness).strip()
+
     rust_args = ['--lib', '--locked'] + (['--offline'] if args.offline else [])
     steps = [
         # Client coverage includes a cold CMake build of the archive codecs.

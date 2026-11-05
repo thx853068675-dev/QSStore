@@ -1,3 +1,4 @@
+const { publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -11,7 +12,7 @@ function load(file, mocks = {}) {
   const code = ts.transpileModule(fs.readFileSync(path.join(root, file + '.ets'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText;
-  vm.runInNewContext(code, { exports, require: name => mocks[name] || {} });
+  vm.runInNewContext(code, { exports, require: name => mocks[name] || publicConsentModule(name) });
   return exports;
 }
 const { InstallStage, InstallJob } = load('jobs/InstallJob');
@@ -22,7 +23,7 @@ function localBundles() {
     getBundleInfoForSelfSync: () => f.self,
     getBundleInfoSync: () => { f.external++; throw { code: 201 }; } };
   f.LocalBundles = load('jobs/LocalBundles', { '@kit.AbilityKit': { bundleManager },
-    './InstalledAppRegistry': { InstalledAppRegistry: { version: () => f.cached } } }).LocalBundles;
+    './InstalledAppRegistry': { InstalledAppRegistry: { version: () => f.cached }, InstalledSigningIdentity: load('jobs/InstalledAppRegistry').InstalledSigningIdentity } }).LocalBundles;
   return f;
 }
 test('self version is readable without bundle permission or wireless debugging', () => {
@@ -48,11 +49,15 @@ function fixture() {
   const code = ts.transpileModule(`class Page { ${method} }; globalThis.Page = Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText;
-  const sandbox = { InstallStage, LocalBundles: f.LocalBundles, getContext: () => ({}),
+  const recovery = load('jobs/SelfInstallRecovery', { './InstallJob':{InstallJob,InstallStage},
+    './LocalBundles':{LocalBundles:f.LocalBundles}, './JobScheduler':{JobScheduler:{isRunning:id=>f.running.has(id)}},
+    './InstallReconnect':{InstallReconnect:{clear(){}}}, './InstallConfirmation':{InstallConfirmation:{clear(){}}}
+  }).SelfInstallRecovery;
+  const sandbox = { SelfInstallRecovery:recovery, PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent, InstallStage, LocalBundles: f.LocalBundles, getContext: () => ({}),
     ReleaseUpdate: require('./release_update_fixture.cjs').releaseUpdate(),
     InstalledAppRegistry: { versionName: () => '1.0.0' },
     JobScheduler: { isRunning: id => f.running.has(id) },
-    JobStore: { open: async () => ({ listAll: async () => f.jobs,
+    JobStore: { open: async () => ({ listAll: async () => f.jobs, get:async id=>f.jobs.find(j=>j.id===id),
       save: async job => f.saved.push(JSON.parse(JSON.stringify(job))) }) },
     HdcDeviceBridge: class { async installedVersion() {
       f.probes++; if (f.remoteVersion < 0) throw Error('offline');

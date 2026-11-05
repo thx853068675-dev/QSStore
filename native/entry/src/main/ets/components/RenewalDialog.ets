@@ -14,6 +14,7 @@ import { errorText } from '../jobs/ErrorText';
 import { Palette } from '../theme/Palette';
 import { displayVersion } from '../data/DisplayVersion';
 import { StoreIconButton, StoreLayout } from '../theme/StoreDesign';
+import { I18n } from '../data/I18n';
 
 /** Closing this view never cancels the process-owned renewal job. */
 @Component
@@ -111,7 +112,7 @@ export struct RenewalDialog {
         file.versionCode === this.target.versionCode);
       for (const file of files) if (!this.choices.includes(file)) LocalImport.discardPreview(context, file);
       this.preview = this.choices[0] ?? new InstallJob();
-      if (!this.preview.id) throw new Error('请选择相同包名、相同版本的 HAP 或 APP');
+      if (!this.preview.id) throw new Error(I18n.t('请选择相同包名、相同版本的 HAP 或 APP'));
     } catch (error) {
       if (!this.disposed && !String(error).includes('未选择安装文件')) this.message = errorText(error);
     } finally { if (!this.disposed) this.busy = false; }
@@ -133,7 +134,7 @@ export struct RenewalDialog {
       await store.save(job);
       if (await AccountService.current(context) === undefined) {
         job.stage = InstallStage.WAITING_ACCOUNT;
-        job.lastError = '请先登录开发者账号';
+        job.lastError = I18n.t('请先登录开发者账号');
         await store.save(job);
       } else await InstallCoordinator.recovered(context);
     } catch (error) { if (!this.disposed) this.message = errorText(error); }
@@ -150,7 +151,7 @@ export struct RenewalDialog {
   }
 
   private fileLabel(): string {
-    if (!this.preview.id) return '选择同版本安装包';
+    if (!this.preview.id) return I18n.t('选择同版本安装包');
     try { return this.preview.assetName + ' · ' + (fileIo.statSync(this.preview.cachePath).size / 1048576).toFixed(1) + ' MB'; }
     catch (_) { return this.preview.assetName; }
   }
@@ -160,8 +161,8 @@ export struct RenewalDialog {
       Scroll() {
         Column({ space: 16 }) {
           Row() {
-            Text('应用续签').fontSize(22).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1)
-            StoreIconButton({ label: '关闭续签进度', action: this.onClose })
+            Text(I18n.t('应用续签')).fontSize(22).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1)
+            StoreIconButton({ label: I18n.t('关闭续签进度'), action: this.onClose })
           }.width('100%')
           Row({ space: 12 }) {
             if (this.icon) { Image(this.icon).width(46).height(46).borderRadius(13) }
@@ -173,7 +174,7 @@ export struct RenewalDialog {
           if (this.selectedId) {
             Row({ space: 10 }) {
               if (this.task()?.running) { LoadingProgress().width(20).height(20).color(this.colors().accent) }
-              Text(this.task()?.job.stage === InstallStage.INSTALLED ? '续签完成' : this.timeline.status)
+              Text(this.task()?.job.stage === InstallStage.INSTALLED ? I18n.t('续签完成') : this.timeline.status)
                 .fontSize(14).fontWeight(FontWeight.Medium).fontColor(this.colors().accent)
             }.width('100%')
             ForEach(this.timeline.steps.slice(-4), (step: LocalTimelineStep) => {
@@ -186,16 +187,16 @@ export struct RenewalDialog {
               Text(this.timeline.message).fontSize(12).fontColor(this.colors().textSecondary).width('100%')
             }
             if (!this.task()?.running && this.task()?.job.stage !== InstallStage.INSTALLED) {
-              Button(this.task()?.job.stage === InstallStage.TERMINAL_ERROR ? '重新续签' : '继续续签')
+              Button(this.task()?.job.stage === InstallStage.TERMINAL_ERROR ? I18n.t('重新续签') : I18n.t('继续续签'))
                 .width('100%').height(42).fontColor(this.colors().onAccent).backgroundColor(this.colors().accent)
                 .onClick(() => { if (this.task()?.job.stage === InstallStage.TERMINAL_ERROR) this.onRetry(); else this.resume(); })
             }
           } else if (this.sourceAppId > 0) {
             Row({ space: 10 }) {
               if (this.busy) { LoadingProgress().width(20).height(20).color(this.colors().accent) }
-              Text(this.busy ? '正在查找同版本原包…' : '暂未提交续签任务').fontSize(13).fontColor(this.colors().textSecondary)
+              Text(this.busy ? I18n.t('正在查找同版本原包…') : I18n.t('暂未提交续签任务')).fontSize(13).fontColor(this.colors().textSecondary)
             }.width('100%')
-            if (!this.busy) { Button('重试').onClick(() => this.prepareStore()) }
+            if (!this.busy) { Button(I18n.t('重试')).onClick(() => this.prepareStore()) }
           } else {
             Text(this.fileLabel()).fontSize(12).fontColor(this.colors().textSecondary).width('100%')
             if (this.choices.length > 1) {
@@ -206,13 +207,13 @@ export struct RenewalDialog {
               }, (file: InstallJob) => file.id)
             }
             Row({ space: 10 }) {
-              Button('选择安装包').layoutWeight(1).height(42).enabled(!this.busy).onClick(() => this.pick())
-              Button('开始续签').layoutWeight(1).height(42).enabled(!this.busy && !!this.preview.id)
+              Button(I18n.t('选择安装包')).layoutWeight(1).height(42).enabled(!this.busy).onClick(() => this.pick())
+              Button(I18n.t('开始续签')).layoutWeight(1).height(42).enabled(!this.busy && !!this.preview.id)
                 .fontColor(this.colors().onAccent).backgroundColor(this.colors().accent).onClick(() => this.submitFile())
             }.width('100%')
           }
           if (this.message) { Text(this.message).fontSize(12).fontColor(this.colors().danger).width('100%') }
-          Text('关闭后任务会继续，可点击卡片的“续签中”查看进度。')
+          Text(I18n.t('关闭后任务会继续，可点击卡片的“续签中”查看进度。'))
             .fontSize(12).fontColor(this.colors().textSecondary).width('100%')
         }.padding(22).width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
       }.width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth, maxHeight: '80%' })

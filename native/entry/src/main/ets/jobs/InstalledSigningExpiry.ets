@@ -9,6 +9,7 @@ import { LocalProfileStore } from '../data/LocalProfileStore';
 import { InstallJob, InstallStage } from './InstallJob';
 import { InstalledAppRegistry, InstalledSigningIdentity } from './InstalledAppRegistry';
 import { ForegroundIdle } from './ForegroundIdle';
+import { I18n } from '../data/I18n';
 
 /** A retained Profile is a display estimate until tied to an installed build. */
 export class SigningExpiryMaterial {
@@ -281,7 +282,7 @@ export class InstalledSigningExpiry {
   static label(expiry: number, estimate: number = 0, fallbackAt: number = 0): string {
     const exact = Number.isFinite(expiry) && expiry > 0;
     const date = new Date(InstalledSigningExpiry.displayExpiry(expiry, estimate, fallbackAt) * 1000);
-    return (exact ? '到期 ' : '预计到期 ') + date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') +
+    return (exact ? I18n.t('到期 ') : I18n.t('预计到期 ')) + date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') +
       '-' + String(date.getDate()).padStart(2, '0');
   }
 }

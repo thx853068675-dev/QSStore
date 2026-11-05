@@ -77,10 +77,10 @@ test('Management coalesces related mutations and updates both groups, queue and 
   const exports = {}, timers = [];
   vm.runInNewContext(ts.transpileModule(`class Page { ${source.slice(start, end)} }; exports.Page=Page;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
-  }).outputText, { exports, setTimeout: fn => { timers.push(fn); return timers.length; } });
+  }).outputText, { exports, DeviceInstallGroup:require('./load_ets.cjs').loadEts('jobs/DeviceInstallGroup').DeviceInstallGroup, setTimeout: fn => { timers.push(fn); return timers.length; } });
   const ui = new exports.Page();
   Object.assign(ui, { pageVisible: true, managementRowsTimer: -1, queueRows: f.data,
-    onlineInstalledRows: fixture().data, offlineInstalledRows: fixture().data, publishedRows: fixture().data,
+    onlineInstalledRows: fixture().data, offlineInstalledRows: fixture().data, publishedRows: fixture().data, followingRows:fixture().data,followingSnapshot:[],
     queued: [], online: [], offline: [], myApps: [],
     managementQueueJobs() { return this.queued; },
     managementInstalledJobs(localOnly) { return localOnly ? this.offline : this.online; } });

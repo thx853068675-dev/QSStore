@@ -1,6 +1,7 @@
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { util } from '@kit.ArkTS';
 import { generateCsr } from 'libhap_core.so';
+import { I18n } from './I18n';
 
 /**
  * 本机生成 P-256 私钥与 PKCS#10 证书请求（CSR）。
@@ -42,7 +43,7 @@ function hex(bytes: Uint8Array): string {
 function buildCsr(privateKeyPem: string): string {
   const csr = generateCsr(privateKeyPem);
   if (!/^-----BEGIN CERTIFICATE REQUEST-----/.test(csr)) {
-    throw new Error('签名模块未返回有效的证书请求');
+    throw new Error(I18n.t('签名模块未返回有效的证书请求'));
   }
   return csr;
 }
@@ -60,10 +61,10 @@ export class DeviceIdentity {
     material.csrPem = buildCsr(privateKeyPem);
     if (!/^-----BEGIN PRIVATE KEY-----/.test(material.privateKeyPem) ||
       material.privateKeyPem.length > 4096) {
-      throw new Error('本机生成的私钥格式无效');
+      throw new Error(I18n.t('本机生成的私钥格式无效'));
     }
     if (material.csrPem.length > 8192) {
-      throw new Error('本机生成的证书请求过长');
+      throw new Error(I18n.t('本机生成的证书请求过长'));
     }
     return material;
   }
@@ -82,7 +83,7 @@ export class DeviceIdentity {
   /// 已有私钥补建 CSR。入参是未加密的 PKCS#8 PEM。
   static async csrFor(privateKeyPem: string): Promise<string> {
     if (!/^-----BEGIN PRIVATE KEY-----/.test(privateKeyPem)) {
-      throw new Error('本机私钥格式不是未加密的 PKCS#8，无法补建证书请求');
+      throw new Error(I18n.t('本机私钥格式不是未加密的 PKCS#8，无法补建证书请求'));
     }
     return buildCsr(privateKeyPem);
   }

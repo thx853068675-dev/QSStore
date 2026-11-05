@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
+import { I18n } from '../data/I18n';
 
 /** 跨页面复用设备已确认的版本；没有安装记录的侧载应用也能被识别。 */
 class InstalledVersionEntry {
@@ -14,7 +15,13 @@ class InstalledVersionEntry {
   iconModuleName: string = '';
   signingFingerprint: string = '';
   signingUpdateTime: number = 0;
+  signingObservedAt: number = 0;
   signingAppIdentifier: string = '';
+  appDistributionType: string = '';
+  appProvisionType: string = '';
+  installSource: string = '';
+  distributionVersion: number = 0;
+  distributionUpdateTime: number = 0;
 }
 
 class SavedInstalledEntry {
@@ -32,7 +39,13 @@ class SavedInstalledEntry {
   iconModuleName: string = '';
   signingFingerprint: string = '';
   signingUpdateTime: number = 0;
+  signingObservedAt: number = 0;
   signingAppIdentifier: string = '';
+  appDistributionType: string = '';
+  appProvisionType: string = '';
+  installSource: string = '';
+  distributionVersion: number = 0;
+  distributionUpdateTime: number = 0;
 }
 
 /** 设备清单的展示模型，独立于安装任务和历史记录。 */
@@ -54,6 +67,9 @@ export class InstalledLaunchTarget {
 /** 设备当前安装包的签名身份；仅实时 bm dump 可作为覆盖更新的预检依据。 */
 export class InstalledSigningIdentity {
   versionCode: number = 0;
+  versionName: string = '';
+  displayName: string = '';
+  appGallery: boolean = false;
   updateTime: number = 0;
   fingerprint: string = '';
   appIdentifier: string = '';
@@ -70,6 +86,7 @@ export class InstalledAppRegistry {
   private static saving: Promise<void> = Promise.resolve();
   private static launchers: Map<string, InstalledLaunchTarget> = new Map();
   private static savedVersions: Map<string, InstalledVersionEntry> = new Map();
+  private static observationRevisions: Map<string, number> = new Map();
 
   /** 恢复本机确认状态；卸载记录保留到下一次真实安装，避免旧安装历史复活。 */
   static async load(context: common.UIAbilityContext): Promise<void> {
@@ -116,10 +133,25 @@ export class InstalledAppRegistry {
         const iconId = Number(row['iconId'] ?? 0);
         entry.iconId = Number.isSafeInteger(iconId) && iconId > 0 ? iconId : 0;
         entry.iconModuleName = String(row['iconModuleName'] ?? '');
+        const distributionVersion = Number(row['distributionVersion'] ?? 0);
+        const distributionUpdateTime = Number(row['distributionUpdateTime'] ?? 0);
+        if (version > 0 && distributionVersion === version && Number.isSafeInteger(distributionUpdateTime) &&
+          distributionUpdateTime >= 0 && distributionUpdateTime <= now + 300000 &&
+          (distributionUpdateTime === 0 || entry.installationUpdateTime === 0 ||
+            distributionUpdateTime === entry.installationUpdateTime)) {
+          entry.appDistributionType = String(row['appDistributionType'] ?? '').trim().toLowerCase().substring(0, 128);
+          entry.appProvisionType = String(row['appProvisionType'] ?? '').trim().toLowerCase().substring(0, 128);
+          entry.installSource = String(row['installSource'] ?? '').trim().toLowerCase().substring(0, 256);
+          entry.distributionVersion = distributionVersion;
+          entry.distributionUpdateTime = distributionUpdateTime;
+        }
         const fingerprint = String(row['signingFingerprint'] ?? '');
         const updateTime = Number(row['signingUpdateTime'] ?? 0);
         if (version > 0 && /^[A-F0-9]{64}$/.test(fingerprint) && Number.isSafeInteger(updateTime) && updateTime > 0) {
           entry.signingFingerprint = fingerprint; entry.signingUpdateTime = updateTime;
+          // 旧缓存用最后一次保存的观察时刻迁移一次；普通版本扫描不再续签名缓存的寿命。
+          const observedAt = Number(row['signingObservedAt'] ?? at);
+          entry.signingObservedAt = Number.isSafeInteger(observedAt) && observedAt > 0 && observedAt <= now ? observedAt : 0;
           entry.signingAppIdentifier = String(row['signingAppIdentifier'] ?? '');
         }
         InstalledAppRegistry.savedVersions.set(name, entry);
@@ -178,7 +210,13 @@ export class InstalledAppRegistry {
           row.sideloaded = entry.sideloaded;
           row.iconId = entry.iconId;
           row.iconModuleName = entry.iconModuleName;
+          row.appDistributionType = entry.appDistributionType;
+          row.appProvisionType = entry.appProvisionType;
+          row.installSource = entry.installSource;
+          row.distributionVersion = entry.distributionVersion;
+          row.distributionUpdateTime = entry.distributionUpdateTime;
           row.signingFingerprint = entry.signingFingerprint; row.signingUpdateTime = entry.signingUpdateTime;
+          row.signingObservedAt = entry.signingObservedAt;
           row.signingAppIdentifier = entry.signingAppIdentifier;
           const target = InstalledAppRegistry.launchers.get(name);
           row.moduleName = target?.moduleName ?? '';
@@ -211,10 +249,13 @@ export class InstalledAppRegistry {
     const observed = InstalledAppRegistry.savedVersions.get(bundleName);
     if (observed !== undefined && observed.version === Number(row['versionCode'])) {
       const updateTime = Number(row['updateTime'] || row['installTime'] || 0);
+      if (InstalledAppRegistry.isOlderInstallationTime(bundleName, updateTime)) return;
+      const app = row['applicationInfo'] as Record<string, Object> | undefined;
+      InstalledAppRegistry.applyDistribution(observed, String(app?.['appDistributionType'] ?? ''),
+        String(app?.['appProvisionType'] ?? ''), String(app?.['installSource'] ?? row['installSource'] ?? ''), updateTime);
       observed.installationUpdateTime = Number.isSafeInteger(updateTime) && updateTime > 0 &&
         updateTime <= Date.now() + 300000 ? updateTime : 0;
       observed.versionName = String(row['versionName'] ?? '').trim().substring(0, 128);
-      const app = row['applicationInfo'] as Record<string, Object> | undefined;
       const icon = app?.['iconResource'] as Record<string, Object> | undefined;
       const iconId = Number(icon?.['id'] ?? app?.['iconId'] ?? 0);
       observed.iconId = Number.isSafeInteger(iconId) && iconId > 0 ? iconId : 0;
@@ -223,6 +264,7 @@ export class InstalledAppRegistry {
       // A complete dump that lacks signing evidence invalidates an older guess.
       observed.signingFingerprint = signing?.fingerprint ?? '';
       observed.signingUpdateTime = signing?.updateTime ?? 0;
+      observed.signingObservedAt = signing !== undefined ? Date.now() : 0;
       observed.signingAppIdentifier = signing?.appIdentifier ?? '';
     }
     const modules = row['hapModuleInfos'] as Array<Record<string, Object>> | undefined;
@@ -249,19 +291,26 @@ export class InstalledAppRegistry {
     entry.version = version;
     entry.versionName = version > 0 && versionName.trim().length > 0 ? versionName.trim().substring(0, 128) :
       previous?.version === version ? previous.versionName : '';
-    entry.displayName = version > 0 ? previous?.displayName ?? '' : '';
+    entry.displayName = version > 0 && previous?.version === version ? previous.displayName : '';
     entry.sideloaded = version > 0 && (previous?.sideloaded ?? false);
     entry.iconId = previous?.version === version ? previous.iconId : 0;
     entry.iconModuleName = previous?.version === version ? previous.iconModuleName : '';
     if (version > 0 && previous?.version === version) {
       entry.signingFingerprint = previous.signingFingerprint; entry.signingUpdateTime = previous.signingUpdateTime;
+      entry.signingObservedAt = previous.signingObservedAt;
       entry.signingAppIdentifier = previous.signingAppIdentifier;
+      entry.appDistributionType = previous.appDistributionType;
+      entry.appProvisionType = previous.appProvisionType;
+      entry.installSource = previous.installSource;
+      entry.distributionVersion = previous.distributionVersion;
+      entry.distributionUpdateTime = previous.distributionUpdateTime;
     }
     entry.at = Date.now();
     entry.firstSeenAt = previous?.version === version ? previous.firstSeenAt || previous.at : entry.at;
     entry.installationUpdateTime = version > 0 && previous?.version === version ? previous.installationUpdateTime : 0;
     InstalledAppRegistry.versions.set(bundleName, entry);
     InstalledAppRegistry.savedVersions.set(bundleName, entry);
+    InstalledAppRegistry.observationRevisions.set(bundleName, InstalledAppRegistry.observationRevision(bundleName) + 1);
     if (version > 0) {
       if (previous !== undefined && previous.version !== version) {
         InstalledAppRegistry.launchers.delete(bundleName);
@@ -281,11 +330,82 @@ export class InstalledAppRegistry {
       saved.version : -1;
   }
 
+  /** In-flight readers capture this token before IPC; a newer observation wins even within one millisecond. */
+  static observationRevision(bundleName: string): number {
+    return InstalledAppRegistry.observationRevisions.get(bundleName) ?? 0;
+  }
+
+  private static isOlderInstallationTime(bundleName: string, updateTime: number): boolean {
+    if (!Number.isSafeInteger(updateTime) || updateTime <= 0 || updateTime > Date.now() + 300000) return false;
+    const entry = InstalledAppRegistry.savedVersions.get(bundleName);
+    return entry !== undefined && entry.version > 0 && entry.installationUpdateTime > updateTime;
+  }
+
+  private static currentApplicationOrigin(bundleName: string): InstalledVersionEntry | undefined {
+    const entry = InstalledAppRegistry.savedVersions.get(bundleName);
+    if (entry === undefined || entry.version <= 0 || InstalledAppRegistry.version(bundleName) !== entry.version ||
+      entry.distributionVersion !== entry.version || (entry.distributionUpdateTime > 0 &&
+        entry.installationUpdateTime > 0 && entry.distributionUpdateTime !== entry.installationUpdateTime) ||
+      (entry.appDistributionType.length === 0 && entry.appProvisionType.length === 0 &&
+        entry.installSource.length === 0)) return undefined;
+    return entry;
+  }
+
+  /** A known debug/none source is evidence too; legacy cache with no source remains unknown. */
+  static hasApplicationOrigin(bundleName: string): boolean {
+    return InstalledAppRegistry.currentApplicationOrigin(bundleName) !== undefined;
+  }
+
+  /** Explicit official-market evidence prevents a reused bundle name from joining the sideload store. */
+  static isAppGallery(bundleName: string): boolean {
+    const entry = InstalledAppRegistry.currentApplicationOrigin(bundleName);
+    if (entry === undefined) return false;
+    if (entry.appProvisionType === 'debug') return false;
+    if (entry.appDistributionType === 'app_gallery') return true;
+    return entry.installSource === 'com.huawei.hmsapp.appgallery' || entry.installSource === 'com.huawei.appmarket';
+  }
+
+  /** Metadata already returned by the asynchronous system lookup; no extra IPC is needed. */
+  static rememberApplicationInfo(bundleName: string, version: number, versionName: string,
+    distributionType: string, provisionType: string, installSource: string, updateTime: number = 0,
+    expectedRevision: number = -1): boolean {
+    if (!Number.isSafeInteger(version) || version <= 0 ||
+      (expectedRevision >= 0 && InstalledAppRegistry.observationRevision(bundleName) !== expectedRevision) ||
+      InstalledAppRegistry.isOlderInstallationTime(bundleName, updateTime)) return false;
+    InstalledAppRegistry.remember(bundleName, version, versionName);
+    const entry = InstalledAppRegistry.savedVersions.get(bundleName);
+    if (entry === undefined) return false;
+    InstalledAppRegistry.applyDistribution(entry, distributionType, provisionType, installSource, updateTime);
+    if (Number.isSafeInteger(updateTime) && updateTime > 0 && updateTime <= Date.now() + 300000) {
+      entry.installationUpdateTime = updateTime;
+    }
+    return true;
+  }
+
+  private static applyDistribution(entry: InstalledVersionEntry, distributionType: string,
+    provisionType: string, installSource: string, updateTime: number): void {
+    const at = Number.isSafeInteger(updateTime) && updateTime > 0 && updateTime <= Date.now() + 300000 ? updateTime : 0;
+    const changed = at > 0 && ((entry.distributionUpdateTime > 0 && at !== entry.distributionUpdateTime) ||
+      (entry.installationUpdateTime > 0 && at !== entry.installationUpdateTime));
+    const distribution = distributionType.trim().toLowerCase().substring(0, 128);
+    const provision = provisionType.trim().toLowerCase().substring(0, 128);
+    const source = installSource.trim().toLowerCase().substring(0, 256);
+    if (changed) entry.displayName = '';
+    if (changed || distribution.length > 0 || provision.length > 0 || source.length > 0) {
+      entry.appDistributionType = distribution;
+      entry.appProvisionType = provision;
+      entry.installSource = source;
+      entry.distributionVersion = entry.version;
+      entry.distributionUpdateTime = at;
+    }
+  }
+
   /** Cached identity is display evidence only; install safety still uses a live dump. */
   static signingIdentity(bundleName: string, maxAgeMs: number = InstalledAppRegistry.SAVED_MAX_AGE_MS): InstalledSigningIdentity | undefined {
     const entry = InstalledAppRegistry.savedVersions.get(bundleName);
     if (!entry || InstalledAppRegistry.version(bundleName) !== entry.version || entry.version <= 0 ||
-      Date.now() - entry.at > maxAgeMs || entry.signingFingerprint.length !== 64 || entry.signingUpdateTime <= 0) return undefined;
+      entry.signingObservedAt <= 0 || Date.now() - entry.signingObservedAt > maxAgeMs ||
+      entry.signingFingerprint.length !== 64 || entry.signingUpdateTime <= 0) return undefined;
     const identity = new InstalledSigningIdentity(); identity.versionCode = entry.version;
     identity.fingerprint = entry.signingFingerprint; identity.updateTime = entry.signingUpdateTime;
     identity.appIdentifier = entry.signingAppIdentifier; return identity;
@@ -389,11 +509,11 @@ export class InstalledAppRegistry {
 
   static parseVersion(output: string, bundleName: string): number {
     const start = output.indexOf('{');
-    if (start < 0) throw new Error('设备未返回应用版本信息');
+    if (start < 0) throw new Error(I18n.t('设备未返回应用版本信息'));
     const row = JSON.parse(output.substring(start)) as Record<string, Object>;
     const version = Number(row['versionCode']);
     if (String(row['name'] ?? '') !== bundleName || !Number.isInteger(version) || version <= 0) {
-      throw new Error('设备返回的应用身份或版本无效');
+      throw new Error(I18n.t('设备返回的应用身份或版本无效'));
     }
     return version;
   }
@@ -402,11 +522,14 @@ export class InstalledAppRegistry {
   static observe(output: string, bundleName: string): number {
     const startedAt = Date.now();
     const start = output.indexOf('{');
-    if (start < 0 || output.includes('[Fail]')) throw new Error('设备未返回应用版本信息');
+    if (start < 0 || output.includes('[Fail]')) throw new Error(I18n.t('设备未返回应用版本信息'));
     const row = JSON.parse(output.substring(start)) as Record<string, Object>;
     const version = Number(row['versionCode']);
     if (String(row['name'] ?? '') !== bundleName || !Number.isSafeInteger(version) || version <= 0) {
-      throw new Error('设备返回的应用身份或版本无效');
+      throw new Error(I18n.t('设备返回的应用身份或版本无效'));
+    }
+    if (InstalledAppRegistry.isOlderInstallationTime(bundleName, Number(row['updateTime'] || row['installTime'] || 0))) {
+      throw new Error(I18n.t('设备应用信息已由更新的查询确认，请重试'));
     }
     InstalledAppRegistry.remember(bundleName, version);
     InstalledAppRegistry.rememberLauncherRow(row, bundleName);
@@ -438,6 +561,12 @@ export class InstalledAppRegistry {
     if (fingerprint.length !== 64 && appIdentifier.length === 0) return undefined;
     const identity = new InstalledSigningIdentity();
     identity.versionCode = version;
+    identity.versionName = String(row['versionName'] ?? '');
+    identity.displayName = String(row['displayName'] ?? '');
+    const source=String(app?.['installSource'] ?? row['installSource'] ?? '').toLowerCase();
+    identity.appGallery=String(app?.['appProvisionType']??'').toLowerCase()!=='debug'&&
+      (String(app?.['appDistributionType']??'').toLowerCase()==='app_gallery'||
+        source==='com.huawei.hmsapp.appgallery'||source==='com.huawei.appmarket');
     const updateTime = Number(row['updateTime'] ?? 0);
     identity.updateTime = Number.isSafeInteger(updateTime) && updateTime > 0 ? updateTime : 0;
     identity.fingerprint = fingerprint.length === 64 ? fingerprint : '';

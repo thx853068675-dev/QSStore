@@ -1,3 +1,4 @@
+import { I18n } from './I18n';
 export class HapAsset {
   name: string = '';
   url: string = '';
@@ -11,6 +12,36 @@ export class HapAsset {
   releaseName: string = '';
   releaseTag: string = '';
   mirrorUrls: string[] = [];
+  /** Package-declared targets, independent of the device running the installer. */
+  deviceTypes: string[] = [];
+
+  /** Preserve package identity when a later response fills only its device declaration. */
+  static copyWithDeviceTypes(asset: HapAsset, types: string[]): HapAsset {
+    const copy = new HapAsset();
+    copy.name = asset.name; copy.url = asset.url; copy.sha256 = asset.sha256; copy.size = asset.size;
+    copy.bundleName = asset.bundleName; copy.versionCode = asset.versionCode; copy.versionName = asset.versionName;
+    copy.releaseName = asset.releaseName; copy.releaseTag = asset.releaseTag; copy.mirrorUrls = asset.mirrorUrls;
+    copy.deviceTypes = HapAsset.normalizeDeviceTypes(types);
+    return copy;
+  }
+
+  static normalizeDeviceTypes(types: Object | undefined): string[] {
+    if (!Array.isArray(types)) return [];
+    const result: string[] = [];
+    const seen: string[] = [];
+    for (const value of types as string[]) {
+      if (typeof value !== 'string') continue;
+      const token = value.trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(token)) continue;
+      const canonical = token.toLowerCase();
+      if (seen.includes(canonical)) continue;
+      seen.push(canonical);
+      const known = ['default', 'phone', 'tablet', '2in1', 'wearable', 'tv', 'car'].includes(canonical);
+      result.push(known ? canonical : token);
+      if (result.length === 32) break;
+    }
+    return result;
+  }
 
   static tagFromUrl(url: string): string {
     const match = /\/releases\/download\/([^/]+)\//.exec(url);
@@ -31,6 +62,7 @@ export class HapAsset {
     asset.releaseTag = String(row['release_tag'] ?? '') || HapAsset.tagFromUrl(asset.url);
     const mirrors = row['mirror_urls'] as string[] | undefined;
     asset.mirrorUrls = mirrors ?? [];
+    asset.deviceTypes = HapAsset.normalizeDeviceTypes(row['device_types']);
     return asset;
   }
 }
@@ -47,7 +79,7 @@ export class ReleaseInfo {
 
   identity(): string { return this.sourceRepo + ':' + this.tag; }
 
-  sourceLabel(): string { return this.sourceKind === 'secondary' ? '子仓' : '主仓'; }
+  sourceLabel(): string { return this.sourceKind === 'secondary' ? I18n.t('子仓') : I18n.t('主仓'); }
 
   static fromJson(row: Record<string, Object>): ReleaseInfo {
     const release = new ReleaseInfo();

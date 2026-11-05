@@ -37,3 +37,27 @@ test('background suspends display scans without polling; foreground resumes them
   f.idle.onForeground(); f.advance(799); assert.deepEqual(seen, []);
   f.advance(1); await scan; assert.deepEqual(seen, ['scan']);
 });
+
+test('explicit refresh promotes a waiting shared scan without releasing unrelated automatic work', async () => {
+  const f = fixture(), seen = []; let interactive = false;
+  f.idle.interaction();
+  const scan = f.idle.wait(() => interactive).then(() => seen.push('scan'));
+  f.idle.defer('icons', () => seen.push('icons'));
+  f.advance(200); assert.deepEqual(seen, []);
+  interactive = true; f.idle.promote();
+  f.advance(0); await scan;
+  assert.deepEqual(seen, ['scan']);
+  f.advance(250); assert.deepEqual(seen, ['scan', 'icons']);
+});
+
+test('explicit scan yields one event-loop turn and background scans remain suspended without polling', async () => {
+  const f = fixture(); f.idle.interaction(); let finished = false;
+  const immediate = f.idle.wait(() => true).then(() => finished = true);
+  assert.equal(finished, false); f.advance(0); await immediate; assert.equal(finished, true);
+  f.idle.onBackground(); finished = false;
+  const background = f.idle.wait(() => true).then(() => finished = true);
+  f.idle.promote(); f.advance(10000);
+  assert.equal(finished, false); assert.equal(f.timers.size, 0);
+  f.idle.onForeground(); f.idle.promote(); f.advance(0); await background;
+  assert.equal(finished, true);
+});

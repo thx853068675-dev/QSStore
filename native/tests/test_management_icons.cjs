@@ -19,7 +19,7 @@ const tick = () => new Promise(setImmediate);
 const app = id => ({ id, iconRev: 'r1', iconUrl: '/icon/' + id });
 const bytes = value => Uint8Array.from([value]).buffer;
 function fixture(count = 1) {
-  const f = { catalog: Array.from({ length: count }, (_, i) => app(i + 1)), disk: new Map(),
+  const f = { catalog: Array.from({ length: count }, (_, i) => app(i + 1)), disk: new Map(), cacheGeneration: 0,
     requests: [], released: [], active: 0, peak: 0, decodes: 0, saves: [] };
   f.fetch = async a => bytes(a.id);
   const box = { AppIcon: class {}, CachedIcon: class {}, getContext: () => ({}),
@@ -28,10 +28,11 @@ function fixture(count = 1) {
       f.requests.push(a.id); f.peak = Math.max(f.peak, ++f.active);
       try { return await f.fetch(a); } finally { f.active--; }
     } },
-    CatalogCache: { async loadIcons(_, apps) {
+    CatalogCache: { generation: () => f.cacheGeneration, async loadIcons(_, apps) {
       return new Map(apps.filter(a => f.disk.get(a.id)?.rev === a.iconRev)
         .map(a => [a.id, f.disk.get(a.id).bytes]));
-    }, iconWithinLimit: () => true, async saveIcons(_, rows) {
+    }, iconWithinLimit: () => true, async saveIcons(_, rows, generation) {
+      if (generation !== f.cacheGeneration) return;
       for (const row of rows) {
         f.saves.push(row); f.disk.set(Number(row.id), { rev: row.rev,
           bytes: Uint8Array.from(Buffer.from(row.data, 'base64')).buffer });
@@ -46,12 +47,27 @@ function fixture(count = 1) {
   };
   vm.runInNewContext(code, box);
   f.ui = Object.assign(new box.Page(), { apps: [], appIcons: [], managementIcons: [], localIcons: [],
-    myApps: [], pendingJobs: [], managementIconFlights: new Map(), activeQuery: 'unrelated-search',
+    myApps: [], followingSnapshot: [], pendingJobs: [], managementIconFlights: new Map(), activeQuery: 'unrelated-search',
     catalogLookup: () => { const key = JSON.stringify(f.catalog); if (f.lookupKey !== key) { f.lookupKey = key; f.lookup = {}; } return f.lookup; },
     allInstalledJobs: () => f.catalog.map(a => ({ id: 'job-' + a.id, appId: a.id, bundleName: 'com.example.app' + a.id })),
     catalogForJob: job => f.catalog.find(a => a.id === job.appId), catalogApp: id => f.catalog.find(a => a.id === id) });
   return f;
 }
+
+test('a management icon read begun before cleanup updates pixels without restoring its discarded disk record', async () => {
+  const f = fixture(); let resolve;
+  const gate = new Promise(done => resolve = done);
+  f.fetch = () => gate;
+  const old = f.ui.loadManagementIcons(); await tick();
+  assert.deepEqual(f.requests, [1]);
+  f.cacheGeneration++;
+  resolve(bytes(1)); await old;
+  assert.equal(f.ui.managementIcons.length, 1); assert.equal(f.disk.size, 0);
+  f.ui.managementIcons = []; f.fetch = async () => bytes(2);
+  await f.ui.loadManagementIcons();
+  assert.equal(f.disk.size, 1); assert.equal(f.ui.managementIcons[0].pixels.value, 2);
+});
+
 test('Management loads installed icons outside Discover and retains them when search results reset', async () => {
   const f = fixture(3); await f.ui.loadManagementIcons();
   assert.deepEqual(f.requests, [1, 2, 3]);

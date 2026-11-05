@@ -21,7 +21,7 @@ function preferences(disk = new Map()) {
 
 test('each direction and selected mode survive restart; rapid writes keep the final choice', async () => {
   const f = preferences(); await f.service.load({});
-  assert.equal(f.service.current().key, 'discover');
+  assert.equal(f.service.current().key, 'stars');
   await Promise.all([f.service.save({}, 'stars', 'asc'), f.service.save({}, 'new', 'desc'),
     f.service.save({}, 'downloads', 'asc')]);
   const restarted = preferences(f.disk); await restarted.service.load({});
@@ -29,12 +29,11 @@ test('each direction and selected mode survive restart; rapid writes keep the fi
   assert.equal(restarted.service.current().direction, 'asc');
   assert.equal(restarted.service.directionFor('stars'), 'asc');
   assert.equal(restarted.service.directionFor('new'), 'desc');
-  assert.equal(restarted.service.directionFor('discover'), 'desc');
 });
 
 test('bad saved values are normalized and a failed write does not block later saves', async () => {
   const f = preferences(new Map([['selected', 'oops'], ['stars', 'DROP TABLE']]));
-  await f.service.load({}); assert.equal(f.service.current().key, 'discover');
+  await f.service.load({}); assert.equal(f.service.current().key, 'stars');
   assert.equal(f.service.directionFor('stars'), 'desc');
   f.fail(true); await assert.rejects(f.service.save({}, 'new', 'asc'));
   f.fail(false); await f.service.save({}, 'new', 'desc');
@@ -42,7 +41,18 @@ test('bad saved values are normalized and a failed write does not block later sa
   assert.equal(restarted.service.current().direction, 'desc');
 });
 
-test('full category sort uses created_at, numeric update timestamps and unknown-last download counts', () => {
+test('legacy recommendation migrates to stars and preserves the selected direction across restart', async () => {
+  const f = preferences(new Map([['selected', 'discover'], ['discover', 'asc'], ['stars', 'desc']]));
+  await f.service.load({});
+  assert.equal(f.service.current().key, 'stars');
+  assert.equal(f.service.current().direction, 'asc');
+  assert.equal(f.disk.get('selected'), 'stars');
+  const restarted = preferences(f.disk); await restarted.service.load({});
+  assert.equal(restarted.service.current().key, 'stars');
+  assert.equal(restarted.service.current().direction, 'asc');
+});
+
+test('full category sort uses star counts, created_at and unknown-last download counts', () => {
   const rows = [
     { id: 1, category: '工具', stars: 100, githubDownloads: 40, createdAt: 30, updatedAt: '500' },
     { id: 2, category: '工具', stars: 120, githubDownloads: 20, createdAt: 20, updatedAt: '10' },
@@ -66,7 +76,7 @@ test('first-page caches are isolated by mode/direction and empty results replace
     './DiscoverSort': sort, '@kit.ArkData': f.kit,
     '@kit.ArkTS': { util: { TextEncoder } }, './CatalogApp': { CatalogApp: { fromJson: row => row } }
   });
-  assert.deepEqual(Array.from(await CatalogCache.load({}), row => row.id), [99]);
+  assert.equal((await CatalogCache.load({})).length, 0, 'old recommendation page is not a star-sorted first page');
   assert.equal((await CatalogCache.load({}, 'downloads', 'asc')).length, 0);
   await CatalogCache.save({}, [], [{id:1}], 'stars', 'desc');
   await CatalogCache.save({}, [], [{id:2}], 'stars', 'asc');

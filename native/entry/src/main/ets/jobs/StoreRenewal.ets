@@ -4,6 +4,7 @@ import { StoreClient, RenewalCatalog } from '../data/StoreClient';
 import { InstallJob, InstallStage } from './InstallJob';
 import { JobStore } from './JobStore';
 import { isPending } from './RecoveryPlanner';
+import { I18n } from '../data/I18n';
 
 export class RenewalTarget {
   appId: number = 0;
@@ -17,7 +18,7 @@ export class StoreRenewal {
   static async source(target: RenewalTarget, jobs: InstallJob[],
     client: RenewalCatalog): Promise<HapAsset> {
     if (target.appId <= 0 || !target.bundleName || !Number.isSafeInteger(target.versionCode) ||
-      target.versionCode <= 0) throw new Error('无法核对商店续签来源，请使用手动续签');
+      target.versionCode <= 0) throw new Error(I18n.t('无法核对商店续签来源，请使用手动续签'));
     const previous = jobs.filter((job: InstallJob) => job.stage === InstallStage.INSTALLED &&
       job.appId === target.appId && job.bundleName === target.bundleName &&
       job.versionCode === target.versionCode && /^https:\/\//.test(job.sourceUrl))
@@ -50,9 +51,9 @@ export class StoreRenewal {
         if (page === 5) incomplete = true;
       }
     }
-    if (incomplete) throw new Error('历史版本过多，无法完整核对原包，请使用手动续签');
-    if (candidates.length > 1) throw new Error('同版本有多个安装包，无法确认原来的类型，请使用手动续签');
-    if (candidates.length === 0) throw new Error('商店没有已安装版本的原包，请选择同版本文件手动续签');
+    if (incomplete) throw new Error(I18n.t('历史版本过多，无法完整核对原包，请使用手动续签'));
+    if (candidates.length > 1) throw new Error(I18n.t('同版本有多个安装包，无法确认原来的类型，请使用手动续签'));
+    if (candidates.length === 0) throw new Error(I18n.t('商店没有已安装版本的原包，请选择同版本文件手动续签'));
     return candidates[0];
   }
 
@@ -74,7 +75,7 @@ export class StoreRenewal {
       (job.bundleName === target.bundleName || job.catalogBundleName === target.bundleName));
     if (pending) {
       if (pending.renewalRequestedAt > 0 && pending.versionCode === target.versionCode) return pending;
-      throw new Error('该应用已有安装任务，请完成或取消后再续签');
+      throw new Error(I18n.t('该应用已有安装任务，请完成或取消后再续签'));
     }
     const asset = await StoreRenewal.source(target, jobs, new StoreClient(context));
     return store.enqueueRenewal(target.appId, asset.name, asset.url, asset.mirrorUrls,

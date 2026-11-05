@@ -54,3 +54,24 @@ test('release labels preserve preview suffixes and fall back without inventing a
   assert.equal(releaseDisplayVersion('', 'nightly', '2.1.3-beta.1'), '2.1.3-beta.1');
   assert.equal(releaseDisplayVersion('nightly', 'main', ''), '');
 });
+
+test('a replaced attachment with a verified title build supersedes the fixed release tag', () => {
+  for (const title of ['轻启 1.2.2-beta（120391）', '轻启 1.2.2-beta (build: 120391)',
+    '轻启 1.2.2-beta-120391']) {
+    assert.equal(releaseDisplayVersion(title, 'v1.2.2-beta-120375', '1.2.2-beta', '轻启', 120391),
+      '1.2.2-beta-120391');
+  }
+  assert.equal(releaseDisplayVersion('轻启 1.2.2-beta（120373）', 'v1.2.2-beta-120373',
+    '1.2.2-beta', '轻启', 120373), '1.2.2-beta-120373');
+  assert.equal(releaseDisplayVersion('轻启 1.2.2-beta-120375（120391）', 'v1.2.2-beta-120375',
+    '1.2.2-beta', '轻启', 120391), '1.2.2-beta-120391');
+});
+
+test('unverified title numbers and another package or semantic release cannot replace the tag', () => {
+  for (const code of [0, 120375, 20261009, NaN])
+    assert.equal(releaseDisplayVersion('轻启 1.2.2-beta（120391）', 'v1.2.2-beta-120375',
+      '1.2.2-beta', '轻启', code), '1.2.2-beta-120375');
+  assert.equal(releaseDisplayVersion('LNGA 1.0.0（1000000）', 'v1.2.6', '1.0.0', 'LNGA', 1000000), '1.2.6');
+  assert.equal(releaseDisplayVersion('轻启 1.2.2-beta（120391）', 'v1.2.2-beta-120375',
+    '0.4.53', '轻启·安装器', 120391), '1.2.2-beta-120375');
+});

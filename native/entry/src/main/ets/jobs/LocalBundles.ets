@@ -1,4 +1,5 @@
-import { InstalledAppRegistry } from './InstalledAppRegistry';
+import { InstalledAppRegistry, InstalledSigningIdentity } from './InstalledAppRegistry';
+import { PrivacyConsent } from '../data/PrivacyConsent';
 import { bundleManager, common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import bundle from '@ohos.bundle';
@@ -42,38 +43,71 @@ export class LocalBundles {
   /** 页面扫描不在 UI 线程逐包做同步 IPC；一次查询同时取得编号和名称。 */
   static async liveInstalledState(bundleName: string): Promise<InstalledBundleState> {
     const result = new InstalledBundleState();
+    if (!PrivacyConsent.isBusinessAllowed()) return result;
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) {
       result.versionCode = 0;
       return result;
     }
+    const revision = InstalledAppRegistry.observationRevision(bundleName);
     try {
       if (LocalBundles.selfInfoFlight === undefined) {
-        LocalBundles.selfInfoFlight = bundleManager.getBundleInfoForSelf(
-          bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+        const flight: Promise<bundleManager.BundleInfo> = bundleManager.getBundleInfoForSelf(
+          bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION).finally(() => {
+          // 只合并在途请求。旧进程自更新后，下次扫描必须读取新的自身编号。
+          if (LocalBundles.selfInfoFlight === flight) LocalBundles.selfInfoFlight = undefined;
+        });
+        LocalBundles.selfInfoFlight = flight;
       }
       const own = await LocalBundles.selfInfoFlight;
-      if (own.name === bundleName && own.versionCode > 0) {
+      if (!PrivacyConsent.isBusinessAllowed()) return result;
+      if (own.name === bundleName && Number.isSafeInteger(own.versionCode) && own.versionCode > 0) {
         result.versionCode = own.versionCode;
         result.versionName = String(own.versionName ?? '').trim();
+        if (!LocalBundles.rememberApplicationInfo(bundleName, own, revision)) return LocalBundles.cachedInstalledState(bundleName);
         return result;
       }
-    } catch (_) { LocalBundles.selfInfoFlight = undefined; }
+    } catch (_) {
+      // A newer self-query may already be running; this failed caller must not
+      // publish a fallback before that recovery finishes or wait on its owner.
+      if (LocalBundles.selfInfoFlight !== undefined) return LocalBundles.cachedInstalledState(bundleName);
+    }
     try {
+      if (!PrivacyConsent.isBusinessAllowed()) return result;
       const info = await bundleManager.getBundleInfo(bundleName,
-        bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_APPLICATION);
+      if (!PrivacyConsent.isBusinessAllowed()) return result;
       const code = Number(info.versionCode);
-      if (Number.isInteger(code) && code > 0) {
+      if (info.name === bundleName && Number.isSafeInteger(code) && code > 0) {
         result.versionCode = code;
         result.versionName = String(info.versionName ?? '').trim();
+        if (!LocalBundles.rememberApplicationInfo(bundleName, info, revision)) return LocalBundles.cachedInstalledState(bundleName);
       }
     } catch (error) {
+      if (!PrivacyConsent.isBusinessAllowed()) return result;
       result.versionCode = LocalBundles.notInstalledError(error) ? 0 : LocalBundles.UNKNOWN;
+      if (result.versionCode === 0) {
+        if (InstalledAppRegistry.observationRevision(bundleName) !== revision) return LocalBundles.cachedInstalledState(bundleName);
+        InstalledAppRegistry.remember(bundleName, 0);
+      }
     }
     return result;
+  }
+
+  private static cachedInstalledState(bundleName: string): InstalledBundleState {
+    const state = new InstalledBundleState(); state.versionCode = InstalledAppRegistry.version(bundleName);
+    state.versionName = InstalledAppRegistry.versionName(bundleName, state.versionCode); return state;
+  }
+
+  private static rememberApplicationInfo(bundleName: string, info: bundleManager.BundleInfo, revision: number): boolean {
+    if (info.name !== bundleName) return false;
+    return InstalledAppRegistry.rememberApplicationInfo(bundleName, info.versionCode, String(info.versionName ?? ''),
+      String(info.appInfo?.appDistributionType ?? ''), String(info.appInfo?.appProvisionType ?? ''),
+      String(info.appInfo?.installSource ?? ''), Number(info.updateTime || info.installTime || 0), revision);
   }
   /** 普通 GET_BUNDLE_INFO 下可用的官方图标接口；权限被拒时保持占位，不阻塞识别。 */
   static async installedIcon(context: common.UIAbilityContext, bundleName: string,
     abilityName: string): Promise<image.PixelMap | undefined> {
+    if (!PrivacyConsent.isBusinessAllowed()) return undefined;
     const resource = InstalledAppRegistry.iconResource(bundleName);
     if (resource !== undefined) {
       try {
@@ -95,6 +129,20 @@ export class LocalBundles {
     } catch (_) {
       return false;
     }
+  }
+
+  /** Own bundle proof needs neither privileged bundle access nor wireless HDC. */
+  static selfInstalledIdentity(bundleName:string):InstalledSigningIdentity|undefined {
+    if(!PrivacyConsent.isBusinessAllowed())return undefined;
+    try{
+      const info=bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_WITH_SIGNATURE_INFO);
+      if(info.name!==bundleName||!(info.versionCode>0))return undefined;
+      const state=new InstalledSigningIdentity();
+      state.versionCode=info.versionCode;state.versionName=String(info.versionName??'');
+      state.updateTime=Number(info.updateTime||info.installTime||0);
+      state.fingerprint=String(info.signatureInfo?.fingerprint??'').replace(/[^0-9a-fA-F]/g,'').toUpperCase();
+      state.appIdentifier=String(info.signatureInfo?.appIdentifier??'');return state;
+    }catch(_){return undefined;}
   }
 
   /** Read the installed build, including preview names; never display a catalog version here. */
@@ -157,6 +205,7 @@ export class LocalBundles {
 
   /** 安装决策只接受系统当前查询；显示层的历史缓存不能充当完成证据。 */
   static liveInstalledVersion(bundleName: string): number {
+    if (!PrivacyConsent.isBusinessAllowed()) return LocalBundles.UNKNOWN;
     // 非法包名是「调用方给错了」，不是「系统查不到」：报 UNKNOWN 会让上层
     // 白白回退一次 HDC，所以这里直接判为未装。
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundleName)) return 0;

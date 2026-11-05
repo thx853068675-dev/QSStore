@@ -1,5 +1,6 @@
 import { PackagePresentation } from './PackagePresentation';
 import { readModuleJson, readPackInfo, readHapIcon, readInstallPermissions } from 'libhap_core.so';
+import { I18n } from '../data/I18n';
 
 export class PackageInspectError extends Error {
   constructor(message: string) {
@@ -16,6 +17,8 @@ export class PackageIdentity {
   moduleName: string = '';
   moduleType: string = '';
   mainAbility: string = '';
+  /** Actual module.json declaration; absent or malformed declarations remain unknown. */
+  deviceTypes: string[] = [];
 }
 
 // The HAP is authoritative; catalog fields are never package identity.
@@ -36,6 +39,13 @@ export function inspectPackage(path: string): PackageIdentity {
     identity.moduleName = String(module?.['name'] ?? '');
     identity.moduleType = String(module?.['type'] ?? '');
     identity.mainAbility = String(module?.['mainElement'] ?? '');
+    const rawDeviceTypes = module?.['deviceTypes'];
+    const usableDeviceTypes = Array.isArray(rawDeviceTypes) && rawDeviceTypes.length <= 32 &&
+      (rawDeviceTypes as string[]).every((type: string) =>
+        typeof type === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(type.trim()));
+    identity.deviceTypes = usableDeviceTypes ? (rawDeviceTypes as string[])
+      .map((type: string) => type.trim().toLowerCase())
+      .filter((type: string, index: number, types: string[]) => types.indexOf(type) === index).sort() : [];
     const packText = readPackInfo(path);
     if (packText.length > 0) {
       const pack = JSON.parse(packText) as Record<string, Object>;
@@ -46,7 +56,7 @@ export function inspectPackage(path: string): PackageIdentity {
       const packCode = Number(version?.['code'] ?? 0);
       const packNameText = String(version?.['name'] ?? '');
       if (packName !== identity.bundleName || !Number.isSafeInteger(packCode) || packCode <= 0) {
-        throw new PackageInspectError('pack.info 与 HAP 清单的应用身份不一致');
+        throw new PackageInspectError(I18n.t('pack.info 与 HAP 清单的应用身份不一致'));
       }
       identity.versionCode = packCode;
       // 两边都有版本名时以 pack.info 为准（Package Manager 用它）；只有一边有就用那边。
@@ -54,12 +64,12 @@ export function inspectPackage(path: string): PackageIdentity {
     }
     if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(identity.bundleName) ||
       !Number.isSafeInteger(identity.versionCode) || identity.versionCode <= 0) {
-      throw new PackageInspectError('HAP 包名或版本号无效');
+      throw new PackageInspectError(I18n.t('HAP 包名或版本号无效'));
     }
     return identity;
   } catch (error) {
     if (error instanceof PackageInspectError) throw error;
-    throw new PackageInspectError('无法解析 HAP 清单：' + String(error));
+    throw new PackageInspectError(I18n.t('无法解析 HAP 清单：') + String(error));
   }
 }
 
@@ -67,10 +77,10 @@ export function inspectPackage(path: string): PackageIdentity {
 export function checkCatalogIdentity(bundleName: string, versionCode: number,
   actual: PackageIdentity): void {
   if (bundleName.length > 0 && actual.bundleName !== bundleName) {
-    throw new PackageInspectError('下载的 HAP 包名与所选应用不一致');
+    throw new PackageInspectError(I18n.t('下载的 HAP 包名与所选应用不一致'));
   }
   if (versionCode > 0 && actual.versionCode !== versionCode) {
-    throw new PackageInspectError('下载的 HAP 版本与所选版本不一致');
+    throw new PackageInspectError(I18n.t('下载的 HAP 版本与所选版本不一致'));
   }
 }
 
@@ -81,7 +91,7 @@ export function requestedPermissions(path: string): string[] {
       .filter((name: string, index: number, names: string[]) =>
         /^ohos\.permission\.[A-Za-z0-9_.]+$/.test(name) && names.indexOf(name) === index);
   } catch (_) {
-    throw new PackageInspectError('无法读取 HAP 及内包声明的权限');
+    throw new PackageInspectError(I18n.t('无法读取 HAP 及内包声明的权限'));
   }
 }
 

@@ -2,12 +2,16 @@ import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { JobStore } from '../jobs/JobStore';
 import { CatalogCache } from './CatalogCache';
+import { DeviceArtwork } from './DeviceArtwork';
+import { DownloadIconCache } from '../jobs/DownloadIconCache';
+import { applicationIcons } from './ApplicationIcons';
 
 /** 目录、图标及安装临时文件；清理保留未完成任务、签名材料和编辑草稿。 */
 export class SettingsCache {
   static async size(context: common.UIAbilityContext): Promise<number> {
-    const sizes = await Promise.all([SettingsCache.packageSize(context), CatalogCache.size(context)]);
-    return sizes[0] + sizes[1];
+    const sizes = await Promise.all([SettingsCache.packageSize(context), CatalogCache.size(context),
+      DownloadIconCache.size(context),DeviceArtwork.size(context)]);
+    return sizes[0] + sizes[1] + sizes[2] + sizes[3] + applicationIcons(context.cacheDir).stats().bytes;
   }
 
   private static async packageSize(context: common.UIAbilityContext): Promise<number> {
@@ -30,8 +34,12 @@ export class SettingsCache {
   static async clean(context: common.UIAbilityContext): Promise<void> {
     const store = await JobStore.open(context);
     await store.pruneCompleted(context);
+    await store.pruneSupersededFailures(context);
     await store.cleanupOrphanedPackages(context);
     await CatalogCache.clear(context);
+    await DownloadIconCache.clear(context);
+    await DeviceArtwork.clear(context);
+    applicationIcons(context.cacheDir).clear();
   }
 
   static format(bytes: number): string {

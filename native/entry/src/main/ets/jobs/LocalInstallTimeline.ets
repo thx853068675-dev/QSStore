@@ -1,5 +1,6 @@
 import { InstallStage, StageMark } from './InstallJob';
 import { InstallTaskSnapshot, InstallTaskState } from './InstallTaskState';
+import { I18n } from '../data/I18n';
 
 export class LocalTimelineStep {
   key: string = '';
@@ -33,15 +34,15 @@ export class LocalInstallTimeline {
     const task = tasks.find((row: InstallTaskSnapshot) => row.job.id === selectedId);
     if (task === undefined) return view;
     const job = task.job;
-    const done = job.stage === InstallStage.INSTALLED;
+    const done = job.stage === InstallStage.INSTALLED || job.stage === InstallStage.SKIPPED;
     const queued = job.stage === InstallStage.QUEUED;
     const waiting = LocalInstallTimeline.isWaiting(job.stage);
     view.visible = true;
     view.running = task.running && !done && !waiting;
     view.title = job.bundleName || job.assetName;
     view.version = job.versionName || (job.versionCode > 0 ? String(job.versionCode) : '');
-    view.status = done ? '安装完成' : InstallTaskState.label(task, now);
-    if (!task.running && !done && !waiting && !queued) view.status = '安装已暂停，可在管理页继续';
+    view.status = done ? InstallTaskState.label(task,now) : InstallTaskState.label(task, now);
+    if (!task.running && !done && !waiting && !queued) view.status = I18n.t('安装已暂停，可在管理页继续');
     view.tone = done ? 'success' : (waiting || (!task.running && !queued) ? 'warning' : 'normal');
     view.message = !task.running && !done ? job.lastError : '';
     const marks = job.stageHistory.slice();
@@ -60,14 +61,14 @@ export class LocalInstallTimeline {
       if (last && (mark.stage === InstallStage.DOWNLOADING || mark.stage === InstallStage.INSTALLING ||
         mark.stage === InstallStage.QUEUED)) {
         row.indicator = view.running ? 'running' : 'paused';
-        if (view.running && task.finishing) row.label = '正在收尾，请稍候';
+        if (view.running && task.finishing) row.label = I18n.t('正在收尾，请稍候');
       }
       row.timing = LocalInstallTimeline.clock(mark.at);
       const nextAt = !last ? marks[index + 1].at : (view.running ? now : mark.at);
       if (!last || view.running) {
         const seconds = Math.max(0, Math.floor((nextAt - mark.at) / 1000));
-        row.timing += ' · 用时 ' + (seconds < 60 ? seconds + ' 秒' :
-          Math.floor(seconds / 60) + ' 分 ' + seconds % 60 + ' 秒');
+        row.timing += I18n.t(' · 用时 ') + (seconds < 60 ? seconds + I18n.t(' 秒') :
+          Math.floor(seconds / 60) + I18n.t(' 分 ') + seconds % 60 + I18n.t(' 秒'));
       }
       // 同一个历史节点从“当前”变为“完成”时，必须更新原来的转圈和说明。
       row.key = job.id + ':' + index + ':' + mark.stage + ':' + mark.at + ':' +
@@ -78,7 +79,7 @@ export class LocalInstallTimeline {
     const operation = LocalInstallTimeline.nextOperation(job.stage);
     if (view.running && operation.length > 0) {
       const row = new LocalTimelineStep();
-      row.label = task.finishing ? '正在收尾，请稍候' : operation;
+      row.label = task.finishing ? I18n.t('正在收尾，请稍候') : operation;
       row.indicator = 'running';
       row.key = job.id + ':operation:' + row.label;
       view.steps.push(row);
@@ -95,33 +96,34 @@ export class LocalInstallTimeline {
 
   private static nextOperation(stage: InstallStage): string {
     switch (stage) {
-      case InstallStage.VERIFIED: return '正在解析应用身份';
-      case InstallStage.PACKAGE_INSPECTED: return '正在准备设备授权';
-      case InstallStage.PROFILE_READY: return '正在用本机证书签名';
-      case InstallStage.SIGNED: return '正在校验签名';
-      case InstallStage.SIGNATURE_VERIFIED: return '正在连接设备';
+      case InstallStage.VERIFIED: return I18n.t('正在解析应用身份');
+      case InstallStage.PACKAGE_INSPECTED: return I18n.t('正在准备设备授权');
+      case InstallStage.PROFILE_READY: return I18n.t('正在用本机证书签名');
+      case InstallStage.SIGNED: return I18n.t('正在校验签名');
+      case InstallStage.SIGNATURE_VERIFIED: return I18n.t('正在连接设备');
       default: return '';
     }
   }
 
   private static label(stage: InstallStage, last: boolean): string {
     switch (stage) {
-      case InstallStage.QUEUED: return last ? '已读取 HAP，等待开始' : '已读取 HAP';
-      case InstallStage.DOWNLOADING: return last ? '正在下载安装包' : '安装包下载结束';
-      case InstallStage.VERIFIED: return '安装包已就绪';
-      case InstallStage.PACKAGE_INSPECTED: return '已核对应用身份';
-      case InstallStage.PROFILE_READY: return '设备授权已就绪';
-      case InstallStage.SIGNED: return '已用本机证书签名';
-      case InstallStage.SIGNATURE_VERIFIED: return '签名校验通过';
-      case InstallStage.WAITING_NETWORK: return '网络中断，等待重试';
-      case InstallStage.WAITING_ACCOUNT: return '等待登录开发者账号';
-      case InstallStage.WAITING_CERTIFICATE: return '等待释放证书名额';
-      case InstallStage.WAITING_CONFIRMATION: return '等待确认是否清除应用数据';
-      case InstallStage.WAITING_DEVICE: return '等待无线调试连接';
-      case InstallStage.INSTALLING: return last ? '正在安装到设备' : '已提交设备安装';
-      case InstallStage.INSTALLED: return '安装完成';
-      case InstallStage.RETRYABLE_ERROR: return '安装暂停，可重试';
-      case InstallStage.TERMINAL_ERROR: return '无法继续';
+      case InstallStage.QUEUED: return last ? I18n.t('已读取 HAP，等待开始') : I18n.t('已读取 HAP');
+      case InstallStage.DOWNLOADING: return last ? I18n.t('正在下载安装包') : I18n.t('安装包下载结束');
+      case InstallStage.VERIFIED: return I18n.t('安装包已就绪');
+      case InstallStage.PACKAGE_INSPECTED: return I18n.t('已核对应用身份');
+      case InstallStage.PROFILE_READY: return I18n.t('设备授权已就绪');
+      case InstallStage.SIGNED: return I18n.t('已用本机证书签名');
+      case InstallStage.SIGNATURE_VERIFIED: return I18n.t('签名校验通过');
+      case InstallStage.WAITING_NETWORK: return I18n.t('网络中断，等待重试');
+      case InstallStage.WAITING_ACCOUNT: return I18n.t('等待登录开发者账号');
+      case InstallStage.WAITING_CERTIFICATE: return I18n.t('等待释放证书名额');
+      case InstallStage.WAITING_CONFIRMATION: return I18n.t('等待确认是否清除应用数据');
+      case InstallStage.WAITING_DEVICE: return I18n.t('等待无线调试连接');
+      case InstallStage.INSTALLING: return last ? I18n.t('正在安装到设备') : I18n.t('已提交设备安装');
+      case InstallStage.SKIPPED: return I18n.t('已跳过，保留原应用');
+      case InstallStage.INSTALLED: return I18n.t('安装完成');
+      case InstallStage.RETRYABLE_ERROR: return I18n.t('安装暂停，可重试');
+      case InstallStage.TERMINAL_ERROR: return I18n.t('无法继续');
       default: return stage;
     }
   }

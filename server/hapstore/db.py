@@ -782,22 +782,37 @@ def review_summary(app_id: int) -> dict[str, Any]:
     return {"count": row["n"], "average": round(row["avg"] or 0, 1)}
 
 
-def list_reviews(app_id: int, page: int = 1, page_size: int = 20) -> dict[str, Any]:
+def list_reviews(app_id: int, page: int = 1, page_size: int = 20,
+                 viewer_account_id: str = "") -> dict[str, Any]:
     page = max(1, page)
     page_size = max(1, min(50, page_size))
     c = connect()
     total = c.execute("SELECT COUNT(*) AS n FROM review WHERE app_id=?", (app_id,)).fetchone()["n"]
     rows = c.execute(
         """SELECT review.id, review.display_name, review.stars, review.body,
-                  review.updated_at, COALESCE(account_avatar.avatar_url, '') AS avatar_url
+                  review.updated_at, COALESCE(account_avatar.avatar_url, '') AS avatar_url,
+                  CASE WHEN review.account_id = NULLIF(?, '') THEN 1 ELSE 0 END AS can_delete
            FROM review LEFT JOIN account_avatar
              ON account_avatar.account_id = review.account_id
            WHERE review.app_id=? ORDER BY review.updated_at DESC, review.id DESC
            LIMIT ? OFFSET ?""",
-        (app_id, page_size, (page - 1) * page_size),
+        (viewer_account_id, app_id, page_size, (page - 1) * page_size),
     ).fetchall()
-    return {"items": [dict(row) for row in rows], "summary": review_summary(app_id),
+    items = [dict(row) for row in rows]
+    for item in items:
+        item["can_delete"] = bool(item["can_delete"])
+    return {"items": items, "summary": review_summary(app_id),
             "total": total, "page": page, "page_size": page_size}
+
+
+def delete_review(app_id: int, review_id: int, account_id: str) -> bool:
+    # Ownership and app identity are part of the DELETE itself, not a preceding
+    # check. Never accept a caller-supplied owner from the request body.
+    c = connect()
+    with c:
+        result = c.execute("DELETE FROM review WHERE id=? AND app_id=? AND account_id=?",
+                           (review_id, app_id, account_id))
+    return result.rowcount == 1
 
 
 def put_review(app_id: int, account_id: str, display_name: str, stars: int, body: str) -> None:

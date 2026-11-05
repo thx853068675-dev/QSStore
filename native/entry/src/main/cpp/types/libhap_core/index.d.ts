@@ -3,7 +3,7 @@ export const setResumeFramePacing: (enabled: boolean) => boolean;
 export interface ImportedArchiveEntry { name: string; path: string; size: number; }
 export const extractInstallArchive: (path: string, outputPrefix: string, originalName: string) => Promise<ImportedArchiveEntry[]>;
 export const listProfileEntries: (path: string) => PackageEntry[];
-export const listPackageEntries: (path: string) => PackageEntry[];
+export const listPackageEntries: (path: string, includeShared?: boolean) => PackageEntry[];
 export const extractPackageEntry: (path: string, entry: string, output: string) => Promise<void>;
 export const readModuleJson: (path: string) => string;
 export const readPackInfo: (path: string) => string;

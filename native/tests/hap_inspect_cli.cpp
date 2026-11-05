@@ -23,8 +23,8 @@ int main(int argc, char** argv) {
       std::cout.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     } else if (argc == 5 && std::string(argv[2]) == "extract") {
       qingqi::hap::ExtractPackageEntry(argv[1], argv[3], argv[4]);
-    } else if (argc == 3 && (std::string(argv[2]) == "list" || std::string(argv[2]) == "profiles")) {
-      for (const auto& entry : (std::string(argv[2]) == "profiles" ? qingqi::hap::ListProfileEntries(argv[1]) : qingqi::hap::ListPackageEntries(argv[1])))
+    } else if (argc == 3 && (std::string(argv[2]) == "list" || std::string(argv[2]) == "profiles" || std::string(argv[2]) == "modules")) {
+      for (const auto& entry : (std::string(argv[2]) == "profiles" ? qingqi::hap::ListProfileEntries(argv[1]) : qingqi::hap::ListPackageEntries(argv[1], std::string(argv[2]) == "modules")))
         std::cout << entry.size << '\t' << entry.name << '\n';
     } else if (argc == 4 && std::string(argv[2]) == "icon") {
       // Writes the raw icon bytes so tests can check the real payload.

@@ -1,3 +1,5 @@
+import { AppBackground } from '../data/AppBackgroundPreferences';
+import { AppThemeBackground } from '../components/AppThemeBackground';
 import { common } from '@kit.AbilityKit';
 import { router, promptAction } from '@kit.ArkUI';
 import { DownloadLibrary, DownloadedPackage } from '../jobs/DownloadLibrary';
@@ -22,6 +24,7 @@ import { I18n } from '../data/I18n';
 @Entry
 @Component
 struct Downloads {
+  @StorageProp('appBackground') private themeState: AppBackground = new AppBackground();
   @StorageProp('darkMode') private darkMode: boolean = false;
   @StorageProp('statusBarInset') private statusInset: number = 0;
   @StorageProp('windowWidth') private windowWidth: number = 0;
@@ -64,6 +67,7 @@ struct Downloads {
     (row: DownloadedPackage): string => JSON.stringify(row));
 
   private colors(): Palette { return Palette.forMode(this.darkMode); }
+  private cardSurface(): string { return Palette.containerPaint(this.colors().surface, this.themeState.containerOpacity); }
   aboutToAppear(): void { this.disposed = false; }
   onPageShow(): void {
     this.pageActive = true;
@@ -472,6 +476,7 @@ struct Downloads {
   }
   build() {
     Stack({ alignContent: Alignment.Top }) {
+      AppThemeBackground()
       List({ space: 11 }) {
         if (this.notice) { ListItem() { Text(this.notice).fontSize(12).fontColor(this.colors().danger).width('100%'); } }
         if (this.loading && this.rows.length === 0) {
@@ -483,7 +488,7 @@ struct Downloads {
           ListItem() { Column({ space: 12 }) {
             SymbolGlyph($r('sys.symbol.arrow_down_to_line')).fontSize(32).fontColor([this.colors().accent])
             Text(I18n.t('暂无下载文件')).fontSize(16).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
-          }.width('100%').padding(32).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius); }
+          }.width('100%').padding(32).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius); }
         }
         LazyForEach(this.listRows, (row: DownloadedPackage) => {
           ListItem() {
@@ -502,7 +507,7 @@ struct Downloads {
                   .wordBreak(WordBreak.BREAK_ALL)
                 Text(this.fileSize(row.bytes)).fontSize(11).fontColor(this.colors().textTertiary)
               }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-            }.width('100%').padding(15).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+            }.width('100%').padding(15).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
           }.swipeAction({ end: { builder: () => { this.deleteAction(row); }, actionAreaDistance: 216 },
             edgeEffect: SwipeEdgeEffect.Spring })
         }, (row: DownloadedPackage) => this.listRows.key(row))

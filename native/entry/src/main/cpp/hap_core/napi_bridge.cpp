@@ -4,6 +4,9 @@
 
 #include <napi/native_api.h>
 
+#include <dlfcn.h>
+#include <fstream>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -440,7 +443,7 @@ napi_value HdcCommand(napi_env env, napi_callback_info info) {
   std::vector<char> root(length + 1);
   if (napi_get_value_string_utf8(env, args[0], root.data(), root.size(), &length) != napi_ok ||
       napi_get_value_uint32(env, args[1], &state->operation) != napi_ok ||
-      state->operation > 26 ||
+      state->operation > 27 ||
       napi_get_value_string_utf8(env, args[2], nullptr, 0, &length) != napi_ok ||
       length > 4096) {
     delete state;
@@ -856,6 +859,197 @@ napi_value ResumeFramePacing(napi_env env, napi_callback_info info) {
   return result;
 }
 
+
+// ---------------------------------------------------------------------------
+// .hapz (Zstandard) decompression for AppGallery packages.
+//
+// The HAP ships libhapz_zstd.so (zstd 1.5.7, decompress-only build). Loading it
+// with dlopen keeps this module buildable even if the library is absent; the
+// caller receives a normal promise rejection instead of a load-time crash.
+namespace {
+struct ZstdInBuffer { const void* src; size_t size; size_t pos; };
+struct ZstdOutBuffer { void* dst; size_t size; size_t pos; };
+using ZstdCreateDCtx = void* (*)();
+using ZstdFreeDCtx = size_t (*)(void*);
+using ZstdInitDStream = size_t (*)(void*);
+using ZstdDecompressStream = size_t (*)(void*, ZstdOutBuffer*, ZstdInBuffer*);
+using ZstdIsError = unsigned (*)(size_t);
+using ZstdErrorName = const char* (*)(size_t);
+
+struct UngrabWork {
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  std::string input;
+  std::string output;
+  std::string error;
+  int result = 1;
+};
+}  // namespace
+
+static void UngrabExecute(napi_env, void* data) {
+  auto* task = static_cast<UngrabWork*>(data);
+  void* lib = dlopen("libhapz_zstd.so", RTLD_NOW);
+  if (lib == nullptr) {
+    lib = dlopen("/data/storage/el1/bundle/libs/arm64/libhapz_zstd.so", RTLD_NOW);
+  }
+  if (lib == nullptr) {
+    task->error = "cannot load libhapz_zstd.so";
+    return;
+  }
+  auto create = reinterpret_cast<ZstdCreateDCtx>(dlsym(lib, "ZSTD_createDCtx"));
+  auto destroy = reinterpret_cast<ZstdFreeDCtx>(dlsym(lib, "ZSTD_freeDCtx"));
+  auto init = reinterpret_cast<ZstdInitDStream>(dlsym(lib, "ZSTD_initDStream"));
+  auto decompress = reinterpret_cast<ZstdDecompressStream>(dlsym(lib, "ZSTD_decompressStream"));
+  auto isError = reinterpret_cast<ZstdIsError>(dlsym(lib, "ZSTD_isError"));
+  auto errorName = reinterpret_cast<ZstdErrorName>(dlsym(lib, "ZSTD_getErrorName"));
+  if (!create || !destroy || !init || !decompress || !isError || !errorName) {
+    task->error = "libhapz_zstd.so is missing the streaming API";
+    dlclose(lib);
+    return;
+  }
+  void* dctx = create();
+  if (dctx == nullptr) {
+    task->error = "ZSTD_createDCtx returned null";
+    dlclose(lib);
+    return;
+  }
+  size_t initResult = init(dctx);
+  if (isError(initResult) != 0) {
+    task->error = std::string("ZSTD_initDStream: ") + errorName(initResult);
+    destroy(dctx);
+    dlclose(lib);
+    return;
+  }
+
+  std::ifstream in(task->input, std::ios::binary);
+  std::ofstream out(task->output, std::ios::binary | std::ios::trunc);
+  if (!in || !out) {
+    task->error = "cannot open hapz input/output";
+    destroy(dctx);
+    dlclose(lib);
+    return;
+  }
+
+  std::vector<char> inBytes(1024 * 1024);
+  std::vector<char> outBytes(128 * 1024);
+  size_t inSize = 0;
+  size_t inPos = 0;
+  bool eof = false;
+  size_t lastRet = static_cast<size_t>(-1);
+  unsigned long long total = 0;
+  int frames = 0;
+
+  while (task->error.empty()) {
+    if (inPos >= inSize && !eof) {
+      in.read(inBytes.data(), static_cast<std::streamsize>(inBytes.size()));
+      std::streamsize got = in.gcount();
+      if (got <= 0) {
+        eof = true;
+        inSize = 0;
+        inPos = 0;
+      } else {
+        inSize = static_cast<size_t>(got);
+        inPos = 0;
+      }
+    }
+    if (eof && inPos >= inSize) {
+      if (lastRet == 0) break;
+      task->error = "hapz incomplete or encrypted";
+      break;
+    }
+
+    ZstdInBuffer input{inBytes.data(), inSize, inPos};
+    ZstdOutBuffer output{outBytes.data(), outBytes.size(), 0};
+    size_t ret = decompress(dctx, &output, &input);
+    if (isError(ret) != 0) {
+      task->error = std::string("zstd: ") + errorName(ret);
+      break;
+    }
+    inPos = input.pos;
+    if (output.pos > 0) {
+      out.write(outBytes.data(), static_cast<std::streamsize>(output.pos));
+      total += output.pos;
+    }
+    if (ret == 0) frames++;
+    lastRet = ret;
+  }
+
+  out.flush();
+  destroy(dctx);
+  dlclose(lib);
+  if (task->error.empty() && (frames == 0 || total == 0)) {
+    task->error = "hapz output is empty";
+  }
+  task->result = task->error.empty() ? 0 : 1;
+}
+
+static void UngrabComplete(napi_env env, napi_status status, void* data) {
+  auto* task = static_cast<UngrabWork*>(data);
+  if (status == napi_ok && task->result == 0) {
+    napi_value value = nullptr;
+    napi_get_undefined(env, &value);
+    napi_resolve_deferred(env, task->deferred, value);
+  } else {
+    napi_value message = nullptr;
+    napi_value error = nullptr;
+    const char* detail = task->error.empty() ? "hapz decompression failed" : task->error.c_str();
+    napi_create_string_utf8(env, detail, NAPI_AUTO_LENGTH, &message);
+    napi_create_error(env, nullptr, message, &error);
+    napi_reject_deferred(env, task->deferred, error);
+  }
+  if (task->work) napi_delete_async_work(env, task->work);
+  delete task;
+}
+
+napi_value UngrabHapz(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2]{};
+  if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 2) {
+    napi_throw_type_error(env, nullptr, "Expected hapz input and hap output paths");
+    return nullptr;
+  }
+  std::string paths[2];
+  for (size_t i = 0; i < 2; ++i) {
+    size_t length = 0;
+    if (napi_get_value_string_utf8(env, args[i], nullptr, 0, &length) != napi_ok ||
+        length == 0 || length > 4096) {
+      napi_throw_type_error(env, nullptr, "Invalid hapz path");
+      return nullptr;
+    }
+    std::vector<char> buffer(length + 1);
+    if (napi_get_value_string_utf8(env, args[i], buffer.data(), buffer.size(), &length) != napi_ok) {
+      napi_throw_type_error(env, nullptr, "Invalid hapz path");
+      return nullptr;
+    }
+    paths[i].assign(buffer.data(), length);
+    if (paths[i].find('\n') != std::string::npos || paths[i].find('"') != std::string::npos) {
+      napi_throw_type_error(env, nullptr, "Invalid hapz path");
+      return nullptr;
+    }
+  }
+
+  auto* state = new UngrabWork();
+  state->input = paths[0];
+  state->output = paths[1];
+  napi_value promise = nullptr;
+  if (napi_create_promise(env, &state->deferred, &promise) != napi_ok) {
+    delete state;
+    napi_throw_error(env, nullptr, "Cannot create hapz task");
+    return nullptr;
+  }
+  napi_value name = nullptr;
+  napi_create_string_utf8(env, "qingqiUngrabHapz", NAPI_AUTO_LENGTH, &name);
+  if (napi_create_async_work(env, nullptr, name, UngrabExecute, UngrabComplete, state,
+        &state->work) != napi_ok ||
+      napi_queue_async_work(env, state->work) != napi_ok) {
+    if (state->work) napi_delete_async_work(env, state->work);
+    delete state;
+    napi_throw_error(env, nullptr, "Cannot queue hapz task");
+    return nullptr;
+  }
+  return promise;
+}
+
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
     {"setResumeFramePacing", nullptr, ResumeFramePacing, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -883,7 +1077,8 @@ napi_value Init(napi_env env, napi_value exports) {
     {"signHap", nullptr, SignHap, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"hdcCommand", nullptr, HdcCommand, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"hdcInstallProgress", nullptr, HdcInstallProgress, nullptr, nullptr, nullptr, napi_default, nullptr},
-    {"hdcDisconnect", nullptr, HdcDisconnect, nullptr, nullptr, nullptr, napi_default, nullptr}
+    {"hdcDisconnect", nullptr, HdcDisconnect, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"ungrabHapz", nullptr, UngrabHapz, nullptr, nullptr, nullptr, napi_default, nullptr}
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   return exports;

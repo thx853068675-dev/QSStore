@@ -1,6 +1,8 @@
 import { BusinessError } from '@kit.BasicServicesKit';
 import { I18n } from '../data/I18n';
 
+interface UserFacingFailure { userMessage?: string; }
+
 /**
  * 把 catch 到的任意值转成能读的文案。
  *
@@ -13,6 +15,8 @@ import { I18n } from '../data/I18n';
  *   其它                → String(value)，空则「未知错误」
  */
 export function errorText(error: Object): string {
+  const friendly = (error as UserFacingFailure)?.userMessage;
+  if (typeof friendly === 'string' && friendly.length > 0) return friendly;
   const business = error as BusinessError;
   if (business !== undefined && business.code !== undefined) {
     const detail = business.message !== undefined ? business.message : '';

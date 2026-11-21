@@ -15,6 +15,10 @@ import urllib.parse
 import urllib.request
 
 _VERIFY_URL = "https://cn.devecostudio.huawei.com/authrouter/auth/api/jwToken/check"
+_VERIFY_URLS = {
+    site: _VERIFY_URL.replace("://cn.", "://" + site.lower() + ".")
+    for site in ("CN", "SG", "DE", "RU")
+}
 _OPEN_PROFILE_URL = "https://account.cloud.huawei.com/rest.php?nsp_svc=GOpen.User.getInfo"
 _cache: dict[str, tuple[float, tuple[str, str], str]] = {}
 _lock = threading.Lock()
@@ -63,15 +67,19 @@ def _open_display_name(access_token: str, expected_user_id: str) -> str:
     return _open_profile(access_token, expected_user_id)[0]
 
 
-def verified_avatar(jwt_token: str, access_token: str) -> str:
+def _cache_key(jwt_token: str, access_token: str, site: str) -> str:
+    return hashlib.sha256((site + "\0" + jwt_token.strip() + "\0" + access_token.strip()).encode()).hexdigest()
+
+
+def verified_avatar(jwt_token: str, access_token: str, site: str = "CN") -> str:
     """Only returns the avatar from a still-valid, server-verified login."""
-    key = hashlib.sha256((jwt_token.strip() + "\0" + access_token.strip()).encode()).hexdigest()
+    key = _cache_key(jwt_token, access_token, site)
     with _lock:
         cached = _cache.get(key)
         return cached[2] if cached and cached[0] > time.time() else ""
 
 
-def verify(jwt_token: str, access_token: str = "") -> tuple[str, str]:
+def verify(jwt_token: str, access_token: str = "", site: str = "CN") -> tuple[str, str]:
     """Return the verified (account id, display name)."""
     token = jwt_token.strip()
     if not token or len(token) > 8192:
@@ -79,16 +87,20 @@ def verify(jwt_token: str, access_token: str = "") -> tuple[str, str]:
     access_token = access_token.strip()
     if len(access_token) > 4096:
         raise InvalidIdentity("登录信息已失效")
-    key = hashlib.sha256((token + "\0" + access_token).encode()).hexdigest()
+    endpoint = _VERIFY_URLS.get(site)
+    if endpoint is None:
+        raise InvalidIdentity("华为登录站点无效")
+    key = _cache_key(token, access_token, site)
     with _lock:
         cached = _cache.get(key)
         if cached and cached[0] > time.time():
             return cached[1]
 
-    req = urllib.request.Request(_VERIFY_URL, headers={
+    req = urllib.request.Request(endpoint, headers={
         "Accept": "application/json", "User-Agent": "HapStore/1",
-        "refresh": "false", "jwtToken": token,
+        "refresh": "false",
     })
+    req.add_unredirected_header("jwtToken", token)
     try:
         # The host may expose an unrelated system proxy. Identity verification
         # must use the direct TLS route, which is tested in production.

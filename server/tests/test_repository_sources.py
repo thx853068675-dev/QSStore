@@ -14,6 +14,8 @@ from server.tests.test_package_archive import hap
 
 class RepositorySourceTest(unittest.TestCase):
     def setUp(self):
+        from server.tests.repository_fixtures import mock_repository_identity
+        mock_repository_identity(self)
         self.temp = tempfile.TemporaryDirectory()
         self.old = db.DB_PATH
         db.DB_PATH = self.temp.name + '/store.db'
@@ -45,6 +47,39 @@ class RepositorySourceTest(unittest.TestCase):
 
     def link(self, token='draft', id=None):
         return app.h_configure_my_app(str(id or self.id), dict(category='工具', source_draft_token=token), self.identity)['app']
+
+    def test_owner_can_rename_same_repository_without_changing_app_or_release_identity(self):
+        release = self.release('v1', '2026-10-01', 1)
+        release['html_url'] = 'https://github.com/dev/main/releases/tag/v1'
+        release['assets'][0]['download_url'] = 'https://github.com/dev/main/releases/download/v1/app.hap'
+        db.replace_releases(self.id, [release])
+        before = db.get_app(self.id)['latest_asset']
+        body = dict(category='工具', expected_repo='dev/main', primary_repo_url='https://github.com/dev/renamed')
+        with patch.object(collector, '_json', return_value=dict(id=12, private=False, full_name='dev/renamed')):
+            saved = app.h_configure_my_app(str(self.id), body, self.identity)['app']
+        self.assertEqual((saved['id'], saved['repo'], saved['publisher_name']), (self.id, 'dev/renamed', '上架者'))
+        self.assertIsNone(db.get_app_by_repo('dev/main'))
+        latest = db.list_releases(self.id)['items'][0]
+        self.assertEqual(latest['html_url'], 'https://github.com/dev/renamed/releases/tag/v1')
+        self.assertEqual(saved['latest_asset']['url'], 'https://github.com/dev/renamed/releases/download/v1/app.hap')
+        self.assertEqual(saved['latest_asset']['sha256'], before['sha256'])
+
+    def test_repository_rename_checks_owner_identity_and_catalog_collision(self):
+        body = dict(category='游戏', expected_repo='dev/main', primary_repo_url='https://github.com/dev/renamed')
+        with patch.object(collector, 'github_repository_identity', side_effect=[(12, 'dev/main'), (13, 'dev/renamed')]) as github:
+            with self.assertRaises(app.ApiError) as error:
+                app.h_configure_my_app(str(self.id), body, ('other', 'Other'))
+            self.assertEqual(error.exception.code, 'PUBLISHER_MISMATCH')
+            github.assert_not_called()
+            with self.assertRaises(app.ApiError) as error:
+                app.h_configure_my_app(str(self.id), body, self.identity)
+            self.assertEqual(error.exception.code, 'PRIMARY_REPO_MISMATCH')
+        db.upsert_app('dev/RENAMED')
+        with patch.object(collector, 'github_repository_identity', return_value=(12, 'dev/renamed')):
+            with self.assertRaises(app.ApiError) as error:
+                app.h_configure_my_app(str(self.id), body, self.identity)
+            self.assertEqual(error.exception.code, 'PRIMARY_REPO_EXISTS')
+        self.assertEqual((db.get_app(self.id)['repo'], db.get_app(self.id)['category']), ('dev/main', '工具'))
 
     def test_link_keeps_primary_presentation_and_sums_counts_before_pagination(self):
         self.draft(); linked=self.link()

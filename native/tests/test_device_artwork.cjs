@@ -9,6 +9,7 @@ test('actual local and remote market models use the correct transparent official
  for(const [kind,model,market,name] of [
   ['phone','HBN-AL00','HUAWEI Pura 70 Pro','HUAWEI Pura 70 Pro'],
   ['phone','VDE-AL10','HUAWEI Pura X 典藏版','HUAWEI Pura X'],
+  ['phone','PLR-AL00','HUAWEI Mate 70 Pro','HUAWEI Mate 70 Pro'],
   ['tablet','arbitrary','HUAWEI MatePad Pro 13.2 英寸','HUAWEI MatePad Pro 13.2 英寸'],
   ['pc','arbitrary','HUAWEI MateBook Pro','HUAWEI MateBook Pro'],
  ]){assert.equal(C.match(rows,kind,model,market).name,name);}
@@ -38,7 +39,14 @@ test('legacy remote records and bad optional art metadata cannot invalidate a us
 function png(w=378,h=480,color=6){let b=new ArrayBuffer(40),u=new Uint8Array(b);u.set([137,80,78,71,13,10,26,10],0);u.set([73,72,68,82],12);let v=new DataView(b);v.setUint32(16,w);v.setUint32(20,h);u[25]=color;return b;}
 test('image validation bounds the decoded size and rejects non-transparent or non-PNG responses',()=>{
  assert(C.validPng(png()));assert(!C.validPng(png(9999,9999)));assert(!C.validPng(png(378,480,2)));
- assert(!C.validPng(new ArrayBuffer(600*1024)));assert(!C.validPng(new TextEncoder().encode('<html>Error</html>').buffer));
+ assert(!C.validPng(new ArrayBuffer(C.MAX_IMAGE_BYTES+1)));assert(!C.validPng(new TextEncoder().encode('<html>Error</html>').buffer));
+});
+function largePortrait(){const bytes=new ArrayBuffer(900*1024);new Uint8Array(bytes).set(new Uint8Array(png(756,960)));return bytes;}
+test('official portraits up to 5 MiB remain valid with bounded dimensions and transparent PNG format',()=>{
+ assert(C.validPng(largePortrait()));
+ const oversized=new ArrayBuffer(C.MAX_IMAGE_BYTES+1);new Uint8Array(oversized).set(new Uint8Array(png(756,960)));
+ assert(!C.validPng(oversized));
+ const hugePixels=largePortrait();new DataView(hugePixels).setUint32(16,5000);assert(!C.validPng(hugePixels));
 });
 function setup(){
  const files=new Map(),directories=new Set(),requests=[];let nextFd=1;const handles=new Map();
@@ -50,15 +58,16 @@ function setup(){
  read:async(fd,bytes)=>{let h=handles.get(fd),b=files.get(h.path),part=b.slice(h.at,h.at+bytes.byteLength);new Uint8Array(bytes).set(new Uint8Array(part));h.at+=part.byteLength;return part.byteLength},
  renameSync:(a,b)=>{files.set(b,files.get(a));files.delete(a)},unlinkSync:p=>files.delete(p),
  listFile:async dir=>Array.from(files.keys()).filter(p=>p.startsWith(dir+'/')).map(p=>p.slice(dir.length+1))};
- let networkResolve;let response=()=>new Promise(resolve=>networkResolve=resolve),allowed=true,frameReads=0,frameResponse=async()=>({contentWidth:.55,contentHeight:.94});
+ let networkResolve;let response=()=>new Promise(resolve=>networkResolve=resolve),allowed=true,frameReads=0,frameResponse=async()=>({contentWidth:.55,contentHeight:.94}),encodeResponse=async()=>png(320,480);const encoded=[];
  const http={RequestMethod:{GET:'GET'},HttpDataType:{ARRAY_BUFFER:1},createHttp:()=>({request:(url,options)=>{requests.push({url,options});return response()},destroy(){}})};
  const {DeviceArtwork:A}=loadEts('data/DeviceArtwork',{'@kit.CoreFileKit':{fileIo},'@kit.NetworkKit':{http},
   '@kit.ArkTS':{util:{TextDecoder:{create:()=>({decodeWithStream:()=>raw})}}},
   './DeviceArtworkCatalog':{DeviceArtworkCatalog:C},'./PrivacyConsent':{PrivacyConsent:{isBusinessAllowed:()=>allowed}},
   './DeviceArtworkFrame':{DeviceArtworkFrame:{clear(){},load:async()=>{frameReads++;return frameResponse();}}},
+  './DeviceArtworkThumbnail':{DeviceArtworkThumbnail:{EDGE:512,encode:async(bytes)=>{encoded.push(bytes.byteLength);return encodeResponse();}}},
   '../jobs/ForegroundIdle':{ForegroundIdle:{wait:async()=>{}}}}, {ArrayBuffer,Uint8Array,DataView});
  const context={cacheDir:'/cache',resourceManager:{getRawFileContent:async()=>new Uint8Array()}};
- return{A,context,requests,files,resolve:()=>networkResolve({responseCode:200,result:png()}),setResponse:f=>response=f,setAllowed:v=>allowed=v,frameReads:()=>frameReads,setFrameResponse:f=>frameResponse=f};
+ return{A,context,requests,files,encoded,resolve:()=>networkResolve({responseCode:200,result:png()}),setResponse:f=>response=f,setAllowed:v=>allowed=v,frameReads:()=>frameReads,setFrameResponse:f=>frameResponse=f,setEncodeResponse:f=>encodeResponse=f};
 }
 const settle=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
 test('simultaneous local and remote portraits coalesce, persist and reload without network',async()=>{
@@ -68,9 +77,41 @@ test('simultaneous local and remote portraits coalesce, persist and reload witho
  assert.equal(s.files.size,1);assert.equal(await s.A.load(s.context,'phone','HBN-AL00',''),a);assert.equal(s.requests.length,1);
  assert.equal(await s.A.size(s.context),40);await s.A.clear(s.context);assert.equal(s.files.size,0);
 });
+test('Mate 70 Pro original downloads once and only the compressed thumbnail is cached',async()=>{
+ const s=setup();s.setResponse(async()=>({responseCode:200,result:largePortrait()}));
+ const source=await s.A.load(s.context,'phone','PLR-AL00','HUAWEI Mate 70 Pro');
+ assert(source.startsWith('file:///cache/device-art/'));assert.equal(s.requests.length,1);
+ assert.equal(s.requests[0].options.maxLimit,C.MAX_IMAGE_BYTES);
+ assert.equal(await s.A.size(s.context),40);assert.deepEqual(s.encoded,[900*1024]);
+ assert.equal(await s.A.load(s.context,'phone','PLR-AL00','HUAWEI Mate 70 Pro'),source);
+ assert.equal(s.requests.length,1,'the disk validator must accept the newly downloaded large portrait');
+});
 test('clearing an in-flight request prevents a late download from restoring deleted cache',async()=>{
  const s=setup(),one=s.A.load(s.context,'phone','HBN-AL00','');await settle();assert.equal(s.requests.length,1);
  await s.A.clear(s.context);s.resolve();assert.equal(await one,'');assert.equal(s.files.size,0);
+});
+test('clear during native compression discards the late thumbnail before writing',async()=>{
+ const s=setup();let finish;s.setResponse(async()=>({responseCode:200,result:largePortrait()}));
+ s.setEncodeResponse(()=>new Promise(resolve=>finish=resolve));
+ const work=s.A.load(s.context,'phone','','Mate 70 Pro');
+ for(let i=0;i<8&&!finish;i++)await settle();assert(finish);
+ const clear=s.A.clear(s.context);finish(png(403,512));await clear;
+ assert.equal(await work,'');assert.equal(s.files.size,0);
+});
+test('the compressed disk cache evicts older files above a total of 5 MiB',async()=>{
+ const s=setup();s.setResponse(async()=>({responseCode:200,result:png()}));
+ await s.A.load(s.context,'phone','','Pura 70 Pro');
+ for(let i=0;i<7;i++)s.files.set('/cache/device-art/'+i+'-abcd.png',new ArrayBuffer(1024*1024));
+ const source=await s.A.load(s.context,'phone','','Mate 70 Pro');
+ assert(source);assert((await s.A.size(s.context))<=5*1024*1024);assert(s.files.has(source.replace('file://','')));
+});
+test('large original downloads are limited to two and a cache clear cancels queued work before HTTP',async()=>{
+ const s=setup(),finishes=[];s.setResponse(()=>new Promise(resolve=>finishes.push(resolve)));
+ const work=['Pura 70 Pro','Mate 70 Pro','Mate 70','Mate 70 Pro+'].map(name=>s.A.load(s.context,'phone','',name));
+ for(let i=0;i<5;i++)await settle();assert.equal(s.requests.length,2);
+ await s.A.clear(s.context);for(const finish of finishes)finish({responseCode:200,result:largePortrait()});
+ assert.deepEqual(await Promise.all(work),['','','','']);assert.equal(s.requests.length,2);
+ assert.equal(s.files.size,0);assert.equal(s.encoded.length,0);
 });
 test('missing art, offline responses and withdrawn network consent keep a harmless symbol fallback',async()=>{
  const s=setup();assert.equal(await s.A.load(s.context,'pc','emulator','emulator'),'');assert.equal(s.requests.length,0);

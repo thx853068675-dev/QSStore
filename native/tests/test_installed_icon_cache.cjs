@@ -46,17 +46,18 @@ test('icon cache evicts older records to stay below its budget, preserving the m
 });
 test('layered device resource icons use the official compositor; unavailable resource falls back to the bundle API', async () => {
   const resource = { id: 123, type: 20000, bundleName: 'com.example.reader', moduleName: 'entry', params: [] };
-  let calls = 0;
+  let calls = 0; const composed={getImageInfo:async()=>({size:{width:1024,height:1024}}),scale:async(x,y)=>{assert.equal(x,192/1024);assert.equal(y,x);}};
+  const legacy={getImageInfo:async()=>({size:{width:96,height:96}}),scale:async()=>assert.fail('Do not upscale')};
   const local = module('jobs/LocalBundles', {
     './InstalledAppRegistry': { InstalledAppRegistry: { iconResource: () => resource } },
-    '@ohos.bundle': { default: { getAbilityIcon: async () => { calls++; return 'legacy-pixels'; } } }
+    '@ohos.bundle': { default: { getAbilityIcon: async () => { calls++; return legacy; } } }
   }).LocalBundles;
   const context = { resourceManager: { getDrawableDescriptor: value => {
-    assert.equal(value, resource); return { getPixelMap: () => 'composed-pixels' };
+    assert.equal(value, resource); return { getPixelMap: () => composed };
   } } };
-  assert.equal(await local.installedIcon(context, resource.bundleName, 'EntryAbility'), 'composed-pixels');
+  assert.equal(await local.installedIcon(context, resource.bundleName, 'EntryAbility'), composed);
   assert.equal(calls, 0);
   context.resourceManager.getDrawableDescriptor = () => undefined;
-  assert.equal(await local.installedIcon(context, resource.bundleName, 'EntryAbility'), 'legacy-pixels');
+  assert.equal(await local.installedIcon(context, resource.bundleName, 'EntryAbility'), legacy);
   assert.equal(calls, 1);
 });

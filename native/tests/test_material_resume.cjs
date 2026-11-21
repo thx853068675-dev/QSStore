@@ -6,7 +6,7 @@ function fixture(component){
  const struct=source.slice(source.indexOf('export struct '+component));
  function method(name){const a=struct.search(new RegExp('^  (?:private )?'+name+'\\(','m'));assert(a>=0);return struct.slice(a,struct.indexOf('\n  }',a)+4);}
  const ready=component==='DiscoverHeader'?'refreshPopup':'onActiveChanged';
- const f={frames:[],animations:[],motion:[],start:0,stop:0};
+ const f={frames:[],start:0,stop:0};
  const sliceModule={};
  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,
   '../entry/src/main/ets/components/DiscoverCategorySlice.ets'),'utf8'),{
@@ -16,68 +16,48 @@ function fixture(component){
  const toolbarSource=fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/components/DiscoverHeader.ets'),'utf8');
  const motionSource=toolbarSource.slice(toolbarSource.indexOf('export class DiscoverToolbarMotion'),toolbarSource.indexOf('export class DiscoverToolbarViewport'));
  vm.runInNewContext(ts.transpileModule(motionSource,{compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS}}).outputText,{exports:motionBox});
- const box={StoreMaterial:{supported:mode=>mode!=='off'},afterPaint:(_,fn)=>f.frames.push(fn),DiscoverCategorySlice:sliceModule.DiscoverCategorySlice,DiscoverToolbarMotion:motionBox.DiscoverToolbarMotion};
+ const box={I18n:{category:value=>value},StoreLayout:{contentInset:()=>16},StoreMaterial:{supported:mode=>mode!=='off'},afterPaint:(_,fn)=>f.frames.push(fn),DiscoverCategorySlice:sliceModule.DiscoverCategorySlice,DiscoverToolbarMotion:motionBox.DiscoverToolbarMotion};
  const methods=['aboutToAppear','aboutToDisappear',ready];
- if(component==='DiscoverHeader')methods.push('onMaterialChanged','mainCategoryWidth','onToolbarModeChanged','searchControlWidth','categoryControlWidth',
-  'refreshCategorySlices','sliceFor','onCategoriesChanged','isLandscape','onViewportChanged');
+ if(component==='DiscoverHeader')methods.push('onMaterialChanged','searchControlWidth','categoryControlWidth',
+  'refreshCategorySlices','sliceFor','onCategoriesChanged','onViewportChanged','isLandscape','mainCategoryWidth',
+  'toolbarWidth','toolbarInteractive','nativeToolbarEligible','suspendToolbarPopup','searchPopupRequested');
  vm.runInNewContext(ts.transpileModule('class Page{'+methods.map(method).join('\n')+'};globalThis.Page=Page;',{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
  f.ui=Object.assign(new box.Page(),{homeVisibility:{visible:true},active:true,immersiveSupported:true,materialMode:'adaptive',routeTransitioning:false,disposed:false,popupGeneration:0,popupReady:false,
-  windowWidth:362,windowHeight:822,categories:[],categorySlices:new Map(),searchWidth:386,categoryOffset:0,
-  categoryScroller:{scrollTo(options){f.scrollOffset=options.xOffset;}},
-  categoriesExpanded:false,categoriesOpen:false,toolbarMotionGeneration:0,toolbarProgress:0,
-  onMotionStateChanged:moving=>f.motion.push(moving),
-  getUIContext:()=>({createAnimator(options){
-   const animation={options,play(){this.playing=true;},cancel(){this.cancelled=true;}};
-   f.animations.push(animation);return animation;
-  }}),
+  windowWidth:364,windowHeight:822,categories:[],categorySlices:new Map(),toolbarMotionGeneration:0,
+  toolbarRows:2,toolbarProgress:1,categoryOffset:0,channel:'apps',channelProgress:1,onMotionStateChanged() {},
+  getUIContext:()=>({}),
   holding:{start(){f.start++;},stop(){f.stop++;}}});
  f.refresh=()=>f.ui[ready]();f.paint=()=>{const frames=f.frames.splice(0);frames.forEach(fn=>fn());};return f;
 }
-test('rapidly reversing the toolbar cannot let an old completion reenable page caching mid-animation',()=>{
- const f=fixture('DiscoverHeader');f.ui.aboutToAppear();
- f.ui.categoriesExpanded=true;f.ui.onToolbarModeChanged();assert(f.ui.categoriesOpen);
- f.animations[0].onFrame(.4);assert.equal(f.ui.toolbarProgress,.4);
- f.ui.categoriesExpanded=false;f.ui.onToolbarModeChanged();assert(!f.ui.categoriesOpen);
- assert(f.animations[0].cancelled);assert.equal(f.animations[1].options.begin,.4);
- f.animations[0].onFrame(.8);assert.equal(f.ui.toolbarProgress,.4,'cancelled frames must not move the new animation');
- assert.deepEqual(f.motion,[true,true]);
- f.animations[0].onFinish();assert.deepEqual(f.motion,[true,true]);
- f.animations[1].onFinish();assert.deepEqual(f.motion,[true,true,false]);
- f.ui.categoriesExpanded=true;f.ui.onToolbarModeChanged();f.ui.aboutToDisappear();
- const count=f.motion.length;f.animations[2].onFinish();assert.equal(f.motion.length,count);
-});
-test('one frame progress keeps search width and category reveal within the same toolbar',()=>{
- const f=fixture('DiscoverHeader');
- for(const progress of [0,.1,.5,.9,1]){
+test('one-row search and categories share the toolbar width during the morph',()=>{
+ const f=fixture('DiscoverHeader');f.ui.toolbarRows=1;
+ for (const progress of [0,.25,.5,1,.5,0]) {
   f.ui.toolbarProgress=progress;
-  assert(Math.abs(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+44+20-f.ui.searchWidth)<.0001);
-  assert.equal(f.ui.mainCategoryWidth(),44+20*progress);
+  assert.equal(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+64,f.ui.toolbarWidth());
  }
-});
-test('closing a scrolled category row returns its shared button in sync and finalizes at the start',()=>{
- const f=fixture('DiscoverHeader');f.ui.aboutToAppear();
- f.ui.categoriesExpanded=true;f.ui.onToolbarModeChanged();f.animations[0].onFrame(.4);
- f.ui.categoryOffset=100;f.ui.categoriesExpanded=false;f.ui.onToolbarModeChanged();
- f.animations[1].onFrame(.2);assert.equal(f.scrollOffset,50);
- f.animations[1].onFinish();assert.equal(f.scrollOffset,0);assert.equal(f.ui.categoryOffset,0);
- assert.equal(f.ui.mainCategoryWidth(),44);
+ assert.equal(f.ui.searchControlWidth(),f.ui.toolbarWidth()-108);
+ f.ui.toolbarProgress=1;assert.equal(f.ui.searchControlWidth(),44);
 });
 for(const component of ['DiscoverHeader','DiscoverTopAction']){
  test(component+' restores native material only after a paint and coalesces repeated foreground signals',()=>{
   const f=fixture(component);f.ui.aboutToAppear();f.refresh();assert(!f.ui.popupReady);assert.equal(f.start,0);
-  f.paint();assert(f.ui.popupReady);assert.equal(f.start,component==='DiscoverTopAction'?1:0);
+  f.paint();
+  if(component==='DiscoverHeader'){assert(!f.ui.popupReady);f.paint();}
+  assert(f.ui.popupReady);assert.equal(f.start,component==='DiscoverTopAction'?1:0);
   f.refresh();assert.equal(f.frames.length,0,'an already restored popup must not be rebuilt');
  });
  test(component+' invalidates late callbacks on hiding, route transitions and disposal',()=>{
   const f=fixture(component);f.ui.aboutToAppear();f.ui.active=false;f.refresh();f.paint();assert(!f.ui.popupReady);assert.equal(f.start,0);
   f.ui.active=true;f.refresh();f.ui.routeTransitioning=true;f.refresh();f.paint();assert(!f.ui.popupReady);
   f.ui.routeTransitioning=false;f.refresh();f.ui.aboutToDisappear();f.paint();assert(!f.ui.popupReady);assert.equal(f.start,0);
-  f.ui.aboutToAppear();f.paint();assert(f.ui.popupReady);
+  f.ui.aboutToAppear();f.paint();
+  if(component==='DiscoverHeader')f.paint();
+  assert(f.ui.popupReady);
  });
 }
 
 test('visibility geometry retains full control dimensions and skips position work for hidden categories',()=>{
- const f=fixture('DiscoverHeader');f.ui.categories=['办公','工具','安全隐私'];f.ui.toolbarProgress=1;
+ const f=fixture('DiscoverHeader');f.ui.categories=['办公','工具','安全隐私'];
  f.ui.refreshCategorySlices();const safety=f.ui.sliceFor('安全隐私');
  assert.equal(safety.visibleWidth,56);assert.equal(safety.viewportOffset,222);
  f.ui.categoryOffset=40;f.ui.refreshCategorySlices();
@@ -87,13 +67,12 @@ test('visibility geometry retains full control dimensions and skips position wor
  f.ui.categoryOffset=500;f.ui.refreshCategorySlices();assert.equal(safety.viewportOffset,hiddenOffset);
  f.ui.categoryOffset=250;f.ui.refreshCategorySlices();
  assert.equal(safety.visibleWidth,60);assert.equal(safety.viewportOffset,-28);
- assert.equal(f.ui.mainCategoryWidth(),64);
 });
 
-test('opening and closing a category viewport keeps its edge materials alive behind the fixed mask',()=>{
+test('a category keeps its light material as it approaches the fixed edge',()=>{
  const f=fixture('DiscoverHeader');f.ui.categories=['其他','办公','安全隐私','实用工具','工具'];
- for(const progress of [0,.01,.2,.6,1,.6,.2,0]){
-  f.ui.toolbarProgress=progress;f.ui.refreshCategorySlices();
+ for(const offset of [0,20,40,60,100]){
+  f.ui.categoryOffset=offset;f.ui.refreshCategorySlices();
   assert(f.ui.sliceFor('实用工具').materialVisible);
  }
  f.ui.categoryOffset=900;f.ui.refreshCategorySlices();
@@ -115,31 +94,55 @@ test('changing material to off cancels queued search popup restores and reenable
  f.ui.materialMode='off';f.ui.onMaterialChanged();assert.equal(f.ui.immersiveSupported,false);assert.equal(f.ui.popupReady,true);
  f.ui.active=false;f.paint();assert.equal(f.ui.popupReady,true,'retired native callbacks cannot change the inline fallback');
  f.ui.active=true;f.ui.materialMode='adaptive';f.ui.onMaterialChanged();assert.equal(f.ui.popupReady,false);
+ f.paint();assert.equal(f.ui.popupReady,false);
  f.paint();assert.equal(f.ui.popupReady,true);assert.equal(f.ui.immersiveSupported,true);
 });
 
-test('search, category and fixed sorting capsule fit compact phones throughout the morph',()=>{
+test('swiping and settling keep one toolbar geometry while native windows wait for a stable frame',()=>{
  const f=fixture('DiscoverHeader');
- for(const width of [240,280,320,406,560]){
-  f.ui.searchWidth=width;
-  for(const progress of [0,.25,.5,.75,1]){
-   f.ui.toolbarProgress=progress;
-   assert.equal(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+44+20,width);
-   assert(f.ui.searchControlWidth()>=44);assert(f.ui.categoryControlWidth()>=44);
-  }
+ f.ui.channel='discover';f.ui.channelProgress=0;f.ui.aboutToAppear();f.paint();
+ assert(!f.ui.searchPopupRequested());
+ const widths=[f.ui.searchControlWidth(),f.ui.categoryControlWidth()];
+ f.ui.channelInMotion=true;f.ui.channelProgress=.5;f.refresh();
+ assert(f.ui.suspendToolbarPopup());
+ assert(!f.ui.toolbarInteractive());
+ assert.deepEqual([f.ui.searchControlWidth(),f.ui.categoryControlWidth()],widths);
+ f.ui.channel='apps';f.refresh();f.paint();
+ assert(!f.ui.searchPopupRequested());
+ f.ui.channelInMotion=false;f.refresh();assert(!f.ui.searchPopupRequested());
+ assert(f.ui.toolbarInteractive(), 'inline controls become usable before native material attaches');
+ f.paint();assert(!f.ui.searchPopupRequested(), 'allow a frame for scroll restoration to move the anchors');
+ f.paint();assert(f.ui.searchPopupRequested());
+ f.ui.searchPopupVisible=true;f.ui.channelInMotion=true;f.refresh();
+ assert(!f.ui.searchPopupVisible);
+ f.ui.channelInMotion=false;f.refresh();f.paint();
+ f.ui.channelInMotion=true;f.refresh();f.paint();
+ assert(!f.ui.searchPopupRequested(), 'a new swipe invalidates a queued native handoff');
+});
+
+test('the two-row toolbar gives search the full width and leaves room for sort below',()=>{
+ const f=fixture('DiscoverHeader');
+ for (const available of [240,320,520,720]) {
+  f.ui.windowWidth=available+32;
+  assert.equal(f.ui.searchControlWidth(),available);
+  assert.equal(f.ui.categoryControlWidth()+54,available);
  }
 });
 
-test('landscape keeps a quarter-width search and expanded categories beside fixed sorting',()=>{
- const f=fixture('DiscoverHeader');f.ui.windowWidth=822;f.ui.windowHeight=362;
- for(const width of [560,720]){
-  f.ui.searchWidth=width;f.ui.onViewportChanged();
-  assert(f.ui.categoriesOpen);assert.equal(f.ui.toolbarProgress,1);
-  assert.equal(f.ui.searchControlWidth(),width/4);
-  assert.equal(f.ui.searchControlWidth()+f.ui.categoryControlWidth()+64,width);
- }
- f.paint();assert(f.ui.popupReady);
- f.ui.windowWidth=362;f.ui.windowHeight=822;f.ui.onViewportChanged();
- assert(!f.ui.categoriesOpen);assert.equal(f.ui.toolbarProgress,0);
- assert(!f.ui.popupReady);f.paint();assert(f.ui.popupReady);
+test('viewport changes defer category scrolling and skip the detached discover toolbar',()=>{
+ const f=fixture('DiscoverHeader');
+ let offset=100, resets=0;
+ f.ui.toolbarRows=1;
+ f.ui.channel='discover';
+ f.ui.categoryOffset=offset;
+ f.ui.categoryScroller={currentOffset:()=>({xOffset:offset}),scrollTo:()=>{resets++;offset=0;}};
+ f.ui.onViewportChanged();
+ f.paint();
+ assert.equal(resets,0,'the category scroller is not mounted in the Discover channel');
+ f.ui.channel='apps';
+ f.ui.onViewportChanged();
+ f.ui.onViewportChanged();
+ assert.equal(resets,0,'resize observers must not scroll during layout');
+ f.paint();
+ assert.equal(resets,1,'only the last viewport update resets the attached scroller');
 });

@@ -9,7 +9,7 @@ const jobs = loadEts('jobs/InstallJob');
 const planner = loadEts('jobs/RecoveryPlanner', { './InstallJob': jobs });
 const display = loadEts('data/DeviceSupportDisplay', { './ReleaseInfo': loadEts('data/ReleaseInfo') });
 const archive = loadEts('jobs/PackageArchive', { './PackageInspector': loadEts('jobs/PackageInspector') });
-const scheduler = { JobScheduler: { runInstall: async (_id, action) => action() } };
+const scheduler = { JobScheduler: { runPipeline: async (_job, action) => action(), resource: async (_job,_key,_capacity,action)=>action() } };
 const cancellation = { JobCancellation: { assertActive() {}, isCancelled: () => false } };
 const runner = loadEts('jobs/JobRunner', { './InstallJob': jobs, './JobScheduler': scheduler,
   './RecoveryPlanner': planner, './JobCancellation': cancellation });

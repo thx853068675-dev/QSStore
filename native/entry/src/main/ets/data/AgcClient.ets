@@ -7,7 +7,7 @@ import { certificateQuotaFailure } from './CertificateQuota';
 import { PrivacyConsent } from './PrivacyConsent';
 import { I18n } from './I18n';
 
-const AGC_API = 'https://connect-api.cloud.huawei.com/api';
+import { huaweiAgcBase } from './HuaweiSite';
 
 class SourceUrlsBody { sourceUrls: string = ''; }
 class DeleteCertsBody { certIds: string[] = []; }
@@ -72,7 +72,7 @@ export class AgcClient {
       // HarmonyOS rejects extraData: '' before a bodyless GET reaches AGC.
       if (body) options.extraData = JSON.stringify(body);
       if (form !== undefined) options.extraData = form;
-      const response = await request.request(AGC_API + path, options);
+      const response = await request.request(huaweiAgcBase(this.account.site) + path, options);
       PrivacyConsent.assertBusinessAllowed();
       if (response.responseCode === 401 && !retried) {
         await AccountService.refresh(this.account, true);

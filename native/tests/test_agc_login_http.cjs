@@ -1,4 +1,4 @@
-const { publicConsentModule } = require('./load_ets.cjs');
+const { loadEts, publicConsentModule } = require('./load_ets.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -13,7 +13,9 @@ function load(name, http, accountService = {}) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText;
   const exports = {};
-  vm.runInNewContext(code, { exports, require: id => id === '@kit.NetworkKit' ? { http } : id === './AccountService' ? { AccountService: accountService } : publicConsentModule(id) });
+  vm.runInNewContext(code, { exports, require: id => id === '@kit.NetworkKit' ? { http } :
+    id === './AccountService' ? { AccountService: accountService } :
+      id === './DeveloperAccount' ? loadEts('data/DeveloperAccount') : publicConsentModule(id) });
   return exports[name];
 }
 
@@ -40,6 +42,57 @@ test('an empty AGC certificate list is a valid bodyless GET', async () => {
   assert.equal(list.length, 0);
   assert.equal(t.calls[0].options.method, 'GET');
   assert.equal(t.calls[0].options.extraData, undefined);
+});
+
+test('overseas callback, saved session refresh and signing use the verified site', async () => {
+  const calls = [];
+  const http = { RequestMethod: { GET: 'GET', POST: 'POST' },
+    createHttp: () => ({
+      request: async uri => {
+        calls.push(uri);
+        if (uri.includes('/temptoken/check')) return { responseCode: 200, result: 'header.payload.signature' };
+        if (uri.includes('/jwToken/check')) return { responseCode: 200,
+          result: JSON.stringify({ userInfo: { accessToken: 'token', userId: 'user', teamId: 'team' } }) };
+        return { responseCode: 200, result: JSON.stringify({ ret: { code: 0 }, certList: [] }) };
+      }, destroy: () => {}
+    }) };
+  const Login = load('DevEcoLogin', http);
+  const account = await Login.authorizeCallback('tempToken=receipt8&siteId=7', 'CN');
+  assert.equal(account.site, 'DE');
+  assert.match(calls[0], /^https:\/\/de\.devecostudio\.huawei\.com\/.*site=DE&tempToken=receipt8/);
+  assert.match(calls[1], /^https:\/\/de\.devecostudio\.huawei\.com\/.*jwToken\/check/);
+  const { DeveloperAccount } = loadEts('data/DeveloperAccount');
+  const restored = DeveloperAccount.fromJson(JSON.parse(account.toJson()));
+  assert.equal(restored.site, 'DE');
+  assert.equal(DeveloperAccount.fromJson({ userId: 'old' }).site, 'CN');
+  assert.equal((await Login.refresh(restored)).site, 'DE');
+  assert.match(calls[3], /^https:\/\/de\.devecostudio\.huawei\.com\/.*jwToken\/check/);
+  const Client = load('AgcClient', http);
+  await new Client(restored).certificates();
+  assert.match(calls.at(-1), /^https:\/\/connect-api-dre\.cloud\.huawei\.com\/api\//);
+});
+
+test('an older callback can retry the token site after rejection, but not after an outage', async () => {
+  for (const status of [401, 503]) {
+    const calls = [];
+    const http = { RequestMethod: { GET: 'GET', POST: 'POST' },
+      createHttp: () => ({
+        request: async uri => {
+          calls.push(uri);
+          if (calls.length === 1) return { responseCode: status, result: '' };
+          if (uri.includes('/temptoken/check')) return { responseCode: 200, result: 'header.payload.signature' };
+          return { responseCode: 200, result: JSON.stringify({ userInfo: { accessToken: 'token', userId: 'user' } }) };
+        }, destroy: () => {}
+      }) };
+    const promise = load('DevEcoLogin', http).authorizeCallback('tempToken=receipt5', 'CN');
+    if (status === 401) {
+      assert.equal((await promise).site, 'SG');
+      assert.match(calls[1], /^https:\/\/sg\.devecostudio\.huawei\.com\/.*site=SG/);
+    } else {
+      await assert.rejects(promise, /暂不可用/);
+      assert.equal(calls.length, 1);
+    }
+  }
 });
 
 test('AGC certificate creation keeps its JSON body', async () => {

@@ -28,6 +28,7 @@ const JOB_SCHEMA = `CREATE TABLE IF NOT EXISTS install_jobs (
   expected_sha256 TEXT NOT NULL,
   catalog_bundle_name TEXT NOT NULL DEFAULT '',
   catalog_version_code INTEGER NOT NULL DEFAULT 0,
+  catalog_display_name TEXT NOT NULL DEFAULT '',
   release_tag TEXT NOT NULL DEFAULT '',
   release_name TEXT NOT NULL DEFAULT '',
   catalog_sha256 TEXT NOT NULL DEFAULT '',
@@ -198,7 +199,7 @@ export class JobStore implements DownloadJournal {
     }
     for (const name of ['release_tag', 'release_name', 'catalog_sha256', 'custom_mirror_prefix',
       'edited_source_sha256', 'edited_source_asset_name', 'package_source_sha256',
-      'catalog_source_url', 'device_compatibility_fingerprint', 'install_target', 'install_batch',
+      'catalog_source_url', 'catalog_display_name', 'device_compatibility_fingerprint', 'install_target', 'install_batch',
       'skip_reason', 'conflict_kind', 'conflict_state', 'approved_install_proof']) {
       if (!availableColumns.has(name)) {
         await db.executeSql('ALTER TABLE install_jobs ADD COLUMN ' + name + " TEXT NOT NULL DEFAULT ''");
@@ -332,8 +333,9 @@ export class JobStore implements DownloadJournal {
        release_tag, release_name, catalog_sha256, replacement_install_baseline, custom_mirror_prefix,
        edited_source_sha256, edited_source_asset_name, package_source_sha256,
        catalog_source_url, device_compatibility_fingerprint, install_target, install_batch,
-       force_install, skip_reason, conflict_kind, conflict_state, approved_install_proof, approved_installed_update_time)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       force_install, skip_reason, conflict_kind, conflict_state, approved_install_proof, approved_installed_update_time,
+       catalog_display_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [job.id, job.appId, job.assetName, job.sourceUrl, JSON.stringify(job.mirrorUrls),
        job.expectedSha256, job.catalogBundleName, job.catalogVersionCode,
        job.bundleName, job.versionCode, job.versionName, JSON.stringify(job.stageHistory),
@@ -351,7 +353,7 @@ export class JobStore implements DownloadJournal {
        job.customMirrorPrefix ?? '', job.editedSourceSha256 ?? '', job.editedSourceAssetName ?? '',
        job.packageSourceSha256 ?? '', job.catalogSourceUrl ?? '', job.deviceCompatibilityFingerprint ?? '', job.installTarget ?? '', job.batchId ?? '',
        job.forceInstall ? 1 : 0, job.skipReason ?? '', job.conflictKind ?? '', job.conflictState ?? '',
-       job.approvedInstallProof ?? '', job.approvedInstalledUpdateTime ?? 0]
+       job.approvedInstallProof ?? '', job.approvedInstalledUpdateTime ?? 0, job.catalogDisplayName ?? '']
     );
     if (JobCancellation.isCancelled(job.id)) {
       await this.rememberCancelledFiles(job);
@@ -435,7 +437,8 @@ export class JobStore implements DownloadJournal {
     expectedSha256: string, mirrorUrls: string[] = [],
     versionName: string = '', catalogBundleName: string = '',
     catalogVersionCode: number = 0, releaseTag: string = '', releaseName: string = '',
-    reinstallRequired: boolean = false, approvedDeviceCompatibility: string = '', pinnedTarget?: string): Promise<InstallJob> {
+    reinstallRequired: boolean = false, approvedDeviceCompatibility: string = '', pinnedTarget?: string,
+    catalogDisplayName: string = ''): Promise<InstallJob> {
     if (appId <= 0 || assetName.length === 0 || sourceUrl.length === 0 ||
       !/^https:\/\//.test(sourceUrl)) {
       throw new Error(I18n.t('安装任务缺少 HTTPS 下载地址'));
@@ -475,6 +478,7 @@ export class JobStore implements DownloadJournal {
         existing.reinstallRequired = true;
         await this.save(existing);
       }
+      if (existing.stage === InstallStage.INSTALLED) existing.catalogDisplayName = catalogDisplayName;
       return existing;
     }
     const job = InstallJob.create(id, appId, assetName,
@@ -484,6 +488,7 @@ export class JobStore implements DownloadJournal {
     job.versionName = versionName;
     job.catalogBundleName = catalogBundleName;
     job.catalogVersionCode = catalogVersionCode;
+    job.catalogDisplayName = catalogDisplayName;
     job.releaseTag = releaseTag; job.releaseName = releaseName; job.catalogSha256 = catalogSha;
     job.catalogSourceUrl = sourceUrl;
     job.deviceCompatibilityFingerprint = approvedDeviceCompatibility;
@@ -529,6 +534,7 @@ export class JobStore implements DownloadJournal {
       job.renewalRequestedAt = requestedAt; job.reinstallRequired = true;
       if (!accountReady) { job.stage = InstallStage.WAITING_ACCOUNT; job.lastError = I18n.t('请先登录开发者账号'); }
       if (reusable) {
+        job.catalogDisplayName = reusable.catalogDisplayName;
         job.profilePath = reusable.profilePath; job.signingCertId = reusable.signingCertId;
         job.renewalPreviousExpiry = reusable.renewalExpiresAt || reusable.renewalPreviousExpiry || 0;
         job.moduleName = reusable.moduleName; job.mainAbility = reusable.mainAbility;
@@ -939,7 +945,7 @@ export class JobStore implements DownloadJournal {
         'transfer_task_id', 'staged_ticket', 'attempt', 'last_error', 'updated_at',
         'release_tag', 'release_name', 'catalog_sha256', 'replacement_install_baseline', 'custom_mirror_prefix',
         'edited_source_sha256', 'edited_source_asset_name', 'package_source_sha256',
-        'catalog_source_url', 'device_compatibility_fingerprint', 'install_target', 'install_batch',
+        'catalog_source_url', 'catalog_display_name', 'device_compatibility_fingerprint', 'install_target', 'install_batch',
         'force_install', 'skip_reason', 'conflict_kind', 'conflict_state', 'approved_install_proof', 'approved_installed_update_time'
       ]) columns.set(name, result.getColumnIndex(name));
       let sliceStartedAt = Date.now();
@@ -966,6 +972,8 @@ export class JobStore implements DownloadJournal {
         job.expectedSha256 = result.getString(columns.get('expected_sha256')!);
         job.catalogBundleName = result.getString(columns.get('catalog_bundle_name')!);
         job.catalogVersionCode = result.getLong(columns.get('catalog_version_code')!);
+        const displayNameColumn = columns.get('catalog_display_name')!;
+        job.catalogDisplayName = displayNameColumn >= 0 ? result.getString(displayNameColumn) : '';
         job.releaseTag = result.getString(columns.get('release_tag')!);
         job.releaseName = result.getString(columns.get('release_name')!);
         job.catalogSha256 = result.getString(columns.get('catalog_sha256')!);

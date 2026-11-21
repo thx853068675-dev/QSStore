@@ -1,3 +1,7 @@
 # Versions used by the local 0.4.49 regression gate.
 Pillow==11.3.0
 cryptography==50.0.1
+
+# Local country lookup for request-scoped distribution.
+maxminddb==3.1.0
+mistune==3.4.0

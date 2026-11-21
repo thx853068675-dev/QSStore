@@ -4,6 +4,8 @@ import { util } from '@kit.ArkTS';
 import { DeveloperAccount } from './DeveloperAccount';
 import { PrivacyConsent } from './PrivacyConsent';
 import { I18n } from './I18n';
+import { HuaweiLoginPreferences } from './HuaweiLoginPreferences';
+import { HuaweiSite, huaweiAuthBase, loginParameter, parseHuaweiSite } from './HuaweiSite';
 
 /**
  * 账号服务的临时故障标记。
@@ -27,7 +29,7 @@ export function authErrorText(error: Object): string {
   return String(error).split(TRANSIENT).join('').split(AUTH_FAILED).join('');
 }
 
-const AUTH_API = 'https://cn.devecostudio.huawei.com/authrouter/auth/api';
+const AUTH_API_PATH = '/authrouter/auth/api';
 const PROFILE_API = 'https://account.cloud.huawei.com/rest.php?nsp_svc=GOpen.User.getInfo';
 const AUTH_PAGE = 'https://cn.devecostudio.huawei.com/console/DevEcoIDE/apply' +
   '?port=8888&appid=1007&code=20698961dd4f420c8b44f49010c6f0cc';
@@ -99,12 +101,13 @@ export class DevEcoLogin {
     }
   }
 
-  private static fromUserInfo(info: Record<string, Object>, jwt: string): DeveloperAccount {
+  private static fromUserInfo(info: Record<string, Object>, jwt: string, site: HuaweiSite): DeveloperAccount {
     const account = new DeveloperAccount();
     account.accessToken = String(info['accessToken'] ?? '');
     account.jwtToken = jwt;
     account.userId = String(info['userId'] ?? '');
     account.teamId = String(info['teamId'] ?? account.userId);
+    account.site = site;
     account.displayName = String(info['nickName'] ?? '');
     if (typeof info['realName'] === 'boolean') account.realNameVerified = info['realName'] as boolean;
     if (account.accessToken.length === 0 || account.userId.length === 0) {
@@ -113,12 +116,12 @@ export class DevEcoLogin {
     return account;
   }
 
-  private static async userInfo(jwt: string, refresh: boolean): Promise<DeveloperAccount> {
-    const data = await DevEcoLogin.requestJson(AUTH_API + '/jwToken/check',
+  private static async userInfo(jwt: string, refresh: boolean, site: HuaweiSite = 'CN'): Promise<DeveloperAccount> {
+    const data = await DevEcoLogin.requestJson(huaweiAuthBase(site) + AUTH_API_PATH + '/jwToken/check',
       http.RequestMethod.GET, { 'jwtToken': jwt, 'refresh': refresh ? 'true' : 'false' });
     const info = data['userInfo'] as Record<string, Object> | undefined;
     if (!info) throw new Error(I18n.t('华为登录态已失效，请重新登录'));
-    const account = DevEcoLogin.fromUserInfo(info, jwt);
+    const account = DevEcoLogin.fromUserInfo(info, jwt, site);
     await DevEcoLogin.fillPublicProfile(account);
     return account;
   }
@@ -142,7 +145,7 @@ export class DevEcoLogin {
   }
 
   static async refresh(saved: DeveloperAccount): Promise<DeveloperAccount> {
-    const refreshed = await DevEcoLogin.userInfo(saved.jwtToken, true);
+    const refreshed = await DevEcoLogin.userInfo(saved.jwtToken, true, saved.site);
     if (refreshed.userId !== saved.userId) throw new Error(I18n.t('账号身份发生变化，请重新登录'));
     if (refreshed.avatarUrl.length === 0) refreshed.avatarUrl = saved.avatarUrl;
     if (refreshed.realNameVerified === undefined) refreshed.realNameVerified = saved.realNameVerified;
@@ -152,17 +155,45 @@ export class DevEcoLogin {
     return refreshed;
   }
 
-  private static async exchange(tempToken: string): Promise<DeveloperAccount> {
-    const url = AUTH_API + '/temptoken/check?site=CN&tempToken=' +
-      encodeURIComponent(tempToken) + '&appid=1007&version=0.0.0';
+  private static async exchange(tempToken: string, site: HuaweiSite): Promise<string> {
+    const url = huaweiAuthBase(site) + AUTH_API_PATH + '/temptoken/check?site=' + site + '&tempToken=' +
+      encodeURIComponent(tempToken) + '&appid=1007&version=' + (site === 'CN' ? '0.0.0' : '4.2.0');
     const data = await DevEcoLogin.requestJson(url, http.RequestMethod.GET, {}, '', true);
     const ret = data['ret'] as Record<string, Object> | undefined;
-    const jwt = String(ret?.['msg'] ?? '');
-    if (jwt.length === 0) throw new Error(I18n.t('华为授权回执无效'));
-    return DevEcoLogin.userInfo(jwt, false);
+    const jwt = String(ret?.['msg'] ?? '').trim();
+    // The exchange can return a plain-text error as well as a plain-text JWT.
+    if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(jwt)) {
+      throw new Error(AUTH_FAILED + I18n.t('华为授权回执无效'));
+    }
+    return jwt;
   }
 
-  static async login(context: common.UIAbilityContext): Promise<DeveloperAccount> {
+  private static async authorizeCallback(form: string, preferred: HuaweiSite): Promise<DeveloperAccount> {
+    const callbackToken = loginParameter(form, 'tempToken');
+    const separator = callbackToken.indexOf('&');
+    const embedded = separator >= 0 ? callbackToken.substring(separator + 1) : '';
+    const token = (separator >= 0 ? callbackToken.substring(0, separator) : callbackToken).trim();
+    if (!token) throw new Error(I18n.t('无效的登录回调'));
+    const reported = parseHuaweiSite(loginParameter(form, 'siteId')) ?? parseHuaweiSite(loginParameter(form, 'site')) ??
+      parseHuaweiSite(loginParameter(embedded, 'siteId')) ?? parseHuaweiSite(loginParameter(embedded, 'site'));
+    const inferred = parseHuaweiSite(token.charAt(token.length - 1));
+    let site = reported ?? preferred;
+    let jwt: string;
+    try {
+      jwt = await DevEcoLogin.exchange(token, site);
+    } catch (error) {
+      // Older callbacks may carry the site only in the token suffix. Try it
+      // once after a rejected exchange, never after a network error.
+      if (reported || !inferred || inferred === site || !String(error).includes(AUTH_FAILED)) throw error as Error;
+      site = inferred;
+      jwt = await DevEcoLogin.exchange(token, site);
+    }
+    return DevEcoLogin.userInfo(jwt, false, site);
+  }
+
+  static async login(context: common.UIAbilityContext, savedSite?: HuaweiSite): Promise<DeveloperAccount> {
+    PrivacyConsent.assertBusinessAllowed();
+    const site = savedSite ?? await HuaweiLoginPreferences.effective(context);
     PrivacyConsent.assertBusinessAllowed();
     const server = socket.constructTCPSocketServerInstance();
     let port = 0;
@@ -176,6 +207,7 @@ export class DevEcoLogin {
     if (port === 0) throw new Error(I18n.t('无法启动本机登录回调，请稍后重试'));
 
     let done = false;
+    let exchangePending = false;
     let timer = 0;
     let resolveLogin: (account: DeveloperAccount) => void = () => {};
     let rejectLogin: (error: Error) => void = () => {};
@@ -226,22 +258,29 @@ export class DevEcoLogin {
           }
         const target = first.split(' ')[1] ?? '';
         const query = target.includes('?') ? target.substring(target.indexOf('?') + 1) : '';
-        const form = body.length > 0 ? body : query;
+        const form = body && query ? body + '&' + query : body || query;
         const tokenMatch = /(?:^|&)tempToken=([^&]+)/.exec(form);
         if (/(?:^|&)quit=/.test(form)) {
           messageText = '已取消登录';
           await finish(undefined, new Error('已取消登录'));
-        } else if (tokenMatch) {
-          const account = await DevEcoLogin.exchange(decodeURIComponent(tokenMatch[1]));
-          messageText = I18n.t('登录成功，请返回轻启·安装器');
-          resolveLogin(account);
-          done = true;
-          clearTimeout(timer);
+        } else if (tokenMatch && !done && !exchangePending) {
+          exchangePending = true;
+          const account = await DevEcoLogin.authorizeCallback(form, site);
+          if (!done) {
+            messageText = I18n.t('登录成功，请返回轻启·安装器');
+            resolveLogin(account);
+            done = true;
+            clearTimeout(timer);
+          }
         } else {
           messageText = I18n.t('无效的登录回调');
         }
         } catch (error) {
-          await finish(undefined, new Error(String(error)));
+          if (!done) {
+            done = true;
+            clearTimeout(timer);
+            rejectLogin(new Error(authErrorText(error as Error)));
+          }
         }
         const html = I18n.t('<!doctype html><meta charset="utf-8"><title>华为账号登录</title>') +
           '<p style="font:18px sans-serif;padding:32px">' + messageText + '</p>';
@@ -263,7 +302,8 @@ export class DevEcoLogin {
       await context.startAbility({
         action: 'ohos.want.action.viewData',
         entities: ['entity.system.browsable'],
-        uri: AUTH_PAGE.replace('port=8888', 'port=' + port)
+        uri: site === 'CN' ? AUTH_PAGE.replace('port=8888', 'port=' + port) :
+          huaweiAuthBase(site) + '/console/DevEcoIDE/apply?port=' + port
       });
     } catch (error) {
       await finish(undefined, new Error(I18n.t('无法打开华为授权页：') + String(error)));

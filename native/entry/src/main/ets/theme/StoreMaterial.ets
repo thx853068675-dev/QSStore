@@ -37,12 +37,12 @@ export class StoreMaterial {
       materialColor: '#00000000', colorInvert: true, applyShadow: shadow, interactive: true,
       lightEffect: { color: MaterialPreferences.lightColor(mode, lightColor) } });
   }
-  /** Floating navigation and its adjacent action share identical native material options. */
+  /** Dock controls cast their shadows outside the clipped native material. */
   static dock(mode: string, dark: boolean): uiMaterial.ImmersiveMaterial {
     const key = mode + ':' + dark;
     const existing = StoreMaterial.dockMaterials.get(key);
     if (existing) return existing;
-    const material = StoreMaterial.glass(mode, dark, true);
+    const material = StoreMaterial.glass(mode, dark, false);
     StoreMaterial.dockMaterials.set(key, material);
     return material;
   }

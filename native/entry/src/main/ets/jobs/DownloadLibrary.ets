@@ -414,6 +414,35 @@ export class DownloadLibrary {
     });
   }
 
+  /** Record a package grabbed from AppGallery in the normal public download directory. */
+  static async keepGrabbed(context: common.UIAbilityContext, source: string, name: string,
+    bundleName: string, versionName: string): Promise<string> {
+    let saved = '';
+    await DownloadLibrary.enqueue(context, async (): Promise<void> => {
+      const location = await DownloadLibrary.location(context);
+      const directory = location.path;
+      if (!source.startsWith(directory + '/')) throw new Error(I18n.t('下载目录无效'));
+      const stat = await fileIo.lstat(source);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0) {
+        throw new Error(I18n.t('提取文件无效'));
+      }
+      const digest = (await hash.hash(source, 'sha256')).toLowerCase();
+      const target = directory + '/' + DownloadLibrary.archiveName(name, digest);
+      if (source !== target) {
+        await DownloadLibrary.copyVerified(source, target, digest);
+        try { fileIo.unlinkSync(source); } catch (_) {}
+      }
+      const row = new DownloadedPackage();
+      row.id = digest; row.sha256 = digest; row.path = target; row.name = name;
+      row.title = InstalledAppRegistry.displayName(bundleName) || name;
+      row.version = versionName; row.bytes = stat.size; row.createdAt = Date.now();
+      row.bundleName = bundleName;
+      DownloadLibrary.writeRecord(DownloadLibrary.receiptDirectory(context), row);
+      saved = target;
+    });
+    return saved;
+  }
+
   /** Clear only this successful online installation's original, leaving busy readers retryable. */
   static async discardCompleted(context: common.UIAbilityContext, job: InstallJob,
     allowed: () => boolean = (): boolean => true, preserveBefore: number = 0): Promise<boolean> {

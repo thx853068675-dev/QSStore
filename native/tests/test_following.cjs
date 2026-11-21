@@ -100,13 +100,43 @@ test('account changed while channel preferences load cannot submit the new accou
  assert.equal(calls.length,0);assert.equal(R.has(2),true);
 });
 
-test('first follow closes only the mounted tab, and an animation error never prevents saving',async()=>{
+test('management follow actions close their swipe row, and an animation error never prevents saving',async()=>{
  const path=require('path'),vm=require('vm'),ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
  const source=fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/pages/Index.ets'),'utf8');
  const methods=['closeFollowSwipe','toggleFollow'].map(name=>{const start=source.indexOf(name==='toggleFollow'?'  private async '+name+'(':'  private '+name+'(');return source.slice(start,source.indexOf('\n  }',start)+4);}).join('\n');
- const calls=[],box={Index:{TAB_MANAGE:2},FollowingRegistry:{has:()=>false,set:async()=>calls.push('save')},ForegroundIdle:{interaction:()=>{}},getContext:()=>({}),promptAction:{showToast:()=>{}}};
+ const calls=[],box={Index:{TAB_MANAGE:2},I18n:{t:x=>x},errorText:e=>e.message,FollowingRegistry:{load:async()=>{},has:()=>false,set:async()=>calls.push('save')},ForegroundIdle:{interaction:()=>{}},getContext:()=>({}),promptAction:{showToast:()=>{}}};
  vm.runInNewContext(ts.transpileModule('class Page{'+methods+'};globalThis.Page=Page;',{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
- const page=Object.assign(new box.Page(),{currentTab:0,discoverScroller:{closeAllSwipeActions:()=>calls.push('discover-close')},managementScroller:{closeAllSwipeActions:()=>{throw Error('unbound');}},syncFollowing:()=>calls.push('network')});
- await page.toggleFollow(app(1));assert.deepEqual(calls,['discover-close','save','network']);
- calls.length=0;page.currentTab=2;await page.toggleFollow(app(1));assert.deepEqual(calls,['save','network']);
+ const page=Object.assign(new box.Page(),{currentTab:2,managementScroller:{closeAllSwipeActions:()=>calls.push('manage-close')},syncFollowing:()=>calls.push('network')});
+ await page.toggleFollow(app(1));assert.deepEqual(calls,['manage-close','save','network']);
+ calls.length=0;page.managementScroller.closeAllSwipeActions=()=>{throw Error('unbound');};
+ await page.toggleFollow(app(1));assert.deepEqual(calls,['save','network']);
+});
+
+
+test('long press waits for account restore before deciding follow or unfollow',async()=>{
+ const path=require('path'),vm=require('vm'),ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+ const source=fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/pages/Index.ets'),'utf8');
+ const start=source.indexOf('  private async toggleFollow('),end=source.indexOf('\n  }',start)+4;
+ let restored=false,release;const saved=[],toasts=[];
+ const box={FollowingRegistry:{load:()=>new Promise(done=>release=()=>{restored=true;done();}),has:()=>restored,
+  set:async(_context,app,enabled)=>saved.push([app.id,enabled])},ForegroundIdle:{interaction:()=>{}},getContext:()=>({}),
+  I18n:{t:x=>x},errorText:e=>e.message,promptAction:{showToast:x=>toasts.push(x.message)}};
+ vm.runInNewContext(ts.transpileModule('class Page{'+source.slice(start,end)+'};globalThis.Page=Page;',{
+  compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
+ const page=Object.assign(new box.Page(),{closeFollowSwipe(){},syncFollowing(){}});
+ const pending=page.toggleFollow(app(1));assert.equal(saved.length,0);release();await pending;
+ assert.deepEqual(saved,[[1,false]]);assert.deepEqual(toasts,['已取消关注']);
+});
+
+test('follow marks refresh when account contents change even with an unchanged follow count',()=>{
+ const path=require('path'),vm=require('vm'),ts=require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
+ const source=fs.readFileSync(path.join(__dirname,'../entry/src/main/ets/pages/Index.ets'),'utf8');
+ const start=source.indexOf('  private onFollowingChanged('),end=source.indexOf('\n  }',start)+4;
+ let rows=[{app:{id:1}}];const box={FollowingRegistry:{entries:()=>rows}};
+ vm.runInNewContext(ts.transpileModule('class Page{'+source.slice(start,end)+'};globalThis.Page=Page;',{
+  compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
+ const page=Object.assign(new box.Page(),{syncManagementRows(){},syncManagementIcons(){}});
+ page.onFollowingChanged();assert.deepEqual(Array.from(page.followedAppIds),[1]);
+ rows=[{app:{id:2}}];page.onFollowingChanged();assert.deepEqual(Array.from(page.followedAppIds),[2]);
+ rows=[];page.onFollowingChanged();assert.deepEqual(Array.from(page.followedAppIds),[]);
 });

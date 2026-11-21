@@ -1,4 +1,5 @@
 import { NotificationOpen } from '../jobs/NotificationOpen';
+import { GitHubAssociationReturn } from '../data/GitHubAssociationReturn';
 import { DeviceOrbHost } from '../components/DeviceOrbHost';
 import { DeviceOrbGestureGuard } from '../jobs/DeviceOrbGestureGuard';
 import { InstallCoordinator } from '../jobs/InstallCoordinator';
@@ -12,6 +13,8 @@ import { deviceInfo } from '@kit.BasicServicesKit';
 import { ExternalInstallOpen } from '../jobs/ExternalInstallOpen';
 import { ForegroundIdle } from '../jobs/ForegroundIdle';
 import { AppearancePreferences } from '../data/AppearancePreferences';
+import { AppBackgroundPreferences } from '../data/AppBackgroundPreferences';
+import { HomeNavigationPreferences } from '../data/HomeNavigationPreferences';
 import { AppLanguagePreferences } from '../data/AppLanguagePreferences';
 import { MaterialPreferences } from '../data/MaterialPreferences';
 import { ManagementPreferences } from '../data/ManagementPreferences';
@@ -155,6 +158,7 @@ export default class EntryAbility extends UIAbility {
     PrivacyConsent.configure(this.context);
     this.syncBusinessServices();
     AppStorage.setOrCreate<string>('qingqiFilesDir', this.context.filesDir);
+    if (GitHubAssociationReturn.receive(want)) return;
     NotificationOpen.receive(want);
     ExternalInstallOpen.receive(want);
   }
@@ -183,10 +187,17 @@ export default class EntryAbility extends UIAbility {
       }
       if(!DeviceOrbHost.attached())DeviceOrbHost.install(this.mainWindow.getUIContext(),this.context);
       ExternalInstallOpen.openPending(); NotificationOpen.openPending();
+      GitHubAssociationReturn.openPending(this.context, this.mainWindow.getUIContext());
     }
   }
 
   onNewWant(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+    if (GitHubAssociationReturn.receive(want)) {
+      if (this.contentReady && this.mainWindow) {
+        GitHubAssociationReturn.openPending(this.context, this.mainWindow.getUIContext());
+      }
+      return;
+    }
     if(NotificationOpen.receive(want)){if(this.contentReady)NotificationOpen.openPending();return;}
     if (ExternalInstallOpen.receive(want) && this.contentReady) ExternalInstallOpen.openPending();
   }
@@ -223,7 +234,8 @@ export default class EntryAbility extends UIAbility {
       })
     ]).then(() => Promise.all([
       AppearancePreferences.load(this.context), ManagementPreferences.load(this.context), DiscoverSortPreferences.load(this.context),
-      MaterialPreferences.load(this.context), this.loadLanguage()
+      MaterialPreferences.load(this.context), this.loadLanguage(), AppBackgroundPreferences.load(this.context),
+      HomeNavigationPreferences.load(this.context)
     ])).then(() => this.applyAppearance()).then(() => {
       if (this.mainWindow !== mainWindow) return;
       this.syncStatusBarInset();

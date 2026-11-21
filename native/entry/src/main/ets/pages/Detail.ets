@@ -1,3 +1,5 @@
+import { AppBackground } from '../data/AppBackgroundPreferences';
+import { AppThemeBackground } from '../components/AppThemeBackground';
 import { DeviceInstallGroup } from '../jobs/DeviceInstallGroup';
 import { DeviceInstallProgress } from '../components/DeviceInstallProgress';
 import { MultiDeviceInstall } from '../jobs/MultiDeviceInstall';
@@ -21,9 +23,8 @@ import { isPending } from '../jobs/RecoveryPlanner';
 import { promptAction, router, LengthMetrics } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
-import { HdsTabs } from '@kit.UIDesignKit';
-import { MaterialPreferences } from '../data/MaterialPreferences';
 import { CatalogApp } from '../data/CatalogApp';
+import { FollowingRegistry } from '../data/FollowingRegistry';
 import { RepositoryStats } from '../components/RepositoryStats';
 import { CatalogAppTitle } from '../components/CatalogAppTitle';
 import { StoreClient, ReviewPage } from '../data/StoreClient';
@@ -38,10 +39,12 @@ import { errorText } from '../jobs/ErrorText';
 import { LocalBundles } from '../jobs/LocalBundles';
 import { InstalledAppRegistry } from '../jobs/InstalledAppRegistry';
 import { InstallJob, InstallStage } from '../jobs/InstallJob';
-import { AppReview } from '../data/StoreActions';
+import { AppReview, reviewMetadata } from '../data/StoreActions';
+import { ReviewAuthorName } from '../components/ReviewAuthorName';
+import { ReviewBodyText } from '../components/ReviewBodyText';
+import { ReviewThread } from '../components/ReviewThread';
 import { AccountSession, DeveloperAccount } from '../data/DeveloperAccount';
 import { Palette } from '../theme/Palette';
-import { StoreMaterial } from '../theme/StoreMaterial';
 import { StoreIconButton, StoreImmersiveIconButton, StoreLayout, StorePageHeader, StoreImmersiveAction, StoreTopStyle } from '../theme/StoreDesign';
 import { StoreSelect } from '../theme/StoreSelect';
 import { ColorTint } from '../theme/ColorTint';
@@ -53,7 +56,9 @@ import { InstallDeviceCompatibility } from '../jobs/InstallDeviceCompatibility';
 import { I18n } from '../data/I18n';
 import { CatalogIconExport } from '../jobs/CatalogIconExport';
 import { RepositoryReadmeCard } from '../components/RepositoryReadmeCard';
-import { StoreNavigationSurface } from '../theme/StoreDesign';
+import { ListingScreenshotGallery } from '../components/ListingPresentationEditor';
+import { ClaimApplicationDialog } from '../components/ClaimApplicationDialog';
+import { SidebarInstallPublisher, SidebarInstallUpdate, SidebarInstallView } from '../components/SidebarInstallDock';
 import { ScaledArticle } from '../components/ScaledArticle';
 
 export class CatalogDetailController {
@@ -64,20 +69,20 @@ export class CatalogDetailController {
 
 @Component
 export struct Detail {
+  @StorageProp('appBackground') private themeState: AppBackground = new AppBackground();
   controller: CatalogDetailController = new CatalogDetailController();
   @Prop embedded: boolean = false;
   @Prop embeddedAppId: number = 0;
   @Prop embeddedTopInset: number = 0;
-  @Prop embeddedActionRight: number = 8;
-  @Prop @Watch('syncPalette') embeddedStarfield: boolean = false;
   @Prop @Watch('syncEmbeddedVisibility') embeddedVisible: boolean = true;
-  onEmbeddedBack: () => void = () => {};
+  onEmbeddedDockChange: SidebarInstallUpdate = () => {};
+  onEmbeddedScroll: (delta: number) => void = () => {};
+  private embeddedScrollFromUser: boolean = false;
   onEmbeddedReady: () => void = () => {};
   @State private showMultiDevice:boolean=false;
   @StorageProp('installTargetCount') private installTargetCount:number=1;
   @StorageProp('installTargetName') private installTargetName:string='';
   @StorageProp('darkMode') @Watch('syncPalette') darkMode: boolean = false;
-  @StorageProp('materialMode') private materialMode: string = 'adaptive';
   @StorageProp('statusBarInset') statusBarInset: number = 0;
   @StorageProp('windowWidth') private windowWidth: number = 0;
   @StorageProp('windowHeight') private windowHeight: number = 0;
@@ -88,6 +93,9 @@ export struct Detail {
   private detailScroller: Scroller = new Scroller();
   @State private detailTopBlurOpacity: number = 0;
   @State private app: CatalogApp = new CatalogApp();
+  @State private followed: boolean = false;
+  @State private followSaving: boolean = false;
+  private followSubscription: number = -1;
   @State private appIcon: image.PixelMap | null = null;
   @State private iconSaving: boolean = false;
   /** 头部卡片底色：由图标主色调推导，取不到时用主题默认值。 */
@@ -119,6 +127,12 @@ export struct Detail {
    */
   private lastNotice: string = '';
   @State private reviews: AppReview[] = [];
+  @State private reviewRepliesSupported: boolean = false;
+  @State private reviewCanModerate: boolean = false;
+  @State private showClaimAction: boolean = false;
+  private claimDialog?: CustomDialogController;
+  private returnToDeveloper: boolean = false;
+  @State private activeReviewId: number = 0;
   /** 评论与版本都按服务端分页取；``*Page`` 是已加载到的页码，``*Total`` 是服务端总数。 */
   @State private reviewPage: number = 0;
   @State private reviewTotal: number = 0;
@@ -176,7 +190,8 @@ export struct Detail {
   /** 默认 0 = 最新版本；版本不再平铺，改成下拉选择。 */
   @State private selectedReleaseIndex: number = 0;
 
-  private colors(): Palette { return Palette.forMode(this.darkMode || (this.embedded && this.embeddedStarfield)); }
+  private colors(): Palette { return Palette.forMode(this.darkMode); }
+  private cardSurface(): string { return Palette.containerPaint(this.colors().surface, this.themeState.containerOpacity); }
 
   syncPalette(): void {
     // 主题一变，之前按旧主题算出的底色就不再合适，重新推导一次
@@ -188,9 +203,9 @@ export struct Detail {
       this.heroColor = '';
       return;
     }
-    const dark = this.darkMode || (this.embedded && this.embeddedStarfield);
+    const dark = this.darkMode;
     ColorTint.heroBackground(this.appIcon, dark).then((color: string) => {
-      if (!this.disposed && dark === (this.darkMode || (this.embedded && this.embeddedStarfield))) this.heroColor = color;
+      if (!this.disposed && dark === this.darkMode) this.heroColor = color;
     }).catch(() => {});
   }
 
@@ -207,6 +222,32 @@ export struct Detail {
     this.syncInstallTask();
     this.loadInstalledJobs();
     this.restoreUpdatePolicy();
+  }
+
+  private openClaimDialog(): void {
+    if (this.claimDialog || !this.showClaimAction || this.app.id <= 0) return;
+    const id = this.app.id;
+    this.claimDialog = new CustomDialogController({
+      builder: ClaimApplicationDialog({ appId: id, appName: this.appTitle(), darkMode: this.darkMode,
+        onClaimed: () => this.onClaimed(id) }),
+      alignment: DialogAlignment.Center, customStyle: true, autoCancel: true,
+      onDidDisappear: () => { this.claimDialog = undefined; }
+    });
+    this.claimDialog.open();
+  }
+
+  private onClaimed(id: number): void {
+    if (this.disposed || this.app.id !== id) return;
+    this.showClaimAction = false;
+    this.fetchReviewPage(Math.max(1, this.reviewPage));
+    new StoreClient(getContext(this) as common.UIAbilityContext).appDetail(id, true).then((app: CatalogApp) => {
+      if (!this.disposed && this.app.id === id) {
+        const updated = CatalogApp.copy(this.app);
+        updated.publisherName = app.publisherName;
+        this.app = updated;
+      }
+    }).catch(() => {});
+    this.notify(I18n.t('已认领'));
   }
 
   private async restoreUpdatePolicy(): Promise<void> {
@@ -238,6 +279,9 @@ export struct Detail {
     if (!this.embedded) this.observeReconnect();
     const params = router.getParams() as Record<string, number>;
     this.detailAppId = this.embedded ? this.embeddedAppId : Number(params['id'] ?? 0);
+    this.returnToDeveloper = !this.embedded && params['returnToDeveloper'] === 1;
+    this.followSubscription = FollowingRegistry.subscribe(() => this.syncFollowState());
+    this.syncFollowState();
     this.observeInstallTasks();
     this.syncPalette();
     this.loadApp();
@@ -254,6 +298,8 @@ export struct Detail {
       this.controller.back = () => false;
     }
     this.disposed = true;
+    this.claimDialog?.close();
+    FollowingRegistry.unsubscribe(this.followSubscription);
     this.headerVisible = false;
     if (this.appIcon) this.appIcon.release().catch(() => {});
     if (this.backTimer !== -1) clearTimeout(this.backTimer);
@@ -298,7 +344,11 @@ export struct Detail {
     this.headerVisible = false;
     // 原生材质浮层先随页面收起，避免一次手势连续触发多个返回。
     StorePageMotion.prepare();
-    this.backTimer = setTimeout(() => { if (!this.disposed) router.back({ url: 'pages/Index' }); }, 32);
+    this.backTimer = setTimeout(() => {
+      if (this.disposed) return;
+      if (this.returnToDeveloper) router.back();
+      else router.back({ url: 'pages/Index' });
+    }, 32);
   }
 
   private observeReconnect(): void {
@@ -881,11 +931,23 @@ export struct Detail {
     try {
       const context = getContext(this) as common.UIAbilityContext;
       const account = await AccountSession.load(context);
-      const result = await new StoreClient(context).listReviews(this.app.id, page, Detail.REVIEWS_PER_PAGE, account);
+      const client = new StoreClient(context);
+      const result = await client.listReviews(this.app.id, page, Detail.REVIEWS_PER_PAGE, account);
       if (this.disposed) return;
       this.account = account ?? new DeveloperAccount(); this.signedIn = !!account;
       this.reviewOwnerScope = account ? JSON.stringify([account.userId, account.teamId]) : '';
       this.applyReviewPage(result);
+      if (result.claimedByMe !== undefined || !account) {
+        this.showClaimAction = result.claimedByMe !== true;
+      } else if (this.repoHost() === 'github.com') {
+        const id = this.app.id;
+        const scope = this.reviewOwnerScope;
+        client.repositoryClaim(id, account).then(claim => {
+          if (!this.disposed && this.app.id === id && this.reviewOwnerScope === scope) {
+            this.showClaimAction = claim.status !== 'mine';
+          }
+        }).catch(() => {});
+      }
     } catch (error) {
       if (!this.disposed) this.reviewMessage = errorText(error);
     } finally {
@@ -894,6 +956,9 @@ export struct Detail {
   }
 
   private applyReviewPage(result: ReviewPage): void {
+    this.activeReviewId = 0;
+    this.reviewRepliesSupported = result.repliesSupported === true;
+    this.reviewCanModerate = result.canModerate === true;
     this.reviews = result.items; this.reviewPage = result.page; this.reviewTotal = result.total;
     const app = CatalogApp.copy(this.app);
     app.ratingCount = result.ratingCount; app.ratingAverage = result.ratingAverage;
@@ -908,7 +973,8 @@ export struct Detail {
     let confirmed = false;
     try {
       const result = await promptAction.showDialog({ title: I18n.t('删除这条评论？'),
-        message: I18n.t('删除后无法恢复。') + (review.body ? '\n\n' + review.body.substring(0, 180) : ''),
+        message: I18n.t(review.replyCount > 0 ? '评论及其回复将一并删除，无法恢复。' : '删除后无法恢复。') +
+          (review.body ? '\n\n' + review.body.substring(0, 180) : ''),
         buttons: [{ text: I18n.t('取消'), color: Palette.forMode(this.darkMode).text },
           { text: I18n.t('删除'), color: Palette.forMode(this.darkMode).danger }] });
       confirmed = result.index === 1;
@@ -932,6 +998,42 @@ export struct Detail {
       if (!this.disposed) promptAction.showToast({ message: errorText(error) });
     } finally { if (!this.disposed) this.reviewDeleteBusy = false; }
     if (refresh && !this.disposed) await this.fetchReviewPage(this.reviewPage);
+  }
+
+  private async changeReviewVisibility(review: AppReview): Promise<void> {
+    if (!this.reviewCanModerate || this.reviewDeleteBusy || this.reviewPageBusy || this.reviewDeletePromptOpen ||
+      (this.embedded && !this.embeddedVisible)) return;
+    const appId = this.app.id;
+    const scope = this.reviewOwnerScope;
+    const hidden = !review.hidden;
+    this.reviewDeletePromptOpen = true;
+    let confirmed = false;
+    try {
+      const result = await promptAction.showDialog({
+        title: I18n.t(hidden ? '隐藏评论正文？' : '恢复评论正文？'),
+        message: I18n.t(hidden ? '评分和回复仍会公开显示。' : '评论正文将重新公开显示。'),
+        buttons: [{ text: I18n.t('取消'), color: this.colors().text },
+          { text: I18n.t(hidden ? '隐藏' : '恢复'), color: this.colors().accent }]
+      });
+      confirmed = result.index === 1;
+    } catch (_) { /* A dismissed confirmation leaves the original visibility. */ }
+    finally { this.reviewDeletePromptOpen = false; }
+    if (!confirmed || this.disposed || appId !== this.app.id) return;
+    this.reviewDeleteBusy = true;
+    let refresh = false;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const account = await AccountSession.load(context);
+      if (!account || !scope || JSON.stringify([account.userId, account.teamId]) !== scope) {
+        throw new Error(I18n.t('账号已变更，请刷新评论后重试'));
+      }
+      const result = await new StoreClient(context).moderateReview(appId, review.id, this.reviewPage, hidden, account);
+      if (!this.disposed && appId === this.app.id) this.applyReviewPage(result);
+    } catch (error) {
+      refresh = true;
+      if (!this.disposed) this.notify(errorText(error));
+    } finally { if (!this.disposed) this.reviewDeleteBusy = false; }
+    if (refresh && !this.disposed && appId === this.app.id) await this.fetchReviewPage(this.reviewPage);
   }
 
   private async loadReviews(): Promise<void> {
@@ -1214,7 +1316,7 @@ export struct Detail {
         asset.sha256, asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode,
         asset.releaseTag, asset.releaseName,
         Boolean(pinnedTarget) || (this.installedUnknown ? this.installedForApp()?.versionCode : this.installedVersion) === asset.versionCode,
-        InstallDeviceCompatibility.confirmedFingerprint(asset, pinnedTarget), pinnedTarget);
+        InstallDeviceCompatibility.confirmedFingerprint(asset, pinnedTarget), pinnedTarget, this.app.customDisplayName);
       if (job.stage === InstallStage.INSTALLED) {
         job.stage = InstallStage.QUEUED; job.stageHistory = []; job.lastError = '';
         job.reinstallRequired = Boolean(pinnedTarget) || (this.installedUnknown ? this.installedForApp()?.versionCode : this.installedVersion) === asset.versionCode;
@@ -1361,7 +1463,7 @@ export struct Detail {
   }
   private appTitle(): string {
     return AppDisplayName.forCatalogBundle(this.selectedAsset.bundleName || this.app.latestAsset?.bundleName || '',
-      this.app.displayName);
+      this.app.displayName, this.app.customDisplayName);
   }
 
   private packageSizeLabel(): string {
@@ -1414,7 +1516,6 @@ export struct Detail {
   @Builder
   private headerTools() {
     StoreImmersiveIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: I18n.t('检查更新'),
-      darkSurface: this.embedded && this.embeddedStarfield,
       controlId: 'detail-refresh', loading: this.refreshBusy || this.releaseLoading && this.loaded,
       active: !this.releaseMoreBusy && (!this.releaseLoading || this.error.length > 0),
       visible: this.headerVisible && !this.showReconnect && !this.showCertificatePrompt,
@@ -1432,14 +1533,7 @@ export struct Detail {
   @Builder
   private installActionFace() {
       Stack({ alignContent: Alignment.Center }) {
-        if (this.embedded && this.downloadBusy && this.installProgressDeterminate()) {
-          Progress({ value: this.downloadPercent, total: 100, type: ProgressType.Ring })
-            .width(this.sidebarActionSize() - 8).height(this.sidebarActionSize() - 8)
-            .color(StoreMaterial.foreground(this.darkMode, false, this.materialMode))
-            .backgroundColor(Palette.forMode(this.darkMode).border)
-            .style({ strokeWidth: 3, enableSmoothEffect: true })
-            .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
-        } else if (!this.embedded && this.downloadBusy && this.installProgressDeterminate()) {
+        if (this.downloadBusy && this.installProgressDeterminate()) {
           // 填充层不单独画胶囊圆角，统一由外层按钮的 18vp 圆角裁切。
           Progress({ value: this.downloadPercent, total: 100, type: ProgressType.Linear })
             .width('100%').height(52)
@@ -1448,7 +1542,7 @@ export struct Detail {
               enableScanEffect: false, enableSmoothEffect: true })
             .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
         }
-        if (!this.embedded && this.downloadBusy && !this.installProgressDeterminate()) {
+        if (this.downloadBusy && !this.installProgressDeterminate()) {
           Stack({ alignContent: Alignment.Start }) {
             Row().width('100%').height(2).backgroundColor('#10FFFFFF')
             Row().width(80).height(2)
@@ -1463,13 +1557,10 @@ export struct Detail {
             .position({ left: 16, bottom: 6 })
             .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
         }
-        Text(this.embedded ? this.sidebarInstallLabel() : this.installButtonLabel())
-          .fontSize(this.embedded ? 14 : 17).fontWeight(FontWeight.Medium)
-          .textAlign(TextAlign.Center).maxLines(this.embedded ? 2 : 1)
-          .fontColor(this.embedded ? StoreMaterial.foreground(this.darkMode, false, this.materialMode) : this.colors().onAccent)
+        Text(this.installButtonLabel()).fontSize(17).fontWeight(FontWeight.Medium)
+          .textAlign(TextAlign.Center).maxLines(1).fontColor(this.colors().onAccent)
       }
-      // The native tab builder receives its inner height after vertical insets.
-      .width('100%').height(this.embedded ? '100%' : 52)
+      .width('100%').height(52)
   }
 
   @Builder
@@ -1477,7 +1568,7 @@ export struct Detail {
     Button({ type: ButtonType.Normal }) {
       this.installActionFace();
     }
-    .width('100%').height(this.embedded ? this.sidebarActionSize() : 52).padding(0)
+    .width('100%').height(52).padding(0)
     .enabled(this.installButtonEnabled())
     .stateEffect(true).accessibilityText(this.installButtonLabel())
     .backgroundColor(immersive ? '#EB' + this.colors().accent.substring(1) : this.colors().accent)
@@ -1506,57 +1597,15 @@ export struct Detail {
     else this.downloadSelected();
   }
 
-  private sidebarActionSize(): number {
-    return StoreLayout.navigationHeight;
+  private showSidebarDock(): boolean {
+    return this.embedded && this.loaded && this.error.length === 0 && this.embeddedVisible &&
+      this.headerVisible && !this.showReconnect && !this.showCertificatePrompt && !this.showMultiDevice;
   }
 
-  @Builder
-  private sidebarDockTab() {
-    TabContent() {
-      if (!StoreMaterial.supported(this.materialMode)) {
-        StoreNavigationSurface({ darkMode: this.darkMode }).width('100%').height('100%')
-      }
-    }.tabBar(this.installActionFace)
-  }
-
-  @Builder
-  private sidebarInstallDock() {
-    // The dock is neither scaled with the article nor hosted in a separate popup window.
-    // Use the same native floating-bar renderer and global theme as the main navigation.
-    WithTheme({ colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT }) {
-      Stack() {
-        if (StoreMaterial.supported(this.materialMode)) {
-          Tabs({ barPosition: BarPosition.End }) {
-            this.sidebarDockTab();
-          }.width('100%').height('100%').borderRadius(this.sidebarActionSize() / 2).clip(true)
-            .barHeight(StoreLayout.navigationHeight)
-            .barMode(BarMode.Fixed).vertical(false).scrollable(false).animationDuration(0).barOverlap(true)
-            .barFloatingStyle({ maskColor: '#00000000', barSideMargin: 0, barBottomMargin: 0,
-              barWidth: { smallBarWidth: this.sidebarActionSize(), mediumBarWidth: this.sidebarActionSize(),
-                largeBarWidth: this.sidebarActionSize() },
-              systemMaterial: StoreMaterial.dock(this.materialMode, this.darkMode) })
-            .onTabBarClick(() => this.performInstallAction())
-        } else {
-          HdsTabs({ barPosition: BarPosition.End }) {
-            this.sidebarDockTab();
-          }.width('100%').height('100%').borderRadius(this.sidebarActionSize() / 2).clip(true)
-            .barHeight(StoreLayout.navigationHeight)
-            .barMode(BarMode.Fixed).vertical(false).scrollable(false).animationDuration(0).barOverlap(true)
-            .barFloatingStyle({ gradientMask: { maskColor: '#00000000' }, barSideMargin: 0,
-              barBottomMargin: 0, barOpacity: 1,
-              barWidth: { smallWidth: this.sidebarActionSize(), mediumWidth: this.sidebarActionSize(),
-                largeWidth: this.sidebarActionSize() },
-              systemMaterialEffect: { materialType: MaterialPreferences.type(this.materialMode),
-                materialLevel: MaterialPreferences.level(this.materialMode) } })
-            .onTabBarClick(() => this.performInstallAction())
-        }
-      }.width(this.sidebarActionSize()).height(this.sidebarActionSize()).borderRadius(this.sidebarActionSize() / 2)
-        // Clip native bar shadows to the disc; cast one explicit circular shadow outside it.
-        .shadow({ radius: 12, color: this.darkMode ? '#70000000' : '#38344769', offsetX: 0, offsetY: 4 })
-        .position({ right: this.embeddedActionRight, bottom: StoreLayout.navigationBottomMargin })
-        .enabled(this.installButtonEnabled()).accessibilityText(this.installButtonLabel())
-        .id('sidebar-install-action')
-    }
+  private sidebarInstallView(): SidebarInstallView {
+    return new SidebarInstallView(this.embeddedAppId, this.sidebarInstallLabel(), this.installButtonLabel(),
+      this.installButtonEnabled() && !this.downloadBusy,
+      this.downloadBusy && this.installProgressDeterminate() ? this.downloadPercent : -1);
   }
 
   private async saveIconOriginal(): Promise<void> {
@@ -1600,17 +1649,17 @@ export struct Detail {
         }.width('100%')
         this.skeletonLine('100%', 12)
         this.skeletonLine('65%', 12)
-      }.width('100%').padding(20).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+      }.width('100%').padding(20).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
       Column({ space: 12 }) {
         this.skeletonLine('35%', 14)
         this.skeletonLine('70%', 12)
-      }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+      }.width('100%').padding(16).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
       Column({ space: 12 }) {
         this.skeletonLine('30%', 16)
         this.skeletonLine('100%', 36)
         this.skeletonLine('85%', 12)
         this.skeletonLine('60%', 12)
-      }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+      }.width('100%').padding(16).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
     }.width('100%').constraintSize({ maxWidth: this.embedded ? '100%' : StoreLayout.frameMaxWidth(this.windowWidth) })
       .padding({ left: this.embedded ? StoreLayout.sidebarCardInset / StoreLayout.sidebarDetailScale : StoreLayout.inset(this.windowWidth),
         right: this.embedded ? StoreLayout.sidebarCardInset / StoreLayout.sidebarDetailScale : StoreLayout.inset(this.windowWidth),
@@ -1633,6 +1682,27 @@ export struct Detail {
         this.detailSkeleton()
       }
           }.width('100%').height('100%')
+  }
+
+  private syncFollowState(): void {
+    this.followed = FollowingRegistry.has(this.detailAppId);
+  }
+
+  private async toggleFollow(): Promise<void> {
+    if (this.followSaving || this.app.id <= 0) return;
+    this.followSaving = true;
+    const context = getContext(this) as common.UIAbilityContext;
+    try {
+      await FollowingRegistry.load(context);
+      await FollowingRegistry.set(context, this.app, !FollowingRegistry.has(this.app.id));
+      FollowingRegistry.sync(context, true).catch((error: Error) => {
+        if (!this.disposed) promptAction.showToast({ message: I18n.t('关注同步失败：') + errorText(error) });
+      });
+    } catch (error) {
+      if (!this.disposed) promptAction.showToast({ message: errorText(error) });
+    } finally {
+      if (!this.disposed) this.followSaving = false;
+    }
   }
 
   @Builder
@@ -1684,21 +1754,50 @@ export struct Detail {
                 }.width('100%')
               }.alignItems(HorizontalAlign.Start).width('100%')
                 .padding(18)
-                .backgroundColor(this.heroColor.length > 0 ? this.heroColor : this.colors().hero)
+                .backgroundColor(Palette.containerPaint(this.heroColor.length > 0 ? this.heroColor : this.colors().hero,
+                  this.themeState.containerOpacity))
                 .borderRadius(StoreLayout.cardRadius)
+              if (this.app.screenshots.length > 0) {
+                ListingScreenshotGallery({ appId: this.app.id, screenshots: this.app.screenshots, darkMode: this.darkMode })
+              }
               if(this.deviceRows().length>1){
                 Column({space:14}){
                   Row(){
                     Text(I18n.t('多设备安装')).fontSize(14).fontWeight(FontWeight.Medium).fontColor(this.colors().text).layoutWeight(1)
                     Text(this.deviceRows().filter((row)=>row.job.stage===InstallStage.INSTALLED||row.job.stage===InstallStage.SKIPPED).length+'/'+this.deviceRows().length).fontSize(12).fontColor(this.colors().accent)
                   }.width('100%')
-                  DeviceInstallProgress({rows:this.deviceRows(),darkSurface:this.embedded && this.embeddedStarfield,
+                  DeviceInstallProgress({rows:this.deviceRows(),
                     onAction:(job:InstallJob)=>this.resumeInstall(job.id)})
-                }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+                }.width('100%').padding(16).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
               }
               // 来源仓库卡片：平台徽章按仓库地址识别，不写死 GitHub
-              Text(I18n.t('仓库介绍')).fontSize(18).fontWeight(FontWeight.Bold)
-                .fontColor(this.colors().text).width('100%')
+              Row({ space: 8 }) {
+                Text(I18n.t('仓库介绍')).fontSize(18).fontWeight(FontWeight.Bold)
+                  .fontColor(this.colors().text).layoutWeight(1)
+                if (this.showClaimAction && this.app.id > 0 && this.repoHost() === 'github.com' &&
+                  /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(this.repoPath())) {
+                  Button(I18n.t('认领'), { type: ButtonType.Capsule })
+                    .height(32).fontSize(12)
+                    .padding({ left: 10, right: 10 }).fontColor(this.colors().textSecondary)
+                    .backgroundColor(this.colors().surface)
+                    .responseRegion({ x: 0, y: -6, width: '100%', height: 44 })
+                    .id('detail-claim-application')
+                    .accessibilityText(I18n.t('认领应用'))
+                    .onClick(() => this.openClaimDialog())
+                }
+                Button({ type: ButtonType.Normal }) {
+                  Row({ space: 5 }) {
+                    SymbolGlyph(this.followed ? $r('sys.symbol.star_fill') : $r('sys.symbol.star'))
+                      .fontSize(15).fontColor([this.followed ? this.colors().accent : this.colors().textSecondary])
+                    Text(I18n.t(this.followed ? '取关' : '关注')).fontSize(12)
+                      .fontColor(this.followed ? this.colors().accent : this.colors().textSecondary)
+                  }
+                }.height(32).padding({ left: 10, right: 10 }).borderRadius(16)
+                  .backgroundColor(this.followed ? this.colors().accentSoft : this.colors().surface)
+                  .accessibilityText(I18n.t(this.followed ? '取消关注' : '关注应用'))
+                  .accessibilitySelected(this.followed).enabled(!this.followSaving)
+                  .onClick(() => this.toggleFollow())
+              }.width('100%')
               Row({ space: 10 }) {
                 Text(this.repoHostLabel()).fontSize(11).fontWeight(FontWeight.Medium)
                   .fontColor(this.colors().textSecondary).padding({ left: 6, right: 6, top: 4, bottom: 4 })
@@ -1708,7 +1807,7 @@ export struct Detail {
                 SymbolGlyph($r('sys.symbol.arrow_up_right')).fontSize(15)
                   .fontColor([this.colors().textSecondary])
               }.width('100%').padding(14).constraintSize({ minHeight: 52 })
-                .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+                .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
                 .accessibilityText(I18n.t('来源仓库 ') + this.repoPath() + I18n.t('，在浏览器打开'))
                 .onClick(() => this.openRepo())
               if (this.app.secondaryRepo.length > 0) {
@@ -1721,17 +1820,16 @@ export struct Detail {
                   SymbolGlyph($r('sys.symbol.arrow_up_right')).fontSize(14)
                     .fontColor([this.colors().textSecondary])
                 }.width('100%').padding(14).constraintSize({ minHeight: 52 })
-                  .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+                  .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
                   .onClick(() => this.openSecondaryRepo())
               }
-              RepositoryReadmeCard({ appId: this.app.id, darkSurface: this.embedded && this.embeddedStarfield })
+              RepositoryReadmeCard({ appId: this.app.id })
               Row({ space: 8 }) {
                 Text(I18n.t('版本记录')).fontSize(18).fontWeight(FontWeight.Bold)
                   .fontColor(this.colors().text).layoutWeight(1)
                 this.releaseChannelSelector()
                 if (this.embedded) {
                   StoreIconButton({ symbol: $r('sys.symbol.arrow_clockwise'), label: I18n.t('检查更新'),
-                    darkSurface: this.embeddedStarfield,
                     controlSize: 36, active: !this.refreshBusy && !this.releaseMoreBusy,
                     action: () => this.refreshPage() })
                 }
@@ -1747,7 +1845,6 @@ export struct Detail {
               if (this.currentRelease()) {
                 // 独立选择框与更新说明卡片同宽，主题由 StoreSelect 统一处理。
                 StoreSelect({ options: this.releaseOptions(), selectedIndex: this.selectedReleaseIndex,
-                  darkSurface: this.embedded && this.embeddedStarfield,
                   cornerRadius: StoreLayout.cardRadius,
                   selectedValue: this.currentReleaseLabel(), controlId: 'release-history-select',
                   action: (index: number) => this.selectRelease(index) }).width('100%')
@@ -1799,7 +1896,7 @@ export struct Detail {
                   }
                 }.alignItems(HorizontalAlign.Start).width('100%')
                   .padding(16)
-                  .backgroundColor(this.colors().surface)
+                  .backgroundColor(this.cardSurface())
                   .borderRadius(StoreLayout.cardRadius)
                   .border({ width: 0.5, color: this.colors().border })
               }
@@ -1814,7 +1911,7 @@ export struct Detail {
                 Column({ space: 2 }) {
                   Text(this.app.ratingCount > 0 ?
                     this.app.ratingAverage.toFixed(1) : '—')
-                    .fontSize(34).fontWeight(FontWeight.Bold)
+                    .fontSize(30).fontWeight(FontWeight.Bold)
                     .fontColor(this.app.ratingCount > 0 ? this.colors().accent : this.colors().textTertiary)
                   Text(this.app.ratingCount > 0 ?
                     this.app.ratingCount + I18n.t(' 条评分') : I18n.t('还没有评分'))
@@ -1829,10 +1926,10 @@ export struct Detail {
                   }
                   Text(I18n.t('满分 5 分')).fontSize(10).fontColor(this.colors().textTertiary)
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-              }.width('100%').padding(14)
-                .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+              }.width('100%').padding(12)
+                .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
               // 发布区默认收起：收起时只有一行入口，点 ✎ 展开
-              Column({ space: 9 }) {
+              Column({ space: 7 }) {
                 if (!this.reviewComposeOpen) {
                   Button({ type: ButtonType.Normal }) {
                     Row({ space: 9 }) {
@@ -1857,7 +1954,7 @@ export struct Detail {
                   }.width('100%')
                   TextArea({ placeholder: this.signedIn ? I18n.t('写下你的使用感受') : I18n.t('登录开发者账号后可评价'),
                     text: this.reviewText })
-                    .height(100).fontSize(14).backgroundColor(this.colors().fill).borderRadius(14)
+                    .height(84).fontSize(14).backgroundColor(this.colors().fill).borderRadius(14)
                     .fontColor(this.colors().text).placeholderColor(this.colors().textTertiary)
                     .caretColor(this.colors().accent)
                     .enabled(!this.reviewBusy)
@@ -1876,34 +1973,39 @@ export struct Detail {
                     .enabled(!this.reviewBusy)
                     .onClick(() => { this.reviewComposeOpen = false; })
                 }
-              }.alignItems(HorizontalAlign.Start).width('100%').padding(14)
-                .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+              }.alignItems(HorizontalAlign.Start).width('100%').padding(12)
+                .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
               if (this.reviewPageBusy && this.reviewPage === 0) {
                 Column({ space: 10 }) {
                   this.skeletonLine('40%', 12)
                   this.skeletonLine('100%', 12)
                   this.skeletonLine('70%', 12)
-                }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+                }.width('100%').padding(16).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
               }
               if (this.reviews.length > 0) {
                 Column() {
                   ForEach(this.reviews, (review: AppReview) => {
-                    Column({ space: 7 }) {
-                      Row({ space: 9 }) {
+                    Column({ space: 4 }) {
+                      Row({ space: 8 }) {
                         if (review.avatarUrl.length > 0) {
-                          Image(review.avatarUrl).width(36).height(36).borderRadius(18)
+                          Image(review.avatarUrl).width(32).height(32).borderRadius(16).objectFit(ImageFit.Cover)
                         } else {
                           Text(review.displayName.length > 0 ? review.displayName.substring(0, 1) : I18n.t('华'))
-                            .fontSize(14).fontColor(this.colors().accent).width(36).height(36)
-                            .textAlign(TextAlign.Center).backgroundColor(this.colors().accentSoft).borderRadius(18)
+                            .fontSize(13).fontColor(this.colors().accent).width(32).height(32)
+                            .textAlign(TextAlign.Center).backgroundColor(this.colors().accentSoft).borderRadius(16)
                         }
-                        Column({ space: 2 }) {
-                          Text(review.displayName).fontSize(13).fontWeight(FontWeight.Medium)
-                            .fontColor(this.colors().text).maxLines(1)
-                          Text(this.formatReviewTime(review.updatedAt))
-                            .fontSize(10).fontColor(this.colors().textTertiary).maxLines(1)
-                        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+                        ReviewAuthorName({ name: review.displayName, role: review.isDeveloper ? '作者' : '',
+                          darkMode: this.darkMode })
                         Text('★'.repeat(review.stars)).fontSize(11).fontColor(this.colors().star)
+                        if (this.reviewCanModerate && this.signedIn && (review.body || review.hidden)) {
+                          Button(I18n.t(review.hidden ? '恢复' : '隐藏'), { type: ButtonType.Capsule })
+                            .height(32).fontSize(11).padding({ left: 9, right: 9 })
+                            .fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
+                            .responseRegion({ x: 0, y: -6, width: '100%', height: 44 })
+                            .id('review-moderate-' + review.id)
+                            .enabled(!this.reviewDeleteBusy && !this.reviewBusy && !this.reviewPageBusy)
+                            .onClick(() => this.changeReviewVisibility(review))
+                        }
                         if (review.canDelete && this.signedIn) {
                           Button({ type: ButtonType.Circle }) {
                             SymbolGlyph($r('sys.symbol.trash')).fontSize(14).fontColor([this.colors().textTertiary])
@@ -1914,14 +2016,37 @@ export struct Detail {
                             .onClick(() => this.removeOwnReview(review))
                         }
                       }.width('100%')
-                      Text(review.body).fontSize(13).fontColor(this.colors().textBody)
-                        .lineHeight(21).width('100%')
+                      if (review.hidden) {
+                        Text(I18n.t('评论正文已隐藏')).fontSize(11).fontColor(this.colors().textSecondary)
+                          .width('100%')
+                      }
+                      if (review.body) {
+                        ReviewBodyText({ body: review.body, darkMode: this.darkMode, elementId: 'review-body-' + review.id,
+                          linksEnabled: this.pageVisible && (!this.embedded || this.embeddedVisible) })
+                      }
+                      if (this.reviewRepliesSupported && review.id > 0) {
+                        ReviewThread({ appId: this.app.id, reviewId: review.id, replyCount: review.replyCount,
+                          initialPreview: review.replyPreview,
+                          authorName: review.displayName, reviewTime: this.formatReviewTime(review.updatedAt),
+                          deviceModel: review.deviceModel,
+                          ownerScope: this.reviewOwnerScope,
+                          activeReviewId: this.activeReviewId, signedIn: this.signedIn, darkMode: this.darkMode,
+                          interactive: this.pageVisible && !this.reviewDeleteBusy && !this.reviewBusy && !this.reviewPageBusy &&
+                            (!this.embedded || this.embeddedVisible),
+                          formatTime: (value: string): string => this.formatReviewTime(value) })
+                      } else {
+                        Text(reviewMetadata(this.formatReviewTime(review.updatedAt), review.deviceModel))
+                          .fontSize(10).fontColor(this.colors().textTertiary).maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      }
                       Divider().color(this.colors().border).strokeWidth(0.5)
                     }.alignItems(HorizontalAlign.Start).width('100%')
-                      .padding({ top: 11, bottom: 9 })
+                      .padding({ top: 8, bottom: 6 })
                   }, (review: AppReview, index: number) =>
                     String(review.id > 0 ? review.id : index) + ':' + review.updatedAt + ':' + review.stars + ':' +
-                    review.displayName + ':' + review.avatarUrl + ':' + review.body)
+                    review.displayName + ':' + review.avatarUrl + ':' + review.body + ':' +
+                    review.canDelete + ':' + review.hidden + ':' + review.isDeveloper + ':' +
+                    this.reviewCanModerate + ':' + review.replyCount + ':' + review.deviceModel)
                   // 分页条：翻页直接向服务端要第 N 页，不再对第一页做本地切片
                   if (this.reviewPageCount() > 1) {
                     Row({ space: 6 }) {
@@ -1942,7 +2067,7 @@ export struct Detail {
                     }.width('100%').padding({ top: 8, bottom: 2 })
                   }
                 }.width('100%').padding({ left: 14, right: 14, top: 2, bottom: 6 })
-                  .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+                  .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
               }
             }.width('100%').constraintSize({ maxWidth: this.embedded ? '100%' : StoreLayout.frameMaxWidth(this.windowWidth) })
               .padding({ left: this.embedded ? StoreLayout.sidebarCardInset / StoreLayout.sidebarDetailScale : StoreLayout.inset(this.windowWidth),
@@ -1951,9 +2076,19 @@ export struct Detail {
                 bottom: this.embedded ? (StoreLayout.navigationHeight + StoreLayout.navigationBottomMargin + 16) /
                   StoreLayout.sidebarDetailScale : 95 + Math.max(20, this.navigationBottomInset + 8) })
           }.width('100%').height('100%')
-            .align(Alignment.TopStart).scrollBar(BarState.Off)
-            .onDidScroll(() => {
-              if (this.embedded || this.disposed) return;
+            .align(this.embedded ? Alignment.TopStart : Alignment.Top).scrollBar(BarState.Off)
+            .onWillScroll((_x: number, _y: number, _state: ScrollState, source: ScrollSource) => {
+              if (!this.embedded) return;
+              this.embeddedScrollFromUser = source === ScrollSource.DRAG || source === ScrollSource.OTHER_USER_INPUT ||
+                source === ScrollSource.SCROLL_BAR;
+            })
+            .onDidScroll((_x: number, delta: number) => {
+              if (this.disposed) return;
+              if (this.embedded) {
+                if (this.embeddedScrollFromUser) this.onEmbeddedScroll(delta);
+                this.embeddedScrollFromUser = false;
+                return;
+              }
               const offset = this.detailScroller.currentOffset();
               const progress = Math.min(1, Math.max(0,
                 (offset?.yOffset ?? 0) / StoreTopStyle.scrollDistance));
@@ -1962,8 +2097,9 @@ export struct Detail {
   }
 
   build() {
-    WithTheme({ colorMode: this.darkMode || (this.embedded && this.embeddedStarfield) ? ThemeColorMode.DARK : ThemeColorMode.LIGHT }) {
+    WithTheme({ colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT }) {
     Stack({ alignContent: Alignment.Center }) {
+    if (!this.embedded) AppThemeBackground()
     Column() {
       if (this.error.length > 0 || !this.loaded) {
         ScaledArticle({ sceneScale: this.embedded ? StoreLayout.sidebarDetailScale : 1, content: (): void => this.detailPlaceholder()
@@ -1972,16 +2108,10 @@ export struct Detail {
         Stack({ alignContent: this.embedded ? Alignment.TopStart : Alignment.Bottom }) {
           ScaledArticle({ sceneScale: this.embedded ? StoreLayout.sidebarDetailScale : 1, content: (): void => this.detailArticle()
           }).width('100%').height('100%')
-          if (this.embedded) {
-            if (this.headerVisible && !this.showReconnect && !this.showCertificatePrompt) {
-              this.sidebarInstallDock()
-            }
-          } else {
+          if (!this.embedded) {
           Column({ space: 7 }) {
             StoreImmersiveAction({ visible: this.headerVisible && !this.showReconnect && !this.showCertificatePrompt,
-              tint: this.colors().accent, followsTarget: this.embedded, backAction: () => {
-                if (this.embedded) this.onEmbeddedBack(); else this.onBackPress();
-              },
+              tint: this.colors().accent, backAction: () => { this.onBackPress(); },
               content: (immersive: boolean): void => this.installActionContent(immersive) })
           }.width('calc(100% - ' + StoreLayout.inset(this.windowWidth) * 2 + 'vp)')
             .constraintSize({ maxWidth: this.windowWidth > StoreLayout.frameMaxWidth(this.windowWidth) ?
@@ -1991,7 +2121,11 @@ export struct Detail {
           }
         }.layoutWeight(1).width('100%')
       }
-    }.width('100%').height('100%').backgroundColor(this.embedded ? Color.Transparent : this.colors().bg)
+    }.width('100%').height('100%').backgroundColor(Color.Transparent)
+    if (this.showSidebarDock()) {
+      SidebarInstallPublisher({ view: this.sidebarInstallView(), onChange: this.onEmbeddedDockChange,
+        action: () => this.performInstallAction() })
+    }
     if (!this.embedded) { this.detailHeader() }
     if(this.showMultiDevice){
           MultiDeviceDialog({expectedUdid:this.reconnectExpectedUdid(),onClose:()=>this.closeMultiDevice(),onConnected:(target:DeviceInstallTarget)=>this.resumeRemoteTarget(target)})

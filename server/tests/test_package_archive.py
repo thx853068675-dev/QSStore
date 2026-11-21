@@ -31,6 +31,8 @@ def pack(entries):
 
 class PackageArchiveTest(unittest.TestCase):
     def setUp(self):
+        from server.tests.repository_fixtures import mock_repository_identity
+        mock_repository_identity(self)
         self.temp = tempfile.TemporaryDirectory()
         self.old = db.DB_PATH
         db.DB_PATH = self.temp.name + '/store.db'

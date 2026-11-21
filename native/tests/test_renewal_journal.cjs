@@ -21,7 +21,7 @@ function fixture(t, legacy) {
   const source = fs.readFileSync(path.join(root, 'JobStore.ets'), 'utf8');
   const schema = source.match(/const JOB_SCHEMA = `([\s\S]*?)`;/)[1];
   if (legacy) {
-    db.exec(schema.replace(/^  (renewal_|authorization_expires_at|installed_update_time|installed_fingerprint|release_tag|release_name|catalog_sha256|replacement_install_baseline|custom_mirror_prefix|force_install|skip_reason|conflict_kind|conflict_state|approved_install_proof|approved_installed_update_time).*\n/gm, ''));
+    db.exec(schema.replace(/^  (renewal_|authorization_expires_at|installed_update_time|installed_fingerprint|release_tag|release_name|catalog_sha256|catalog_display_name|replacement_install_baseline|custom_mirror_prefix|force_install|skip_reason|conflict_kind|conflict_state|approved_install_proof|approved_installed_update_time).*\n/gm, ''));
     db.prepare(`INSERT INTO install_jobs
       (id, app_id, asset_name, source_url, expected_sha256, bundle_name, version_code,
        stage, cache_path, signed_path, transfer_task_id, attempt, last_error, updated_at)
@@ -57,11 +57,13 @@ for (const legacy of [true, false]) test('custom download provenance persists ac
   const origin = 'https://github.com/o/r/releases/download/v1/app.zip#qingqi-package=entry.hap';
   const job = f.jobs.InstallJob.create('mirror:pending', 7, 'app.zip', 'https://chosen.example/path/' + origin, '');
   job.customMirrorPrefix = 'https://chosen.example/path/';
+  job.catalogDisplayName = '上架应用名';
   job.mirrorUrls = ['https://gh-proxy.com/' + origin, origin];
   await store.save(job);
   const reopened = await f.JobStore.initialize(f.context), restored = await reopened.get(job.id);
   assert.equal(restored.customMirrorPrefix, job.customMirrorPrefix);
   assert.equal(restored.sourceUrl, job.sourceUrl);
+  assert.equal(restored.catalogDisplayName, job.catalogDisplayName);
   assert.deepEqual(Array.from(restored.mirrorUrls), job.mirrorUrls);
   assert.equal(f.jobs.InstallJob.displayCopy(restored).customMirrorPrefix, job.customMirrorPrefix);
   restored.customMirrorPrefix = ''; await reopened.save(restored);

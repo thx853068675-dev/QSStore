@@ -33,12 +33,15 @@ function fixture(api = 26, capability = () => true) {
   const factoryStart = source.indexOf('export function storeTintedImmersiveMaterial(');
   const factory = factoryStart < 0 ? '' : source.slice(factoryStart, source.indexOf('\n}', factoryStart) + 2)
     .replace('export function', 'function');
-  const box = { exports: {}, deviceInfo: { sdkApiVersion: api }, uiMaterial, StoreMaterial,
+  let timerId = 0; const timers = new Map();
+  const box = { exports: {}, setTimeout: callback => { timers.set(++timerId, callback); return timerId; }, clearTimeout: id => timers.delete(id), deviceInfo: { sdkApiVersion: api }, uiMaterial, StoreMaterial,
     MaterialPreferences: mocks['../data/MaterialPreferences'].MaterialPreferences, Palette: mocks['./Palette'].Palette };
   vm.runInNewContext(ts.transpileModule(factory + '\n' + controller + '\n}\nexports.Action = StoreImmersiveAction;', {
     compilerOptions: { target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
-  return new box.exports.Action();
+  const action = new box.exports.Action();
+  action.flushLayout = () => { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(fn => fn()); };
+  return action;
 }
 
 test('support and an open request cannot hide the primary action before actual popup acknowledgement', () => {
@@ -47,6 +50,21 @@ test('support and an open request cannot hide the primary action before actual p
   assert.equal(action.fallbackVisible(), true);
   action.measuredWidth = 320;
   assert.equal(action.popupRequested(), true);
+  assert.equal(action.fallbackVisible(), true);
+  action.onPopupStateChanged(true);
+  assert.equal(action.fallbackVisible(), false);
+});
+
+test('suspending an immersive window retains its inline control until the new window is ready', () => {
+  const action = fixture();
+  action.controlWidth = 44;
+  action.onPopupStateChanged(true);
+  action.suspendPopup = true;
+  action.onPopupRequestChanged();
+  assert.equal(action.popupRequested(), false);
+  assert.equal(action.fallbackVisible(), true);
+  action.onPopupStateChanged(true);
+  action.suspendPopup = false;
   assert.equal(action.fallbackVisible(), true);
   action.onPopupStateChanged(true);
   assert.equal(action.fallbackVisible(), false);
@@ -234,3 +252,15 @@ test('native effect caching still applies real appearance changes immediately',(
  }
  assert.equal(previous.colorInvert,true,'other clear-glass controls retain their existing native inversion');
 });
+
+ test('rotation retires native action windows and stale placement corrections while keeping content clickable',()=>{
+  const action=fixture();action.controlWidth=44;action.onPopupStateChanged(true);
+  action.placementCorrectionX=12;action.placementCorrectionY=-30;
+  action.onViewportChanged();assert.equal(action.popupRequested(),false);assert.equal(action.fallbackVisible(),true);
+  assert.equal(action.placementCorrectionX,0);assert.equal(action.placementCorrectionY,0);
+  action.onPopupStateChanged(true);assert.equal(action.popupVisible,false);
+  action.flushLayout();assert.equal(action.popupRequested(),true);
+  action.onPopupStateChanged(true);assert.equal(action.fallbackVisible(),false);
+  action.onViewportChanged();action.aboutToDisappear();action.flushLayout();
+  assert.equal(action.popupRequested(),false);assert.equal(action.fallbackVisible(),false);
+ });

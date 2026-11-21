@@ -40,7 +40,7 @@ test('consent is invalidated by changed source, device, installed update time or
 test('runner skips without preparing Profile/signature/transfer, and skip remains terminal on resume',async()=>{
  const jobs=loadEts('jobs/InstallJob'),planner=loadEts('jobs/RecoveryPlanner',{'./InstallJob':jobs});
  const {JobRunner:R}=loadEts('jobs/JobRunner',{'./InstallJob':jobs,'./RecoveryPlanner':planner,
-  './JobScheduler':{JobScheduler:{runInstall:async(_id,body)=>body()}},'./JobCancellation':{JobCancellation:{isCancelled:()=>false,assertActive(){}}}});
+  './JobScheduler':{JobScheduler:{runPipeline:async(_job,body)=>body(),resource:async(_job,_key,_capacity,body)=>body()}},'./JobCancellation':{JobCancellation:{isCancelled:()=>false,assertActive(){}}}});
  const j=job(),calls=[];j.stage=InstallStage.QUEUED;
  const runner=new R({get:async()=>j,save:async()=>{},recordFailure:async()=>assert.fail('skip is not failure')},
   {preflight:async()=>{calls.push('preflight');return 'skip-current';},planPaths:async()=>assert.fail('no files needed')});

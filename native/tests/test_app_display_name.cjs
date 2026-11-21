@@ -44,9 +44,13 @@ test('Management and Detail use the same resolved installed title without device
   const page = new box.Page();
   page.app = { displayName: '旧目录名称', latestAsset: { bundleName: 'com.example.app' } };
   page.selectedAsset = { bundleName: 'com.example.app' };
-  page.catalogForJob = () => { throw Error('resolved device title must win'); };
+  page.catalogForJob = () => page.app;
   assert.equal(page.jobTitle({ bundleName: 'com.example.app' }), '实际应用名称');
   assert.equal(page.appTitle(), '实际应用名称');
+  page.app.customDisplayName = '上架者设置的新名字';
+  assert.equal(f.resolver.forCatalog(page.app), '上架者设置的新名字');
+  assert.equal(page.appTitle(), '上架者设置的新名字');
+  assert.equal(page.jobTitle({ bundleName: 'com.example.app' }), '上架者设置的新名字');
 });
 
 test('AppGallery Rock Kingdom cannot lend its installed label to a colliding launcher listing', () => {

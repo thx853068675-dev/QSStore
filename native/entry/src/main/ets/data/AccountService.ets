@@ -4,6 +4,7 @@ import { DevEcoLogin, isTransientAuthError, authErrorText } from './DevEcoLogin'
 import { ServiceFailure } from './ServiceFailure';
 import { FailureKind } from '../jobs/InstallJob';
 import { PrivacyConsent } from './PrivacyConsent';
+import { InstallAccountRecovery } from '../jobs/InstallAccountRecovery';
 
 /** One refresh per identity, shared by pages, AGC and the install executor. */
 export class AccountService {
@@ -39,9 +40,23 @@ export class AccountService {
         if (AccountService.refreshedAt.size >= 8) AccountService.refreshedAt.clear();
         AccountService.refreshedAt.set(key, Date.now());
         return fresh;
-      }).catch((error: Object) => {
-        throw new ServiceFailure(isTransientAuthError(error) ? FailureKind.NETWORK : FailureKind.ACCOUNT,
-          authErrorText(error));
+      }).catch(async (error: Object) => {
+        const message = authErrorText(error);
+        if (!isTransientAuthError(error) && InstallAccountRecovery.requiresLogin(message)) {
+          const context = AccountService.context;
+          if (context !== undefined && PrivacyConsent.isBusinessAllowed()) {
+            // A failed old request must not prompt for an account already replaced
+            // by another login, or revive a prompt after logout.
+            try {
+              const current = await AccountSession.load(context);
+              if (PrivacyConsent.isBusinessAllowed() && current?.userId === account.userId &&
+                current.teamId === account.teamId && current.jwtToken === account.jwtToken) {
+                InstallAccountRecovery.requestSession(JSON.stringify([account.userId, account.teamId]));
+              }
+            } catch (_) {}
+          }
+        }
+        throw new ServiceFailure(isTransientAuthError(error) ? FailureKind.NETWORK : FailureKind.ACCOUNT, message);
       }).finally(() => { AccountService.pending.delete(key); });
       AccountService.pending.set(key, task);
     }

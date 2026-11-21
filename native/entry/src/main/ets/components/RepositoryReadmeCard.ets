@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { promptAction } from '@kit.ArkUI';
 import { webview } from '@kit.ArkWeb';
+import { AppBackground } from '../data/AppBackgroundPreferences';
 import { RepositoryReadme, StoreClient } from '../data/StoreClient';
 import { ReadmeDocument } from '../data/ReadmeDocument';
 import { errorText } from '../jobs/ErrorText';
@@ -13,6 +14,8 @@ export struct RepositoryReadmeCard {
   @Prop appId: number = 0;
   @Prop @Watch('updateDocument') darkSurface: boolean = false;
   @StorageProp('darkMode') @Watch('updateDocument') private darkMode: boolean = false;
+  @StorageProp('appBackground') private themeState: AppBackground = new AppBackground();
+  @StorageProp('appLanguage') @Watch('onLanguageChanged') private appLanguage: string = 'zh';
   @State private expanded: boolean = false;
   @State private busy: boolean = false;
   @State private error: string = '';
@@ -21,9 +24,17 @@ export struct RepositoryReadmeCard {
   private attached: boolean = false;
   private disposed: boolean = false;
   private fetched: boolean = false;
+  private loadGeneration: number = 0;
 
   private colors(): Palette { return Palette.forMode(this.darkMode || this.darkSurface); }
   aboutToDisappear(): void { this.disposed = true; this.attached = false; }
+
+  private onLanguageChanged(): void {
+    this.loadGeneration++;
+    this.busy = false; this.fetched = false;
+    this.document = new RepositoryReadme();
+    if (this.expanded) this.load();
+  }
 
   private updateDocument(): void {
     if (!this.attached || this.disposed || !this.expanded || !this.document.found) return;
@@ -32,16 +43,17 @@ export struct RepositoryReadmeCard {
   }
 
   private async load(force: boolean = false): Promise<void> {
-    if (this.busy || this.disposed || (this.fetched && !force)) return;
+    if (this.busy || this.disposed) return;
+    const generation = ++this.loadGeneration;
     this.busy = true; this.error = '';
     try {
       const value = await new StoreClient(getContext(this) as common.UIAbilityContext)
-        .repositoryReadme(this.appId, force);
-      if (this.disposed) return;
+        .repositoryReadme(this.appId, force, this.appLanguage);
+      if (this.disposed || generation !== this.loadGeneration) return;
       this.document = value; this.fetched = true;
     } catch (error) {
-      if (!this.disposed) this.error = errorText(error);
-    } finally { if (!this.disposed) this.busy = false; }
+      if (!this.disposed && generation === this.loadGeneration) this.error = errorText(error);
+    } finally { if (!this.disposed && generation === this.loadGeneration) this.busy = false; }
   }
 
   private toggle(): void {
@@ -82,7 +94,7 @@ export struct RepositoryReadmeCard {
               .width('100%').padding({ top: 8, bottom: 16 })
           } else {
             Web({ src: '', controller: this.controller, renderMode: RenderMode.SYNC_RENDER })
-              .width('100%').layoutMode(WebLayoutMode.FIT_CONTENT).backgroundColor(this.colors().surface)
+              .width('100%').layoutMode(WebLayoutMode.FIT_CONTENT).backgroundColor(Color.Transparent)
               .javaScriptAccess(false).fileAccess(false).domStorageAccess(false)
               .overScrollMode(OverScrollMode.NEVER)
               .nestedScroll({ scrollForward: NestedScrollMode.PARENT_FIRST, scrollBackward: NestedScrollMode.PARENT_FIRST })
@@ -97,6 +109,7 @@ export struct RepositoryReadmeCard {
           }
         }.width('100%').padding({ left: 14, right: 14, bottom: 14 })
       }
-    }.width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius).clip(true)
+    }.width('100%').backgroundColor(Palette.containerPaint(this.colors().surface, this.themeState.containerOpacity))
+      .borderRadius(StoreLayout.cardRadius).clip(true)
   }
 }

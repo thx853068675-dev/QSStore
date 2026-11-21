@@ -45,3 +45,35 @@ test('insecure origins, embedded credentials and private signing material fail t
   assert.throws(() => configuration(file), /only public certificates/);
   assert.throws(() => prepare(root, { QINGQI_STORE_CONFIG: path.join(root, 'missing.json') }), /does not exist/);
 });
+
+test('fallback endpoints are rejected and legacy empty arrays are not embedded', t => {
+  const root = workspace(t), file = path.join(root, 'store.local.json');
+  const output = path.join(root, 'entry/src/main/ets/data/StoreBuildConfig.ets');
+  fs.writeFileSync(path.join(root, 'ca.crt'), '-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----');
+  const primary = { baseUrl: 'https://primary.example.invalid', publicKeySha256: 'a'.repeat(43) + '=', caFile: 'ca.crt' };
+  const backup = { ...primary, baseUrl: 'https://backup.example.invalid', publicKeySha256: 'b'.repeat(43) + '=' };
+  fs.writeFileSync(file, JSON.stringify({ ...primary, fallbacks: [backup] }));
+  assert.throws(() => prepare(root, {}), /no longer accepts fallback endpoints/);
+  fs.writeFileSync(file, JSON.stringify({ ...primary, fallbacks: [] }));
+  assert.equal(prepare(root, {}), true);
+  assert.doesNotMatch(fs.readFileSync(output, 'utf8'), /fallback/i);
+});
+
+test('an explicit overseas origin has an independent verified HTTPS configuration', t => {
+  const root = workspace(t), file = path.join(root, 'store.local.json');
+  const certificate = label => '-----BEGIN CERTIFICATE-----\n' + label + '\n-----END CERTIFICATE-----';
+  fs.writeFileSync(path.join(root, 'primary.crt'), certificate('primary'));
+  fs.writeFileSync(path.join(root, 'overseas.crt'), certificate('overseas'));
+  const primary = { baseUrl: 'https://primary.example.invalid', publicKeySha256: 'a'.repeat(43) + '=', caFile: 'primary.crt' };
+  fs.writeFileSync(file, JSON.stringify(primary));
+  assert.equal(configuration(file).overseasBaseUrl, '');
+  fs.writeFileSync(file, JSON.stringify({ ...primary, overseas: primary }));
+  assert.throws(() => configuration(file), /must differ/);
+  const overseas = { baseUrl: 'https://overseas.example.invalid:8443', publicKeySha256: 'b'.repeat(43) + '=', caFile: 'overseas.crt' };
+  fs.writeFileSync(file, JSON.stringify({ ...primary, overseas }));
+  const result = configuration(file);
+  assert.equal(result.overseasBaseUrl, overseas.baseUrl);
+  assert.equal(result.overseasPublicKeySha256, overseas.publicKeySha256);
+  assert.equal(result.overseasCaData, certificate('overseas'));
+  assert.equal(result.caData, certificate('primary'));
+});

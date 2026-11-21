@@ -12,7 +12,8 @@ function fixture(api = 26, capability = () => true, options={}) {
   const Hds = { MaterialType: { IMMERSIVE: 101 }, MaterialLevel: { ADAPTIVE: 10, EXQUISITE: 0, GENTLE: 1, SMOOTH: 2 },
     getSystemMaterialTypes: () => options.hds===false?[]:[101] };
   const mocks = { '@kit.ArkUI': { uiMaterial }, '@kit.UIDesignKit': { hdsMaterial: Hds },
-    '@kit.BasicServicesKit': { deviceInfo: { sdkApiVersion: api } } };
+    '@kit.BasicServicesKit': { deviceInfo: { sdkApiVersion: api } },
+    '../data/I18n': { I18n: { t: message => message } } };
   function load(file) {
     const box = { exports: {}, require: key => mocks[key] || {},
       $r: name => ({ id: name, type: 'Resource' }),

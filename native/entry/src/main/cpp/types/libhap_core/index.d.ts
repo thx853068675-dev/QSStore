@@ -29,3 +29,6 @@ export const hdcDisconnect: () => number;
 
 export const readArchiveFile: (path: string, name: string) => Uint8Array;
 export const rewriteArchive: (input: string, output: string, names: string[], files: string[], previousBundle?: string, nextBundle?: string) => Promise<void>;
+
+/** Decompress an AppGallery .hapz (Zstandard stream) into a HAP file. */
+export const ungrabHapz: (input: string, output: string) => Promise<void>;

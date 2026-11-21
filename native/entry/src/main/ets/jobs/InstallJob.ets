@@ -41,6 +41,7 @@ export class InstallJob {
   /** 目录声明的身份，仅用于核对下载的 HAP；空值表示旧任务或本地导入。 */
   catalogBundleName: string = '';
   catalogVersionCode: number = 0;
+  catalogDisplayName: string = '';
   releaseTag: string = '';
   releaseName: string = '';
   /** 目录摘要仅用于版本识别，不作为下载准入条件。 */
@@ -123,6 +124,7 @@ export class InstallJob {
     copy.expectedSha256 = job.expectedSha256;
     copy.catalogBundleName = job.catalogBundleName;
     copy.catalogVersionCode = job.catalogVersionCode;
+    copy.catalogDisplayName = job.catalogDisplayName ?? '';
     copy.releaseTag = job.releaseTag;
     copy.releaseName = job.releaseName;
     copy.catalogSha256 = job.catalogSha256;

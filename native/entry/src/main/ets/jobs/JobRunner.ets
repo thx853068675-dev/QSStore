@@ -1,4 +1,3 @@
-import { DeviceInstallTarget } from './DeviceInstallTarget';
 import { FailureKind, InstallJob, InstallStage, RecoveryEvidence } from './InstallJob';
 import { ClassifiedFailure } from '../data/ServiceFailure';
 import { JobScheduler } from './JobScheduler';
@@ -6,6 +5,7 @@ import { JobStore } from './JobStore';
 import { recoveryStage } from './RecoveryPlanner';
 import { JobCancellation } from './JobCancellation';
 import { I18n } from '../data/I18n';
+import { InstallScheduling } from './InstallScheduling';
 
 export class PackageIdentity {
   bundleName: string = '';
@@ -38,6 +38,7 @@ export class JobSkip extends Error {
 /// Platform implementations must verify each result before resolving. The
 /// runner never treats a return from the signer or HDC as installation proof.
 export interface JobRuntime {
+  authorizationLane?(): string;
   planPaths(job: InstallJob): Promise<JobPaths>;
   inspectEvidence(job: InstallJob): Promise<RecoveryEvidence>;
   downloadAndVerify(job: InstallJob): Promise<void>;
@@ -68,12 +69,10 @@ export class JobRunner {
 
   async run(id: string): Promise<InstallJob> {
     // 一个任务同一时刻只能有一条流水线在跑：页面自己的忙标记挡不住另一个页面。
-    // 用 runInstall 而不是默认上限：底层 hdc install 自己允许跑 5 分钟，外层若
-    // 先放弃会留下「设备还在装、我们已经报超时」的错位。
+    // Keep job ownership through all phases, without owning the target during download.
     const job = await this.store.get(id);
     if (!job) throw new Error(I18n.t('安装任务不存在'));
-    const lane = job.installTarget ? DeviceInstallTarget.parse(job.installTarget).key : 'local';
-    return JobScheduler.runInstall(id, () => this.runLocked(id), lane);
+    return JobScheduler.runPipeline(job, () => this.runLocked(id));
   }
 
   private async runLocked(id: string): Promise<InstallJob> {
@@ -93,7 +92,8 @@ export class JobRunner {
         job.signedPath = paths.signedPath;
         await this.store.save(job);
       }
-      const evidence = await this.runtime.inspectEvidence(job);
+      const evidence = await JobScheduler.resource(job, 'inspect', 2,
+        () => this.runtime.inspectEvidence(job), I18n.t('等待安装包检查'));
       job.stage = recoveryStage(job, evidence);
       if (job.stage === InstallStage.INSTALLED) {
         this.clearDataLossApproval(job);
@@ -106,11 +106,13 @@ export class JobRunner {
 
       if (job.stage === InstallStage.QUEUED) {
         await this.advance(job, InstallStage.DOWNLOADING);
-        await this.runtime.downloadAndVerify(job);
+        await JobScheduler.resource(job, InstallScheduling.local(job) ? 'inspect' : 'download', 2,
+          () => this.runtime.downloadAndVerify(job), I18n.t('等待下载资源'));
         await this.advance(job, InstallStage.VERIFIED);
       }
       if (job.stage === InstallStage.VERIFIED) {
-        const identity = await this.runtime.inspectPackage(job);
+        const identity = await JobScheduler.resource(job, 'inspect', 2,
+          () => this.runtime.inspectPackage(job), I18n.t('等待安装包检查'));
         if (identity.bundleName.length === 0 || identity.versionCode <= 0) {
           throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('安装包缺少可用的应用身份'));
         }
@@ -123,61 +125,23 @@ export class JobRunner {
       }
       if(job.bundleName&&job.versionCode>0&&await this.skipIfUnneeded(job,true))return job;
       if (job.stage === InstallStage.PACKAGE_INSPECTED) {
-        await this.runtime.ensureProfile(job);
+        await JobScheduler.resource(job, 'authorization:' + (this.runtime.authorizationLane?.() ?? 'default'), 1,
+          () => this.runtime.ensureProfile(job), I18n.t('等待账号授权'));
         await this.advance(job, InstallStage.PROFILE_READY);
       }
       if (job.stage === InstallStage.PROFILE_READY) {
-        await this.runtime.sign(job);
+        await JobScheduler.resource(job, 'signing', 1, () => this.runtime.sign(job), I18n.t('等待签名'));
         await this.advance(job, InstallStage.SIGNED);
       }
       if (job.stage === InstallStage.SIGNED) {
-        await this.runtime.verifySignature(job);
+        await JobScheduler.resource(job, 'inspect', 2,
+          () => this.runtime.verifySignature(job), I18n.t('等待安装包检查'));
         await this.advance(job, InstallStage.SIGNATURE_VERIFIED);
       }
-      if (job.stage === InstallStage.SIGNATURE_VERIFIED ||
-        job.stage === InstallStage.WAITING_DEVICE) {
-        if (!await this.runtime.ensureDevice()) {
-          await this.advance(job, InstallStage.WAITING_DEVICE);
-          return job;
-        }
-        await this.advance(job, InstallStage.INSTALLING);
-      }
-      if (job.stage === InstallStage.INSTALLING) {
-        // After a timeout, inspect the real installed version before retrying.
-        let needsInstall = job.reinstallRequired;
-        if (!needsInstall) {
-          const current = await this.runtime.installedVersion(job.bundleName);
-          needsInstall = current !== job.versionCode;
-          if (!needsInstall && job.appId > 0 && !(job.catalogVersionCode > 0)) {
-            // 未预处理的在线包到这里才知道内部编号，用户提交的安装仍必须执行。
-            job.reinstallRequired = true;
-            await this.store.save(job);
-            needsInstall = true;
-          }
-        }
-        if (needsInstall) {
-          if(await this.skipIfUnneeded(job,true))return job;
-          JobCancellation.assertActive(job.id);
-          await this.runtime.install(job);
-        }
-        // **等设备把新版本反映出来，而不是立刻重装。**
-        // `hdc install` 返回后，设备的包管理器还要一点时间才更新版本信息；
-        // 自己更新自己时（安装器更新安装器）旧进程还在跑，窗口更长。立刻查一次
-        // 会读到旧版本号 → 判失败 → 再装一遍 → 还是旧版本 → 报「设备尚未确认
-        // 安装结果」。用户看到的就是「卡在 95%，然后还得再点一次」。
-        if (!await this.confirmInstalledVersion(job)) {
-          // 版本仍旧并不等于无线调试断了。尤其安装器更新自己时，包管理器
-          // 可能先完成安装、随后才结束旧进程；这时要求用户反复配对只会重装。
-          throw new JobFailure(FailureKind.TRANSIENT,
-            job.renewalRequestedAt > 0 ?
-              (job.allowDataLoss ? I18n.t('重装续签已提交，但尚未确认新授权，请连接无线调试后继续核对') :
-                I18n.t('续签已提交，但尚未确认授权替换结果。旧应用数据已保留，请连接无线调试后继续核对')) :
-              I18n.t('安装已提交，但新版本尚未生效。请重新打开应用确认；若版本仍旧，再点继续安装'));
-        }
-        // Auxiliary expiry metadata must never turn a confirmed install into a retry.
-        try { await this.runtime.rememberInstalledAuthorization?.(job); } catch (_) {}
-        job.reinstallRequired = false;
-        await this.advance(job, InstallStage.INSTALLED);
+      if ([InstallStage.SIGNATURE_VERIFIED, InstallStage.WAITING_DEVICE, InstallStage.INSTALLING].includes(job.stage)) {
+        await JobScheduler.resource(job, 'device:' + InstallScheduling.device(job), 1,
+          () => JobScheduler.resource(job, 'installing', 3,
+            () => this.installReady(job), I18n.t('等待安装资源')), I18n.t('等待设备空闲'));
       }
       return job;
     } catch (error) {
@@ -190,6 +154,56 @@ export class JobRunner {
         new JobFailure((error as ClassifiedFailure).failureKind ?? FailureKind.TRANSIENT, String(error));
       await this.store.recordFailure(job, failure.kind, failure.message);
       return job;
+    }
+  }
+
+  private async installReady(job: InstallJob): Promise<void> {
+    // The device can have changed while another origin used the install slot.
+    if (await this.skipIfUnneeded(job, true)) return;
+    if (job.stage === InstallStage.SIGNATURE_VERIFIED ||
+      job.stage === InstallStage.WAITING_DEVICE) {
+      if (!await this.runtime.ensureDevice()) {
+        await this.advance(job, InstallStage.WAITING_DEVICE);
+        return;
+      }
+      await this.advance(job, InstallStage.INSTALLING);
+    }
+    if (job.stage === InstallStage.INSTALLING) {
+      // After a timeout, inspect the real installed version before retrying.
+      let needsInstall = job.reinstallRequired;
+      if (!needsInstall) {
+        const current = await this.runtime.installedVersion(job.bundleName);
+        needsInstall = current !== job.versionCode;
+        if (!needsInstall && job.appId > 0 && !(job.catalogVersionCode > 0)) {
+          // 未预处理的在线包到这里才知道内部编号，用户提交的安装仍必须执行。
+          job.reinstallRequired = true;
+          await this.store.save(job);
+          needsInstall = true;
+        }
+      }
+      if (needsInstall) {
+        if(await this.skipIfUnneeded(job,true))return;
+        JobCancellation.assertActive(job.id);
+        await this.runtime.install(job);
+      }
+      // **等设备把新版本反映出来，而不是立刻重装。**
+      // `hdc install` 返回后，设备的包管理器还要一点时间才更新版本信息；
+      // 自己更新自己时（安装器更新安装器）旧进程还在跑，窗口更长。立刻查一次
+      // 会读到旧版本号 → 判失败 → 再装一遍 → 还是旧版本 → 报「设备尚未确认
+      // 安装结果」。用户看到的就是「卡在 95%，然后还得再点一次」。
+      if (!await this.confirmInstalledVersion(job)) {
+        // 版本仍旧并不等于无线调试断了。尤其安装器更新自己时，包管理器
+        // 可能先完成安装、随后才结束旧进程；这时要求用户反复配对只会重装。
+        throw new JobFailure(FailureKind.TRANSIENT,
+          job.renewalRequestedAt > 0 ?
+            (job.allowDataLoss ? I18n.t('重装续签已提交，但尚未确认新授权，请连接无线调试后继续核对') :
+              I18n.t('续签已提交，但尚未确认授权替换结果。旧应用数据已保留，请连接无线调试后继续核对')) :
+            I18n.t('安装已提交，但新版本尚未生效。请重新打开应用确认；若版本仍旧，再点继续安装'));
+      }
+      // Auxiliary expiry metadata must never turn a confirmed install into a retry.
+      try { await this.runtime.rememberInstalledAuthorization?.(job); } catch (_) {}
+      job.reinstallRequired = false;
+      await this.advance(job, InstallStage.INSTALLED);
     }
   }
 

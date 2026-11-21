@@ -4,6 +4,9 @@ interface ProductCatalogue { products:DeviceArtworkEntry[]; }
 
 /** Exact market-model matching: never turn Pro into Pro+, or a PC emulator into a MateBook. */
 export class DeviceArtworkCatalog {
+  // Current official 2x product portraits (including Mate 70 Pro) exceed 512 KiB.
+  // Encoded bytes and decoded pixels have separate bounds.
+  static readonly MAX_IMAGE_BYTES:number=5*1024*1024;
   static normalize(value:string):string {
     return value.trim().toLowerCase().replace(/^(huawei|华为)\s*/,'')
       .replace(/[\s\u200b-\u200d\-_·]/g,'').replace(/英寸|inch|inches/g,'');
@@ -31,12 +34,12 @@ export class DeviceArtworkCatalog {
     }
     return undefined;
   }
-  static validPng(bytes:ArrayBuffer):boolean {
-    if(bytes.byteLength<33||bytes.byteLength>512*1024)return false;
+  static validPng(bytes:ArrayBuffer,maxEdge:number=4096):boolean {
+    if(bytes.byteLength<33||bytes.byteLength>DeviceArtworkCatalog.MAX_IMAGE_BYTES)return false;
     const b=new Uint8Array(bytes),magic=[137,80,78,71,13,10,26,10];
     if(magic.some((v,i)=>b[i]!==v)||b[12]!==73||b[13]!==72||b[14]!==68||b[15]!==82)return false;
     const view=new DataView(bytes),w=view.getUint32(16),h=view.getUint32(20);
     // Transparent product artwork only, with a bounded decoded allocation.
-    return w>0&&h>0&&w<=1600&&h<=1600&&w*h<=1600000&&(b[25]===6||b[25]===4);
+    return w>0&&h>0&&w<=maxEdge&&h<=maxEdge&&(b[25]===6||b[25]===4);
   }
 }

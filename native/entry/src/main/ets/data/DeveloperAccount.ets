@@ -1,12 +1,14 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
+import { HuaweiSite, parseHuaweiSite } from './HuaweiSite';
 
 export class DeveloperAccount {
   accessToken: string = '';
   jwtToken: string = '';
   userId: string = '';
   teamId: string = '';
+  site: HuaweiSite = 'CN';
   displayName: string = '';
   avatarUrl: string = '';
   /** Huawei's realName flag; undefined means the status has not been returned. */
@@ -23,6 +25,7 @@ export class DeveloperAccount {
     account.jwtToken = String(row['jwtToken'] ?? '');
     account.userId = String(row['userId'] ?? '');
     account.teamId = String(row['teamId'] ?? account.userId);
+    account.site = parseHuaweiSite(String(row['site'] ?? row['siteId'] ?? '')) ?? 'CN';
     account.displayName = String(row['displayName'] ?? row['nickName'] ?? '');
     const avatar = String(row['avatarUrl'] ?? '');
     account.avatarUrl = /^https:\/\//.test(avatar) ? avatar : '';
@@ -37,6 +40,7 @@ export class DeveloperAccount {
       jwtToken: this.jwtToken,
       userId: this.userId,
       teamId: this.teamId,
+      site: this.site,
       displayName: this.displayName,
       avatarUrl: this.avatarUrl,
       realNameVerified: this.realNameVerified

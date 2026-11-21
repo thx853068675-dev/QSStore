@@ -1,6 +1,7 @@
 """Whole-catalog sorting and stable page boundaries, without remote collection."""
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from server.hapstore import app, catalog_paging, collector, db
@@ -85,6 +86,98 @@ class CatalogSortTest(unittest.TestCase):
             self.assertEqual([r['id'] for r in result['items']], [a])
         # Arbitrary direction input cannot become SQL.
         self.assertEqual(self.ids(sort='new',direction="ASC; DROP TABLE app"), self.ids(sort='new'))
+
+    def test_discovery_collections_use_published_catalog_and_real_release_dates(self):
+        now = int(time.time())
+        recent = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 2 * 86400))
+        old = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 20 * 86400))
+        future = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now + 3600))
+        fresh = self.listing(1, stars=10, downloads=5, created=now - 86400, category='影音')
+        busy = self.listing(2, stars=20, downloads=30)
+        quiet = self.listing(3, stars=30, downloads=1)
+        hidden = self.listing(4, stars=900, downloads=500, created=now)
+        db.connect().execute("UPDATE app SET status='hidden' WHERE id=?", (hidden,))
+        db.connect().commit()
+        db.replace_releases(busy, [
+            *[dict(tag=f'v{i}', published_at=recent, github_downloads=10, assets=[]) for i in range(3)],
+            dict(tag='preview', published_at=recent, prerelease=True, github_downloads=0, assets=[]),
+            dict(tag='future', published_at=future, github_downloads=0, assets=[]),
+        ])
+        db.replace_releases(quiet, [dict(tag='v1', published_at=old, github_downloads=1, assets=[])])
+        # An old release cannot become a weekly update because its listing was just collected.
+        db.connect().execute('UPDATE app SET updated_at=? WHERE id=?', (now, quiet))
+        db.connect().commit()
+
+        with patch.object(collector, 'fetch_releases', side_effect=AssertionError('remote collection forbidden')):
+            endpoint = app.h_collections(dict(window_days=['7'], limit=['1']))
+            more = app.h_collections(dict(key=['stars'], page=['2'], limit=['1']))
+        blocks = {block['key']: block for block in endpoint['blocks']}
+        self.assertEqual([row['id'] for row in blocks['new']['items']], [fresh])
+        self.assertEqual([row['id'] for row in blocks['frequent']['items']], [busy])
+        self.assertEqual(blocks['frequent']['items'][0]['updates_in_window'], 3)
+        self.assertEqual([row['id'] for row in blocks['updated']['items']], [busy])
+        self.assertEqual(blocks['stars_week']['items'], [])
+        self.assertEqual([row['id'] for row in blocks['stars']['items']], [quiet])
+        self.assertEqual([row['id'] for row in blocks['downloads']['items']], [busy])
+        self.assertEqual(endpoint['categories'], [{'category':'工具','total':2}, {'category':'影音','total':1}])
+        self.assertEqual([row['id'] for row in endpoint['type_groups'][0]['items']], [quiet, busy])
+        self.assertEqual(len(more['blocks']), 1)
+        self.assertEqual(more['blocks'][0]['total'], 3)
+        self.assertEqual([row['id'] for row in more['blocks'][0]['items']], [busy])
+        self.assertNotIn('categories', more)
+        with self.assertRaises(app.ApiError):
+            app.h_collections(dict(key=['invalid']))
+
+    def test_week_stars_use_today_then_accumulate_available_rolling_history(self):
+        now = int(time.time())
+        app_id = self.listing(1, stars=20)
+        outside = self.listing(2, stars=5)
+        with patch.object(db.time, 'time', return_value=now - 8 * 86400):
+            db.record_discovery_stars()
+        db.connect().execute('UPDATE app SET stars=50 WHERE id=?', (outside,))
+        db.connect().commit()
+        with patch.object(db.time, 'time', return_value=now):
+            db.record_discovery_stars()
+            block = db.list_collections(key='stars_week')['blocks'][0]
+            self.assertEqual(block['basis'], 'today')
+            self.assertEqual(block['observed_days'], 1)
+            self.assertEqual([(row['id'], row['stars_today']) for row in block['items']],
+                             [(outside, 50), (app_id, 20)])
+
+        db.connect().execute('UPDATE app SET stars=22 WHERE id=?', (app_id,))
+        db.connect().commit()
+        for current in (now, now + 2 * 86400):
+            with patch.object(db.time, 'time', return_value=current):
+                block = db.list_collections(key='stars_week')['blocks'][0]
+            self.assertEqual(block['basis'], 'growth')
+            self.assertEqual(block['observed_from'], now)
+            self.assertEqual(block['observed_days'], 1 if current == now else 3)
+            self.assertEqual([(row['id'], row['stars_delta']) for row in block['items']], [(app_id, 2)])
+
+    def test_week_star_growth_needs_observed_baseline_and_same_linked_repo(self):
+        now = int(time.time())
+        rising = self.listing(1, stars=20)
+        falling = self.listing(2, stars=10)
+        relinked = self.listing(3, stars=100)
+        source = self.listing(4, stars=100)
+        with patch.object(db.time, 'time', return_value=now - 7 * 86400):
+            db.record_discovery_stars()
+            db.connect().execute('UPDATE app SET stars=22 WHERE id=?', (rising,))
+            db.connect().commit()
+            db.record_discovery_stars()  # The first observation of the day stays intact.
+        new = self.listing(5, stars=100)
+        c = db.connect()
+        c.execute('UPDATE app SET stars=28 WHERE id=?', (rising,))
+        c.execute('UPDATE app SET stars=9 WHERE id=?', (falling,))
+        c.execute("UPDATE app SET status='source' WHERE id=?", (source,))
+        c.execute('INSERT INTO app_source VALUES (?,?,?,?)', (relinked,source,'[]',1))
+        c.commit()
+
+        with patch.object(db.time, 'time', return_value=now):
+            block = db.list_collections(key='stars_week')['blocks'][0]
+        self.assertEqual(block['observed_days'], 7)
+        self.assertEqual([(row['id'], row['stars_delta']) for row in block['items']], [(rising, 8)])
+        self.assertNotIn(new, [row['id'] for row in block['items']])
 
     def test_snapshot_cache_is_bounded_and_equivalent_order_reuses_token(self):
         token = catalog_paging.remember(('one',), [1,2])

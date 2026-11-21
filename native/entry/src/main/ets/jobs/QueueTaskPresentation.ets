@@ -2,6 +2,7 @@ import { DeviceInstallGroup } from './DeviceInstallGroup';
 import { InstallJob, InstallStage } from './InstallJob';
 import { InstallTaskSnapshot, InstallTaskState } from './InstallTaskState';
 import { I18n } from '../data/I18n';
+import { InstallScheduling } from './InstallScheduling';
 
 /** A mounted queue card keeps its identity while only its live presentation changes. */
 export class QueueTaskView {
@@ -28,13 +29,16 @@ export class QueueTaskPresentation {
     view.error = !view.running && view.job.lastError.length > 0 &&
       ![InstallStage.WAITING_CONFIRMATION,InstallStage.WAITING_COMPATIBILITY,InstallStage.SKIPPED].includes(view.job.stage);
     view.warning = view.running && view.job.stage === InstallStage.INSTALLING;
-    if(view.job.stage===InstallStage.WAITING_CONFIRMATION){
+    if (task?.waitingFor) {
+      view.detail = (InstallScheduling.local(view.job) ? I18n.t('本地优先') + ' · ' : '') + task.waitingFor;
+    } else if(view.job.stage===InstallStage.WAITING_CONFIRMATION){
       view.detail=I18n.t('等待确认，仅此设备暂停');
     } else if (view.job.stage === InstallStage.QUEUED && !view.running) {
       const time = QueueTaskPresentation.enqueuedAt(view.job);
       const ahead = rows.filter((row: InstallTaskSnapshot) => row.job.id !== id &&
-        row.job.stage === InstallStage.QUEUED && DeviceInstallGroup.deviceKey(row.job)===DeviceInstallGroup.deviceKey(view.job) && QueueTaskPresentation.enqueuedAt(row.job) < time).length;
-      view.detail = I18n.t('排队中 · 第 ') + (ahead + 1) + I18n.t(' 个');
+        row.job.stage === InstallStage.QUEUED && InstallScheduling.source(row.job) === InstallScheduling.source(view.job) &&
+        DeviceInstallGroup.deviceKey(row.job)===DeviceInstallGroup.deviceKey(view.job) && QueueTaskPresentation.enqueuedAt(row.job) < time).length;
+      view.detail = (InstallScheduling.local(view.job) ? I18n.t('本地优先 · 第 ') : I18n.t('排队中 · 第 ')) + (ahead + 1) + I18n.t(' 个');
     } else if (view.job.stage === InstallStage.WAITING_COMPATIBILITY && !view.running) {
       view.detail = I18n.t('设备适配确认已取消，左滑卡片继续安装');
     } else if (view.error) {

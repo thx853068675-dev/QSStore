@@ -20,6 +20,8 @@ import threading
 import time
 from typing import Any, Iterable
 from . import catalog_paging
+from . import submission_repository, distribution, developer_registry, github_association
+from . import listing_presentation
 
 DB_PATH = os.environ.get("HAPSTORE_DB", "/var/lib/hapstore/hapstore.db")
 
@@ -72,7 +74,8 @@ CREATE TABLE IF NOT EXISTS review (
     stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 5),
     body TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    device_model TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS account_avatar (
@@ -180,6 +183,17 @@ CREATE TABLE IF NOT EXISTS report (
     created_at    INTEGER NOT NULL
 );
 
+
+CREATE TABLE IF NOT EXISTS discovery_star_sample (
+    app_id INTEGER NOT NULL REFERENCES app(id) ON DELETE CASCADE,
+    day INTEGER NOT NULL,
+    sampled_at INTEGER NOT NULL,
+    source_id INTEGER NOT NULL,
+    stars INTEGER NOT NULL,
+    PRIMARY KEY (app_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_star_day ON discovery_star_sample(day);
+
 CREATE TABLE IF NOT EXISTS event_download (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     app_id        INTEGER NOT NULL,
@@ -201,6 +215,17 @@ CREATE INDEX IF NOT EXISTS idx_review_app ON review(app_id, updated_at DESC);
 """
 
 SCHEMA += """
+-- Multiple historical listings may share an identity. New publications check
+-- every binding under the same write transaction, without merging old rows.
+CREATE TABLE IF NOT EXISTS app_repository_identity (
+ app_id INTEGER PRIMARY KEY REFERENCES app(id) ON DELETE CASCADE,
+ provider TEXT NOT NULL CHECK(provider IN ('github','gitee')),
+ remote_id INTEGER NOT NULL CHECK(remote_id>0),
+ canonical_repo TEXT NOT NULL,
+ verified_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_app_repository_identity
+ ON app_repository_identity(provider,remote_id);
 CREATE TABLE IF NOT EXISTS artifact_inspection (
  cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, checked_at INTEGER NOT NULL
 );
@@ -246,6 +271,26 @@ CREATE VIEW IF NOT EXISTS catalog_release AS
    WHERE a.catalog_app_id=m.app_id AND a.release_id=r.id);
 """
 
+SCHEMA += distribution.SCHEMA
+
+# Create this after migrating the legacy review table, so SQLite cannot
+# retarget the foreign key to the temporary table used during that migration.
+REVIEW_REPLY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS review_reply (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id INTEGER NOT NULL REFERENCES review(id) ON DELETE CASCADE,
+    account_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    body TEXT NOT NULL CHECK(length(body) BETWEEN 1 AND 2000),
+    created_at INTEGER NOT NULL,
+    reply_to_id INTEGER,
+    is_developer INTEGER NOT NULL DEFAULT 0,
+    device_model TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_review_reply_thread ON review_reply(review_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_review_reply_account ON review_reply(account_id);
+"""
+
 _local = threading.local()
 _init_lock = threading.Lock()
 _initialized = False
@@ -258,6 +303,7 @@ def connect() -> sqlite3.Connection:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         conn = sqlite3.connect(DB_PATH, timeout=15.0)
         conn.row_factory = sqlite3.Row
+        distribution.register(conn)
         conn.execute("PRAGMA foreign_keys = ON")
         _local.conn = conn
     return conn
@@ -318,6 +364,18 @@ def init_db() -> None:
             conn.execute("DROP TABLE review_single_comment")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_review_app ON review(app_id, updated_at DESC)")
         conn.commit()
+        conn.executescript(REVIEW_REPLY_SCHEMA)
+        if 'reply_to_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(review_reply)')}:
+            conn.execute("ALTER TABLE review_reply ADD COLUMN reply_to_id INTEGER")
+        if 'is_developer' not in {row['name'] for row in conn.execute('PRAGMA table_info(review_reply)')}:
+            conn.execute("ALTER TABLE review_reply ADD COLUMN is_developer INTEGER NOT NULL DEFAULT 0")
+        for table in ('review', 'review_reply'):
+            if 'device_model' not in {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN device_model TEXT NOT NULL DEFAULT ''")
+        conn.executescript(developer_registry.SCHEMA)
+        conn.executescript(github_association.SCHEMA)
+        conn.executescript(listing_presentation.SCHEMA)
+        developer_registry.migrate_claimed_publishers(conn)
         _initialized = True
 
 
@@ -353,6 +411,8 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True, related: dict | N
         "synced_at": row["synced_at"],
         "sync_error": row["sync_error"],
     }
+    app['distribution_region'] = (related['distribution'].get(row['id'], 'ordinary')
+                                  if related is not None else distribution.region(connect(), row['id']))
     source = related['sources'].get(row['id']) if related is not None else None
     app['secondary_repo'] = source['repo'] if source else ''
     if source:
@@ -362,6 +422,9 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True, related: dict | N
     ).fetchone())
     app["publisher_name"] = publisher["display_name"] if publisher else ""
     if with_counts and related is not None:
+        app['custom_display_name'] = related['listing_names'].get(row['id'], '')
+        if app['custom_display_name']:
+            app['display_name'] = app['custom_display_name']
         app['releases_count'] = related['counts'].get(row['id'], 0)
         app['github_downloads'] = related['github_downloads'].get(row['id'])
         app['latest'] = related['latest'].get(row['id'])
@@ -371,12 +434,23 @@ def _row_to_app(row: sqlite3.Row, *, with_counts: bool = True, related: dict | N
 
 
 def _app_related(rows) -> dict:
-    out = {name: {} for name in ('icons', 'publishers', 'counts', 'github_downloads', 'latest', 'assets', 'sources')}
+    out = {name: {} for name in ('icons', 'publishers', 'counts', 'github_downloads', 'latest', 'assets',
+                                'sources', 'distribution', 'listing_names')}
     ids = [row['id'] for row in rows]
     if not ids:
         return out
     c, marks = connect(), ','.join('?' for _ in ids)
-    out['icons'] = {r['app_id']: dict(r) for r in c.execute(f'SELECT app_id,digest FROM app_icon WHERE app_id IN ({marks})', ids)}
+    # Share the existing icon batch: region labels must not add per-card reads.
+    for row in c.execute(f'''SELECT a.id AS app_id,i.digest,COALESCE(d.region,'ordinary') AS region,
+        presentation.display_name AS listing_name
+        FROM app a LEFT JOIN app_icon i ON i.app_id=a.id
+        LEFT JOIN app_distribution d ON d.app_id=a.id
+        LEFT JOIN listing_presentation presentation ON presentation.app_id=a.id WHERE a.id IN ({marks})''', ids):
+        out['distribution'][row['app_id']] = row['region']
+        if row['digest'] is not None:
+            out['icons'][row['app_id']] = dict(row)
+        if row['listing_name']:
+            out['listing_names'][row['app_id']] = row['listing_name']
     out['publishers'] = {r['app_id']: dict(r) for r in c.execute(f'SELECT app_id,display_name FROM publisher WHERE app_id IN ({marks})', ids)}
     out['sources'] = {r['app_id']: dict(r) for r in c.execute(f'''SELECT s.app_id,
         p.repo_full_name AS repo,p.stars FROM app_source s JOIN app p ON p.id=s.source_app_id
@@ -436,9 +510,12 @@ def list_apps(
     where = ["status='published'"]
     params: list[Any] = []
     if q:
-        where.append("(display_name LIKE ? OR name LIKE ? OR repo_full_name LIKE ? OR summary LIKE ?)")
+        where.append("(display_name LIKE ? OR name LIKE ? OR repo_full_name LIKE ? OR summary LIKE ? "
+                     "OR REPLACE(REPLACE(display_name,' ',''),'　','') LIKE ? "
+                     "OR REPLACE(REPLACE(name,' ',''),'　','') LIKE ?)")
         like = f"%{q}%"
-        params += [like, like, like, like]
+        compact = '%' + (''.join(q.split()) or q) + '%'
+        params += [like, like, like, like, compact, compact]
     if category:
         where.append("category=?")
         params.append(category)
@@ -471,7 +548,7 @@ def list_apps(
     page = max(1, page)
     page_size = max(1, min(100, page_size))
     offset = (page - 1) * page_size
-    prefix, table = '', 'app'
+    prefix, table = '', 'region_catalog_app AS app'
     if sort == 'downloads':
         # Match _app_related: sum every primary/secondary repository attachment,
         # preserve unknown totals, and keep them last in both directions.
@@ -479,11 +556,11 @@ def list_apps(
             CASE WHEN COUNT(r.github_downloads)=COUNT(*) AND COUNT(*)>0
             THEN SUM(r.github_downloads) END AS n
             FROM catalog_repository m JOIN release r ON r.app_id=m.repository_id GROUP BY m.app_id) '''
-        table = 'app LEFT JOIN downloads ON downloads.app_id=app.id'
+        table = 'region_catalog_app AS app LEFT JOIN downloads ON downloads.app_id=app.id'
         order = f'downloads.n IS NULL ASC, downloads.n {sql_direction}, app.id {sql_direction}'
     token = ''
     if pagination == 'snapshot':
-        key = (DB_PATH, q, category, sort, direction, featured, page_size)
+        key = (DB_PATH, q, category, sort, direction, featured, page_size, distribution.cache_key())
         ids = catalog_paging.recall(snapshot, key) if snapshot else None
         if snapshot and ids is None:
             return dict(items=[], total=0, page=page, page_size=page_size, snapshot_expired=True)
@@ -497,11 +574,11 @@ def list_apps(
         selected = ids[offset:offset + page_size]
         # Hidden listings disappear immediately without shifting subsequent offsets.
         by_id = {r['id']: r for r in c.execute(
-            f"SELECT * FROM app WHERE status='published' AND id IN ({','.join('?' for _ in selected)})",
+            f"SELECT * FROM region_catalog_app WHERE status='published' AND id IN ({','.join('?' for _ in selected)})",
             selected)} if selected else {}
         rows = [by_id[id] for id in selected if id in by_id]
     else:
-        total = c.execute(f"SELECT COUNT(*) AS n FROM app WHERE {clause}", params).fetchone()["n"]
+        total = c.execute(f"SELECT COUNT(*) AS n FROM region_catalog_app WHERE {clause}", params).fetchone()["n"]
         rows = c.execute(
             f"{prefix}SELECT app.* FROM {table} WHERE {clause} ORDER BY {order} LIMIT ? OFFSET ?",
             params + [page_size, offset]).fetchall()
@@ -513,6 +590,142 @@ def list_apps(
         "page_size": page_size,
         "snapshot": token,
     }
+
+
+DISCOVERY_COLLECTIONS = ('stars_week', 'downloads', 'new', 'frequent', 'stars', 'updated')
+DISCOVERY_DAY_OFFSET = 8 * 3600  # Beijing time for the daily sample, not the rolling window.
+
+
+def record_discovery_stars() -> None:
+    """Retain one observation per Beijing calendar day from the catalog already on disk."""
+    now = int(time.time())
+    day = (now + DISCOVERY_DAY_OFFSET) // 86400
+    c = connect()
+    with c:
+        c.execute("""INSERT OR IGNORE INTO discovery_star_sample
+            SELECT a.id, ?, ?, COALESCE(s.source_app_id, 0), a.stars + COALESCE(p.stars, 0)
+            FROM app a LEFT JOIN app_source s ON s.app_id=a.id
+            LEFT JOIN app p ON p.id=s.source_app_id
+            WHERE a.status='published'""", (day, now))
+        c.execute('DELETE FROM discovery_star_sample WHERE day < ?', (day - 32,))
+
+
+def list_collections(*, window_days: int = 7, limit: int = 6,
+                     key: str = '', page: int = 1) -> dict[str, Any]:
+    """Read discovery shelves from a consistent local catalog snapshot."""
+    now = int(time.time())
+    window_days = max(1, min(30, window_days))
+    limit = max(1, min(50, limit))
+    page = max(1, min(10000, page)) if key else 1
+    since = now - window_days * 86400
+    result: dict[str, Any] = {
+        'window_days': window_days, 'generated_at': now, 'blocks': [],
+    }
+    c = connect()
+    # A savepoint gives the list, its related metadata, and its counts the same
+    # read snapshot, without committing any caller's transaction.
+    c.execute('SAVEPOINT discovery_read')
+    try:
+        for name in (key,) if key else DISCOVERY_COLLECTIONS:
+            result['blocks'].append(_discovery_block(c, name, since, now, limit, page))
+        result.update(distribution.flags(c))
+        if not key and result['show_overseas_section']:
+            result['blocks'].append(_discovery_block(c, 'overseas', since, now, limit, 1))
+        if not key:
+            categories = c.execute("""SELECT category, COUNT(*) AS total FROM region_catalog_app
+                WHERE status='published' AND category<>'' GROUP BY category
+                ORDER BY total DESC, category""").fetchall()
+            result['categories'] = [dict(row) for row in categories]
+            result['type_groups'] = [
+                dict(category=row['category'], items=list_apps(
+                    sort='stars', category=row['category'], page_size=4)['items'])
+                for row in categories[:2]
+            ]
+    finally:
+        c.execute('RELEASE discovery_read')
+    return result
+
+
+def _discovery_block(c: sqlite3.Connection, key: str, since: int, now: int,
+                     limit: int, page: int) -> dict[str, Any]:
+    if key == 'overseas':
+        with distribution.only_region('overseas'):
+            catalog = list_apps(sort='updated', page=page, page_size=limit)
+        return dict(key=key, items=catalog['items'], total=catalog['total'], page=page, page_size=limit)
+    if key in ('stars', 'downloads'):
+        catalog = list_apps(sort=key, page=page, page_size=limit)
+        return dict(key=key, items=catalog['items'], total=catalog['total'],
+                    page=page, page_size=limit)
+
+    metric = ''
+    basis = ''
+    if key == 'new':
+        ranking = """SELECT id FROM region_catalog_app WHERE status='published' AND created_at BETWEEN ? AND ?
+                     ORDER BY created_at DESC, id DESC"""
+        params = (since, now)
+    elif key in ('frequent', 'updated'):
+        metric = 'updates_in_window'
+        order = 'updates_in_window DESC, latest DESC' if key == 'frequent' else 'latest DESC'
+        # Use release publication time, never the collector's updated_at.
+        # catalog_release includes eligible linked releases for the listing.
+        ranking = f"""SELECT a.id, COUNT(*) AS updates_in_window,
+                             MAX(CAST(strftime('%s', r.published_at) AS INTEGER)) AS latest
+                      FROM region_catalog_app a JOIN catalog_release r ON r.app_id=a.id
+                      WHERE a.status='published' AND r.prerelease=0
+                        AND CAST(strftime('%s', r.published_at) AS INTEGER) BETWEEN ? AND ?
+                      GROUP BY a.id ORDER BY {order}, a.id DESC"""
+        params = (since, now)
+    elif key == 'stars_week':
+        metric = 'stars_delta'
+        basis = 'growth'
+        # Use the earliest comparable observation inside the rolling window.
+        # A first observation from today is useful immediately as the baseline.
+        ranking = """SELECT a.id, a.stars + COALESCE(p.stars, 0) - old.stars AS stars_delta,
+                                old.sampled_at AS observed_from
+                     FROM region_catalog_app a LEFT JOIN app_source s ON s.app_id=a.id
+                     LEFT JOIN app p ON p.id=s.source_app_id
+                     JOIN discovery_star_sample old ON old.app_id=a.id AND old.day=(
+                         SELECT MIN(day) FROM discovery_star_sample
+                         WHERE app_id=a.id AND sampled_at BETWEEN ? AND ?
+                           AND source_id=COALESCE(s.source_app_id, 0))
+                     WHERE a.status='published' AND stars_delta > 0
+                     ORDER BY stars_delta DESC, a.id DESC"""
+        params = (since, now)
+    else:
+        raise ValueError('Unknown discovery collection')
+
+    ranked = c.execute(ranking, params).fetchall()
+    if key == 'stars_week' and not ranked:
+        # With no measurable growth yet, rank today's observed counts and
+        # identify that metric explicitly so clients never display it as growth.
+        metric = 'stars_today'
+        basis = 'today'
+        ranked = c.execute("""SELECT a.id, sample.stars AS stars_today, sample.sampled_at AS observed_from
+            FROM discovery_star_sample sample JOIN region_catalog_app a ON a.id=sample.app_id
+            LEFT JOIN app_source s ON s.app_id=a.id
+            WHERE sample.day=? AND sample.sampled_at<=? AND a.status='published'
+              AND sample.source_id=COALESCE(s.source_app_id, 0)
+            ORDER BY stars_today DESC, a.id DESC""", ((now + DISCOVERY_DAY_OFFSET) // 86400, now)).fetchall()
+    selected = ranked[(page - 1) * limit:page * limit]
+    ids = [row['id'] for row in selected]
+    rows = {row['id']: row for row in c.execute(
+        f"SELECT * FROM region_catalog_app WHERE id IN ({','.join('?' for _ in ids)})", ids)} if ids else {}
+    related = _app_related(rows.values())
+    items = []
+    for rank in selected:
+        item = _row_to_app(rows[rank['id']], related=related)
+        if metric:
+            item[metric] = rank[metric]
+        items.append(item)
+    block = dict(key=key, items=items, total=len(ranked), page=page, page_size=limit)
+    if basis:
+        observed_from = min((row['observed_from'] for row in ranked), default=0)
+        window_days = (now - since) // 86400
+        observed_days = ((now + DISCOVERY_DAY_OFFSET) // 86400 -
+                         (observed_from + DISCOVERY_DAY_OFFSET) // 86400 + 1) if observed_from else 0
+        block.update(basis=basis, observed_from=observed_from,
+                     observed_days=min(window_days, observed_days))
+    return block
 
 
 def get_app(app_id: int) -> dict[str, Any] | None:
@@ -528,6 +741,7 @@ def get_app_by_repo(repo: str) -> dict[str, Any] | None:
 
 
 def list_published_by_account(account_id: str) -> list[dict[str, Any]]:
+    """Owner management is account-scoped; public distribution filters do not apply."""
     rows = connect().execute(
         """SELECT app.* FROM app JOIN publisher ON publisher.app_id=app.id
            WHERE publisher.account_id=? AND app.status='published'
@@ -588,7 +802,9 @@ def primary_bundles(app_id: int) -> set[str]:
 
 
 def configure_app_source(app_id: int, account_id: str, category: str,
-                         draft_token: str = '', remove: bool = False) -> None:
+                         draft_token: str = '', remove: bool = False,
+                         rename: tuple[str, str] | None = None, presentation: dict | None = None,
+                         expected_configuration: str = '') -> None:
     """Publish a verified association and its category in one short transaction.
 
     Network/package parsing happened in the durable draft worker. Recheck
@@ -601,11 +817,44 @@ def configure_app_source(app_id: int, account_id: str, category: str,
             WHERE a.id=? AND a.status='published' AND p.account_id=?''', (app_id, account_id)).fetchone()
         if not parent:
             raise ValueError('PUBLISHER_MISMATCH')
+        if expected_configuration and listing_presentation.configuration_revision(c, app_id) != expected_configuration:
+            raise ValueError('CONFIGURATION_CHANGED')
+        primary_repo = parent['repo_full_name']
+        if rename:
+            old_repo, new_repo = rename
+            if primary_repo != old_repo:
+                raise ValueError('PRIMARY_REPO_CHANGED')
+            if c.execute('SELECT 1 FROM app WHERE repo_full_name=? COLLATE NOCASE AND id<>?',
+                         (new_repo, app_id)).fetchone():
+                raise ValueError('PRIMARY_REPO_EXISTS')
+            if c.execute("SELECT 1 FROM refresh_task WHERE app_id=? AND status='running'", (app_id,)).fetchone():
+                raise ValueError('PRIMARY_REPO_SYNCING')
+            if c.execute("SELECT 1 FROM catalog_task WHERE app_id=? AND status IN ('pending','running')",
+                         (app_id,)).fetchone():
+                raise ValueError('PRIMARY_REPO_SYNCING')
+            owner, name = new_repo.split('/')
+            c.execute('UPDATE app SET repo_full_name=?,owner=?,name=? WHERE id=?',
+                      (new_repo, owner, name, app_id))
+            old_url, new_url = (f'https://github.com/{repo}/releases/' for repo in rename)
+            c.execute('''UPDATE release SET html_url=?||substr(html_url,?) WHERE app_id=?
+                AND substr(html_url,1,?)=? COLLATE NOCASE''',
+                      (new_url, len(old_url) + 1, app_id, len(old_url), old_url))
+            c.execute('''UPDATE asset SET download_url=?||substr(download_url,?)
+                WHERE release_id IN (SELECT id FROM release WHERE app_id=?)
+                AND substr(download_url,1,?)=? COLLATE NOCASE''',
+                      (new_url, len(old_url) + 1, app_id, len(old_url), old_url))
+            # Deployments with attachment diffing keep a separate URL baseline.
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='repo_asset_observation'").fetchone():
+                row = c.execute('SELECT assets_json FROM repo_asset_observation WHERE app_id=?', (app_id,)).fetchone()
+                if row and old_url in row['assets_json']:
+                    c.execute('UPDATE repo_asset_observation SET assets_json=replace(assets_json,?,?) WHERE app_id=?',
+                              (old_url, new_url, app_id))
+            primary_repo = new_repo
         if draft_token:
             draft = get_submit_draft(draft_token, account_id)
             if not draft or draft['inspection_state'] != 'ready':
                 raise ValueError('SOURCE_DRAFT_NOT_READY')
-            if draft['repo'].lower() == parent['repo_full_name'].lower():
+            if draft['repo'].lower() in (primary_repo.lower(), parent['repo_full_name'].lower()):
                 raise ValueError('SOURCE_IS_PRIMARY')
             allowed = primary_bundles(app_id)
             prepared = json.loads(draft['prepared_json'])
@@ -647,6 +896,7 @@ def configure_app_source(app_id: int, account_id: str, category: str,
             c.execute('DELETE FROM app_source WHERE app_id=?', (app_id,))
         c.execute('UPDATE app SET category=?,updated_at=? WHERE id=?', (category, now, app_id))
         c.execute('INSERT OR REPLACE INTO app_category(app_id,category) VALUES (?,?)', (app_id, category))
+        listing_presentation.apply(c, app_id, presentation)
 
 
 def list_releases(app_id: int, *, page: int = 1, page_size: int = 20,
@@ -782,27 +1032,118 @@ def review_summary(app_id: int) -> dict[str, Any]:
     return {"count": row["n"], "average": round(row["avg"] or 0, 1)}
 
 
+_REPLY_FIELDS = """r.id, r.display_name, r.body, r.created_at, r.device_model,
+                   r.account_id = NULLIF(?, '') AS is_developer,
+                   r.reply_to_id, COALESCE(target.display_name, '') AS reply_to_name,
+                   COALESCE(a.avatar_url, '') AS avatar_url,
+                   r.account_id = NULLIF(?, '') AS can_delete"""
+_REPLY_JOINS = """LEFT JOIN account_avatar a ON a.account_id=r.account_id
+                  LEFT JOIN review_reply target ON target.id=r.reply_to_id AND target.review_id=r.review_id"""
+
+
+def _reply_previews(c: sqlite3.Connection, review_ids: list[int], viewer: str, author: str) -> dict[int, list[dict]]:
+    if not review_ids:
+        return {}
+    placeholders = ','.join('?' for _ in review_ids)
+    rows = c.execute(f"""SELECT r.review_id, {_REPLY_FIELDS} FROM review thread
+                         JOIN review_reply r ON r.id IN (
+                             SELECT id FROM review_reply WHERE review_id=thread.id ORDER BY id LIMIT 3)
+                         {_REPLY_JOINS}
+                         WHERE thread.id IN ({placeholders}) ORDER BY r.id""",
+                     (author, viewer, *review_ids)).fetchall()
+    previews: dict[int, list[dict]] = {}
+    for row in rows:
+        reply = dict(row, can_delete=bool(row["can_delete"]), is_developer=bool(row["is_developer"]))
+        previews.setdefault(reply.pop("review_id"), []).append(reply)
+    return previews
+
+
 def list_reviews(app_id: int, page: int = 1, page_size: int = 20,
-                 viewer_account_id: str = "") -> dict[str, Any]:
+                 viewer_account_id: str = "", *, include_reply_preview: bool = False) -> dict[str, Any]:
     page = max(1, page)
     page_size = max(1, min(50, page_size))
     c = connect()
+    can_moderate = developer_registry.moderates(c, app_id, viewer_account_id)
+    author = developer_registry.claimant(c, app_id) or ''
     total = c.execute("SELECT COUNT(*) AS n FROM review WHERE app_id=?", (app_id,)).fetchone()["n"]
     rows = c.execute(
-        """SELECT review.id, review.display_name, review.stars, review.body,
-                  review.updated_at, COALESCE(account_avatar.avatar_url, '') AS avatar_url,
+        """SELECT review.id, review.display_name, review.stars,
+                  CASE WHEN hidden.review_id IS NULL OR ? OR review.account_id=NULLIF(?, '')
+                       THEN review.body ELSE '' END AS body,
+                  hidden.review_id IS NOT NULL AS hidden,
+                  review.updated_at, review.device_model, COALESCE(account_avatar.avatar_url, '') AS avatar_url,
+                  (SELECT COUNT(*) FROM review_reply WHERE review_id=review.id) AS reply_count,
+                  review.account_id = NULLIF(?, '') AS is_developer,
                   CASE WHEN review.account_id = NULLIF(?, '') THEN 1 ELSE 0 END AS can_delete
            FROM review LEFT JOIN account_avatar
              ON account_avatar.account_id = review.account_id
+           LEFT JOIN developer_review_hidden hidden ON hidden.review_id=review.id
            WHERE review.app_id=? ORDER BY review.updated_at DESC, review.id DESC
            LIMIT ? OFFSET ?""",
-        (viewer_account_id, app_id, page_size, (page - 1) * page_size),
+        (can_moderate, viewer_account_id, author, viewer_account_id, app_id, page_size, (page - 1) * page_size),
     ).fetchall()
     items = [dict(row) for row in rows]
     for item in items:
         item["can_delete"] = bool(item["can_delete"])
+        item["hidden"] = bool(item["hidden"])
+        item['is_developer'] = bool(item['is_developer'])
+    if include_reply_preview:
+        previews = _reply_previews(c, [item["id"] for item in items if item["reply_count"]], viewer_account_id, author)
+        for item in items:
+            item["reply_preview"] = previews.get(item["id"], [])
     return {"items": items, "summary": review_summary(app_id),
-            "total": total, "page": page, "page_size": page_size}
+            "total": total, "page": page, "page_size": page_size, "replies_supported": True,
+            "can_moderate": can_moderate, 'claimed_by_me': bool(author and author == viewer_account_id)}
+
+
+def list_review_replies(app_id: int, review_id: int, page: int, page_size: int,
+                        viewer_account_id: str = "", *, oldest_first: bool = False) -> dict[str, Any] | None:
+    c = connect()
+    thread = c.execute("""SELECT (SELECT COUNT(*) FROM review_reply WHERE review_id=review.id) AS total
+                          FROM review WHERE app_id=? AND id=?""", (app_id, review_id)).fetchone()
+    if thread is None:
+        return None
+    total = thread["total"]
+    page_size = max(1, min(50, page_size))
+    last_page = max(1, (total + page_size - 1) // page_size)
+    page = last_page if oldest_first and page == 0 else max(1, min(page, last_page))
+    order = 'ASC' if oldest_first else 'DESC'
+    author = developer_registry.claimant(c, app_id) or ''
+    rows = c.execute(f"""SELECT {_REPLY_FIELDS} FROM review_reply r {_REPLY_JOINS}
+                         WHERE r.review_id=? ORDER BY r.id {order} LIMIT ? OFFSET ?""",
+                     (author, viewer_account_id, review_id, page_size, (page - 1) * page_size)).fetchall()
+    items = [dict(row, can_delete=bool(row["can_delete"]), is_developer=bool(row["is_developer"])) for row in rows]
+    result = {"items": items, "page": page, "page_size": page_size, "total": total, "reply_targets_supported": True}
+    if oldest_first:
+        result["reply_preview"] = items[:3] if page == 1 and page_size >= 3 else (
+            _reply_previews(c, [review_id], viewer_account_id, author).get(review_id, []))
+    return result
+
+
+def put_review_reply(app_id: int, review_id: int, account_id: str, display_name: str, body: str,
+                     reply_to_id: int | None = None, *, device_model: str = '') -> bool:
+    c = connect()
+    with c:
+        result = c.execute(f"""INSERT INTO review_reply(
+                              review_id,account_id,display_name,body,created_at,device_model,reply_to_id,is_developer)
+                              SELECT review.id,?,?,?,?,?,target.id,EXISTS(
+                                  SELECT 1 FROM developer_claim d {developer_registry.OWNER_JOIN}
+                                  WHERE d.app_id=review.app_id AND d.account_id=?)
+                              FROM review
+                              LEFT JOIN review_reply target ON target.id=? AND target.review_id=review.id
+                              WHERE review.id=? AND review.app_id=? AND (? IS NULL OR target.id IS NOT NULL)""",
+                           (account_id, display_name[:100], body, int(time.time()), device_model, account_id, reply_to_id,
+                            review_id, app_id, reply_to_id))
+    return result.rowcount == 1
+
+
+def delete_review_reply(app_id: int, review_id: int, reply_id: int, account_id: str) -> bool:
+    c = connect()
+    with c:
+        result = c.execute("""DELETE FROM review_reply WHERE id=? AND review_id=? AND account_id=?
+                              AND EXISTS(SELECT 1 FROM review WHERE id=? AND app_id=?)""",
+                           (reply_id, review_id, account_id, review_id, app_id))
+    return result.rowcount == 1
 
 
 def delete_review(app_id: int, review_id: int, account_id: str) -> bool:
@@ -815,12 +1156,12 @@ def delete_review(app_id: int, review_id: int, account_id: str) -> bool:
     return result.rowcount == 1
 
 
-def put_review(app_id: int, account_id: str, display_name: str, stars: int, body: str) -> None:
+def put_review(app_id: int, account_id: str, display_name: str, stars: int, body: str, *, device_model: str = '') -> None:
     now = int(time.time())
     c = connect()
-    c.execute("""INSERT INTO review(app_id,account_id,display_name,stars,body,created_at,updated_at)
-                 VALUES (?,?,?,?,?,?,?)""",
-              (app_id, account_id, display_name[:100], stars, body[:2000], now, now))
+    c.execute("""INSERT INTO review(app_id,account_id,display_name,stars,body,created_at,updated_at,device_model)
+                 VALUES (?,?,?,?,?,?,?,?)""",
+              (app_id, account_id, display_name[:100], stars, body[:2000], now, now, device_model))
     c.commit()
 
 
@@ -847,6 +1188,8 @@ def update_account_display_name(account_id: str, display_name: str) -> None:
     c.execute("UPDATE publisher SET display_name=? WHERE account_id=? AND display_name<>?",
               (display_name[:100], account_id, display_name[:100]))
     c.execute("UPDATE review SET display_name=? WHERE account_id=? AND display_name<>?",
+              (display_name[:100], account_id, display_name[:100]))
+    c.execute("UPDATE review_reply SET display_name=? WHERE account_id=? AND display_name<>?",
               (display_name[:100], account_id, display_name[:100]))
     c.commit()
 
@@ -949,6 +1292,8 @@ def _upsert_app(c: sqlite3.Connection, repo_full_name: str, fields: dict[str, An
     ).fetchone()
     if row:
         app_id = row["id"]
+        if {'display_name', 'description', 'summary'}.intersection(fields):
+            fields = listing_presentation.preserve(c, app_id, fields)
         cols = [k for k in fields if k in _APP_COLUMNS]
         if cols:
             sets = ", ".join(f"{k}=?" for k in cols)
@@ -1024,7 +1369,7 @@ def cached_repository_snapshot(repo: str, max_age_seconds: int) -> dict[str, Any
 
 def publish_prepared_app(draft_token: str, account_id: str, nickname: str,
                          category: str, choice: dict[str, Any] | list[dict[str, Any]],
-                         snapshot: dict[str, Any]) -> int:
+                         snapshot: dict[str, Any], presentation: dict | None = None) -> int:
     """Commit listing, exact selection and durable enrichment task atomically."""
     choices = choice if isinstance(choice, list) else [choice]
     choice = choices[0]
@@ -1045,13 +1390,16 @@ def publish_prepared_app(draft_token: str, account_id: str, nickname: str,
             if row["account_id"] != account_id:
                 raise ValueError("PUBLISHER_MISMATCH")
             return int(draft["completed_app_id"])
-        repo = draft["repo"]
-        previous = c.execute("""SELECT app.id,app.status,app.display_name,p.account_id
-            FROM app LEFT JOIN publisher p ON p.app_id=app.id
-            WHERE repo_full_name=? COLLATE NOCASE""", (repo,)).fetchone()
-        if (previous and previous["status"] == "published" and previous["account_id"]
-                and previous["account_id"] != account_id):
+        identity = snapshot.get('repository_identity') or {}
+        previous = submission_repository.existing(c, draft['repo'], identity, account_id)
+        if (previous and previous["status"] == "published" and previous["publisher_account_id"]
+                and previous["publisher_account_id"] != account_id):
             raise ValueError("PUBLISHER_MISMATCH")
+        if previous and previous['status'] != 'published':
+            claimant = developer_registry.claimant(c, previous['id'])
+            if claimant and claimant != account_id:
+                raise ValueError('PUBLISHER_MISMATCH')
+        repo = previous['repo_full_name'] if previous else identity['canonical_repo']
         selected_release = next((r for r in snapshot["releases"]
                                  if r["tag"] == choice["tag"]), None)
         selected_assets = []
@@ -1067,6 +1415,9 @@ def publish_prepared_app(draft_token: str, account_id: str, nickname: str,
             repo.split("/")[-1])
         fields.update(category=category, status="published", sync_error="")
         app_id = _upsert_app(c, repo, fields)
+        submission_repository.bind(c, app_id, identity)
+        listing_presentation.apply(c, app_id, presentation)
+        distribution.bootstrap_review(c, app_id, dict(fields, repo_full_name=repo))
         # Publish the selected file immediately. Historical files and other HAPs
         # are filtered by their verified bundle identity by the worker later.
         initial_release = dict(selected_release)
@@ -1176,6 +1527,7 @@ def apply_catalog_snapshot(repo: str, metadata: dict[str, Any],
         fields.update(synced_at=min(now, source_fetched_at) if source_fetched_at else now,
                       sync_error="")
         app_id = _upsert_app(c, repo, fields)
+        distribution.bootstrap_review(c, app_id, dict(fields, repo_full_name=repo))
         count = _replace_releases(c, app_id, releases)
         presentation = [r for r in releases if not r.get("prerelease")] or releases
         icon = next((a["_icon"] for r in presentation for a in r.get("assets", [])
@@ -1493,16 +1845,20 @@ def sync_account_profile(account_id: str, display_name: str, avatar_url: str) ->
             return
         c = connect()
         # Only changed values need a transaction; preserve the last public nickname/avatar on fallback.
+        name = display_name[:100]
         rename = display_name and display_name != account_id and c.execute(
-            'SELECT 1 FROM publisher WHERE account_id=? AND display_name<>? UNION ALL SELECT 1 FROM review WHERE account_id=? AND display_name<>? LIMIT 1',
-            (account_id, display_name[:100], account_id, display_name[:100])).fetchone()
+            '''SELECT 1 FROM publisher WHERE account_id=? AND display_name<>?
+               UNION ALL SELECT 1 FROM review WHERE account_id=? AND display_name<>?
+               UNION ALL SELECT 1 FROM review_reply WHERE account_id=? AND display_name<>? LIMIT 1''',
+            (account_id, name, account_id, name, account_id, name)).fetchone()
         avatar = c.execute('SELECT avatar_url FROM account_avatar WHERE account_id=?', (account_id,)).fetchone() if avatar_url else None
         update_avatar = bool(avatar_url and (not avatar or avatar['avatar_url'] != avatar_url))
         if rename or update_avatar:
             with c:
                 if rename:
-                    c.execute('UPDATE publisher SET display_name=? WHERE account_id=? AND display_name<>?', (display_name[:100], account_id, display_name[:100]))
-                    c.execute('UPDATE review SET display_name=? WHERE account_id=? AND display_name<>?', (display_name[:100], account_id, display_name[:100]))
+                    c.execute('UPDATE publisher SET display_name=? WHERE account_id=? AND display_name<>?', (name, account_id, name))
+                    c.execute('UPDATE review SET display_name=? WHERE account_id=? AND display_name<>?', (name, account_id, name))
+                    c.execute('UPDATE review_reply SET display_name=? WHERE account_id=? AND display_name<>?', (name, account_id, name))
                 if update_avatar:
                     c.execute('INSERT OR REPLACE INTO account_avatar(account_id,avatar_url,updated_at) VALUES (?,?,?)', (account_id, avatar_url, int(now)))
         if len(_profile_sync) >= 1024:

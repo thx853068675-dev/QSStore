@@ -2,13 +2,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-function configuration(configFile) {
-  if (!fs.existsSync(configFile)) return {
-    configured: false, baseUrl: 'https://store.example.invalid', publicKeySha256: '', caData: ''
-  };
-  let value, url;
-  try { value = JSON.parse(fs.readFileSync(configFile, 'utf8')); }
-  catch (_) { throw Error('Unable to read local store configuration'); }
+function endpoint(value, configFile) {
+  let url;
   try { url = new URL(value.baseUrl); }
   catch (_) { throw Error('Store configuration contains an invalid HTTPS origin'); }
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash ||
@@ -21,7 +16,26 @@ function configuration(configFile) {
   if (!caData.includes('-----BEGIN CERTIFICATE-----') || /PRIVATE KEY/.test(caData)) {
     throw Error('Store CA file must contain only public certificates');
   }
-  return { configured: true, baseUrl: url.origin, publicKeySha256: value.publicKeySha256, caData };
+  return { baseUrl: url.origin, publicKeySha256: value.publicKeySha256, caData };
+}
+
+function configuration(configFile) {
+  const directOnly = { overseasBaseUrl: '', overseasPublicKeySha256: '', overseasCaData: '' };
+  if (!fs.existsSync(configFile)) return {
+    configured: false, baseUrl: 'https://store.example.invalid', publicKeySha256: '', caData: '', ...directOnly
+  };
+  let value;
+  try { value = JSON.parse(fs.readFileSync(configFile, 'utf8')); }
+  catch (_) { throw Error('Unable to read local store configuration'); }
+  if (value.fallbacks !== undefined && (!Array.isArray(value.fallbacks) || value.fallbacks.length !== 0)) {
+    throw Error('Store configuration no longer accepts fallback endpoints; use the explicit overseas endpoint');
+  }
+  const primary = endpoint(value, configFile);
+  if (value.overseas === undefined) return { configured: true, ...primary, ...directOnly };
+  const overseas = endpoint(value.overseas, configFile);
+  if (overseas.baseUrl === primary.baseUrl) throw Error('The overseas origin must differ from the primary origin');
+  return { configured: true, ...primary, overseasBaseUrl: overseas.baseUrl,
+    overseasPublicKeySha256: overseas.publicKeySha256, overseasCaData: overseas.caData };
 }
 
 function prepare(root = path.resolve(__dirname, '..'), env = process.env) {

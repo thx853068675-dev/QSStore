@@ -10,6 +10,7 @@ export class InstallTaskSnapshot {
   job: InstallJob = new InstallJob();
   running: boolean = false;
   finishing: boolean = false;
+  waitingFor: string = '';
   percent: number = 0;
   phase: string = '';
   received: number = 0;
@@ -20,6 +21,7 @@ export class InstallTaskState {
   private static tasks: Map<string, InstallTaskSnapshot> = new Map();
   private static running: Set<string> = new Set();
   private static finishing: Set<string> = new Set();
+  private static waiting: Map<string, string> = new Map();
   private static removed: Set<string> = new Set();
   private static listeners: Map<number, (rows: InstallTaskSnapshot[]) => void> = new Map();
   private static nextListener: number = 0;
@@ -78,7 +80,7 @@ export class InstallTaskState {
     let active = false;
     if (InstallTaskState.listeners.size > 0) {
       for (const row of InstallTaskState.tasks.values()) {
-        if (row.running && row.job.stage !== InstallStage.INSTALLED && !InstallTaskState.determinate(row)) {
+        if (row.running && !row.waitingFor && row.job.stage !== InstallStage.INSTALLED && !InstallTaskState.determinate(row)) {
           active = true;
           break;
         }
@@ -114,6 +116,7 @@ export class InstallTaskState {
     row.job = cloneJob ? JSON.parse(JSON.stringify(job)) as InstallJob : job;
     row.running = InstallTaskState.running.has(job.id);
     row.finishing = InstallTaskState.finishing.has(job.id);
+    row.waitingFor = InstallTaskState.waiting.get(job.id) ?? '';
     row.percent = InstallTaskState.stagePercent(job.stage);
     return row;
   }
@@ -133,6 +136,7 @@ export class InstallTaskState {
   }
 
   static remove(id: string): void {
+    InstallTaskState.waiting.delete(id);
     InstallReconnect.clear(id);
     InstallCertificateSlots.clear(id);
     InstallTaskState.removed.add(id);
@@ -145,7 +149,7 @@ export class InstallTaskState {
 
   static setRunning(id: string, running: boolean, finishing: boolean = false): void {
     if (running) InstallTaskState.running.add(id);
-    else InstallTaskState.running.delete(id);
+    else { InstallTaskState.running.delete(id); InstallTaskState.waiting.delete(id); }
     if (finishing) InstallTaskState.finishing.add(id);
     else InstallTaskState.finishing.delete(id);
     const old = InstallTaskState.tasks.get(id);
@@ -155,6 +159,17 @@ export class InstallTaskState {
       InstallTaskState.tasks.set(id, row);
     }
     InstallTaskState.emit();
+  }
+
+  static setWaiting(id: string, reason: string): void {
+    if ((InstallTaskState.waiting.get(id) ?? '') === reason) return;
+    if (reason) InstallTaskState.waiting.set(id, reason); else InstallTaskState.waiting.delete(id);
+    const old = InstallTaskState.tasks.get(id);
+    if (old) {
+      const row = InstallTaskState.make(old.job, false);
+      InstallTaskState.copyProgress(old, row); InstallTaskState.tasks.set(id, row);
+      InstallTaskState.emit();
+    }
   }
 
   private static copyProgress(old: InstallTaskSnapshot, row: InstallTaskSnapshot): void {
@@ -194,7 +209,7 @@ export class InstallTaskState {
   }
 
   static determinate(row: InstallTaskSnapshot): boolean {
-    return row.total > 0 && (row.job.stage === InstallStage.DOWNLOADING ||
+    return !row.waitingFor && row.total > 0 && (row.job.stage === InstallStage.DOWNLOADING ||
       (row.job.stage === InstallStage.INSTALLING && row.phase === 'transfer'));
   }
 
@@ -254,6 +269,7 @@ export class InstallTaskState {
   /** 圆环中央仅显示两个字，完整状态仍用于详情按钮和安装记录。 */
   static compactLabel(row: InstallTaskSnapshot): string {
     if (row.finishing) return I18n.t('收尾');
+    if (row.waitingFor) return I18n.t('排队');
     switch (row.job.stage) {
       case InstallStage.QUEUED: return I18n.t('排队');
       case InstallStage.DOWNLOADING: return row.running ? I18n.t('下载') : I18n.t('续传');
@@ -283,6 +299,7 @@ export class InstallTaskState {
 
   static label(row: InstallTaskSnapshot, now: number = Date.now()): string {
     if (row.finishing) return I18n.t('正在收尾');
+    if (row.waitingFor) return row.waitingFor;
     switch (row.job.stage) {
       case InstallStage.QUEUED: return I18n.t('排队中');
       case InstallStage.DOWNLOADING: return row.running ? I18n.t('下载中') +

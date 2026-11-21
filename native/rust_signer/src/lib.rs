@@ -1388,6 +1388,27 @@ pub extern "C" fn qingqi_hdc_command(
             // Same batched label listing used by Qingqi Router's grouped apps.
             26 => vec!["shell".into(), "sh".into(), "-c".into(),
                 "'bm dump -a -l && printf \"\\n__QINGQI_APP_LABELS_END__\\n\"'".into()],
+            // AppGallery HAP extraction: a fixed, non-parameterized hilog
+            // script set. Never accept raw shell text here.
+            27 => {
+                let script = match argument.as_str() {
+                    "prepare" => "hilog -G 16M && hilog -b D -D 0x6666 && hilog -b D -T AGDownload-DownloadTask && hilog -b D -T AGDownload-DownloadTask-runtime && hilog -b D -T AGDownload && hilog -b D -T KeyNegotiationTask && hilog -b D -T DataProcEntity && hilog -r",
+                    "poll" => "hilog -x -D 0x6666 -e downloadUrl",
+                    "encType" => "hilog -x -D 0x6666 -e encType",
+                    "restore" => "hilog -b I -D 0x6666 && hilog -b I -T AGDownload-DownloadTask && hilog -b I -T AGDownload-DownloadTask-runtime && hilog -b I -T AGDownload && hilog -b I -T KeyNegotiationTask && hilog -b I -T DataProcEntity && hilog -G 512K -t app && hilog -G 64K -t init && hilog -G 512K -t core && hilog -G 512K -t only_prerelease",
+                    // A shell-side stream survives the app being frozen in the
+                    // background; the page reads this file and queues every URL
+                    // captured while it was away.
+                    "capture_start" => "rm -f /data/local/tmp/qingqi-grab.log; nohup sh -c 'hilog -D 0x6666 -e downloadUrl >> /data/local/tmp/qingqi-grab.log 2>/dev/null' >/dev/null 2>&1 & echo started",
+                    "capture_stop" => "pkill -x hilog; echo stopped",
+                    "capture_read" => "tail -c 2000000 /data/local/tmp/qingqi-grab.log 2>/dev/null",
+                    _ => return Err("invalid grab log action".into()),
+                };
+                // The outer HDC shell strips one quoting layer; escape inner
+                // single quotes so the device shell sees the original script.
+                let quoted = script.replace('\'', "'\\''");
+                vec!["shell".into(), "sh".into(), "-c".into(), format!("'{}'", quoted)]
+            }
             _ => return Err("unsupported HDC operation".into()),
         };
         // start() 返回实际监听端口：首选端口被别的程序占用时它会换一个空闲的

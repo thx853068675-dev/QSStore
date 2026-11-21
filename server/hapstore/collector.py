@@ -597,6 +597,22 @@ def repository_url(repo: str) -> str:
     return 'https://' + repo if repo.startswith('gitee.com/') else 'https://github.com/' + repo
 
 
+def github_repository_identity(repo: str, *, token: str = "") -> tuple[int, str]:
+    """Use GitHub's canonical identity, including redirects after a rename."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or any(
+        part in ('.', '..') for part in repo.split('/')
+    ):
+        raise CollectError("无效的 GitHub 仓库地址")
+    data = _json('/repos/' + repo, token=token, timeout=5)
+    if (not isinstance(data, dict) or data.get('private') is not False or
+        type(data.get('id')) is not int or data['id'] <= 0):
+        raise CollectError("无法核验公开的 GitHub 仓库")
+    canonical = data.get('full_name')
+    if not isinstance(canonical, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", canonical):
+        raise CollectError("无法核验公开的 GitHub 仓库")
+    return data['id'], canonical
+
+
 def _repository_json(repo: str, suffix: str = '', *, token: str = '', timeout: int = TIMEOUT):
     if repo.startswith('gitee.com/'):
         # GitHub credentials must never be sent to another forge.

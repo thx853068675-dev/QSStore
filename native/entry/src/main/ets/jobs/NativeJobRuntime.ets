@@ -2,6 +2,7 @@ import { ClassifiedFailure } from '../data/ServiceFailure';
 import { isMissingCertificate } from '../data/CertificateRejection';
 import { StorageBudget } from './StorageBudget';
 import { PackageArchive } from './PackageArchive';
+import { EditablePackage, PackageEditor } from './PackageEditor';
 import { LocalBundles } from './LocalBundles';
 import { SelfInstallRecovery } from './SelfInstallRecovery';
 import { common } from '@kit.AbilityKit';
@@ -75,6 +76,10 @@ export class NativeJobRuntime implements JobRuntime {
     this.store = store;
     this.account = account;
     this.device = device;
+  }
+
+  authorizationLane(): string {
+    return JSON.stringify([this.context.filesDir, this.account?.userId ?? '', this.account?.teamId ?? '']);
   }
 
   private async packagePath(job: InstallJob): Promise<string> {
@@ -550,10 +555,38 @@ export class NativeJobRuntime implements JobRuntime {
     }
     const path = await this.packagePath(job);
     await StorageBudget.require(this.context.filesDir, PackageArchive.workingBytes(path));
+    let workspace = '';
+    let input = path;
     try {
+      const name = job.catalogDisplayName?.trim();
+      const original = this.inspectedIdentity;
+      if (name && original && original.displayName !== name && job.appId > 0 && !LocalBundles.isSelfBundle(job.bundleName)) {
+        // A multi-device batch can share its downloaded HAP/APP. PackageEditor
+        // owns temporary siblings, so only give it a verified private copy.
+        const draft = new EditablePackage();
+        try {
+          workspace = await fileIo.mkdtemp(this.context.cacheDir + '/listing-label-XXXXXX');
+          draft.path = workspace + '/source' + PackageArchive.extension(path);
+          draft.identity = original;
+          await fileIo.copyFile(path, draft.path);
+          if ((await hash.hash(draft.path, 'sha256')).toLowerCase() !== job.packageSourceSha256) {
+            throw new JobFailure(FailureKind.INVALID_PACKAGE, I18n.t('原始 HAP 的 SHA-256 已改变'));
+          }
+          input = await PackageEditor.edit(draft, name, '');
+        } catch (error) {
+          if (error instanceof JobFailure) throw error;
+          console.warn('Could not apply publisher label; signing the original package.');
+        } finally {
+          if (draft.path) PackageArchive.release(draft.path);
+        }
+      }
       PrivacyConsent.assertBusinessAllowed();
-      await signHap(path, job.signedPath, identity.privateKeyPath, identity.certificatePath, job.profilePath);
-    } finally { PackageArchive.release(path); }
+      JobCancellation.assertActive(job.id);
+      await signHap(input, job.signedPath, identity.privateKeyPath, identity.certificatePath, job.profilePath);
+    } finally {
+      PackageArchive.release(path);
+      if (workspace) await fileIo.rmdir(workspace).catch(() => {});
+    }
     PrivacyConsent.assertBusinessAllowed();
     // The native signer verifies the complete pending HAP before atomically
     // moving it to signedPath. Repeating verifyHap immediately is another full

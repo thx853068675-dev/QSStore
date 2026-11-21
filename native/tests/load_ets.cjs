@@ -5,6 +5,9 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
 // Existing host regressions model the public sideload build, whose invite-only
 // consent flag is disabled. Invite tests pass explicit, stateful consent mocks.
 function publicConsentModule(name) {
+  if(name.endsWith('/InstallResourceQueue'))return loadEts('jobs/InstallResourceQueue');
+  if(name.endsWith('/InstallScheduling'))return loadEts('jobs/InstallScheduling');
+  if(name.endsWith('/StoreRoute'))return{StoreRoute:{onNetworkChange(){},revalidate(){},observedScope(){},prepare:async()=>{},request:(request,path,options)=>request.request(/^https:\/\//.test(path)?path:'https://store.example.invalid'+path,options)}};
   if(name.endsWith('/DownloadProxyPreferences'))return{DownloadProxyPreferences:{load:async()=>({enabled:false,protocol:'http',host:'',port:0})}};
   if(name.endsWith('/StoreBuildConfig'))return{StoreBuildConfig:{configured:true,baseUrl:'https://store.example.invalid',publicKeySha256:'a'.repeat(43)+'=',caData:''}};
   if(name.endsWith('/ApplicationIcons'))return{applicationIcons:()=>({stats:()=>({bytes:0}),size:async()=>0,clear:async()=>{}})};
@@ -20,6 +23,7 @@ function publicConsentModule(name) {
     })
   });
   if (name.endsWith('/DeviceInstallTarget')) return loadEts('jobs/DeviceInstallTarget');
+  if (name.endsWith('/HuaweiSite')) return loadEts('data/HuaweiSite');
   if (name.endsWith('/DeviceInstallGroup')) return loadEts('jobs/DeviceInstallGroup',{'./InstallJob':loadEts('jobs/InstallJob')});
   if (name.endsWith('/DeviceOrbHost')) return {DeviceOrbHost:{install(){},dispose(){},attached:()=>true}};
   if (name.endsWith('/DeviceOrbNavigation')) return loadEts('jobs/DeviceOrbNavigation');

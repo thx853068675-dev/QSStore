@@ -9,6 +9,7 @@ function fixture(){
  f.refresh=async a=>a;
  const box={PrivacyConsent:publicConsentModule('../data/PrivacyConsent').PrivacyConsent,getContext:()=>({}),AccountSession:{load:async()=>f.saved},AccountService:{configure(){},refresh:a=>f.refresh(a)},
   ForegroundIdle:{defer:(key,action)=>f.work.set(key,action)},FailureKind:{NETWORK:'network'},InstallStage:{WAITING_ACCOUNT:'account'},
+  I18n:{t:s=>s},errorText:String,InstallAccountRecovery:{requiresLogin:()=>false},UpdatePushSync:{sync:async()=>{}},
   InstallCoordinator:{conditionReady(){f.ready++;}}};
  vm.runInNewContext(ts.transpileModule('class Page{'+method('restoreAccount')+method('refreshRestoredAccount')+'};globalThis.Page=Page;', {compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
  f.ui=Object.assign(new box.Page(),{signedIn:false,accountChecked:false,account:{},updateInstallScanPrompt(){},
@@ -28,7 +29,7 @@ test('a late account response cannot restore a logged-out or switched page ident
   assert.equal(f.ui.account.userId,'other');assert.equal(f.ui.signedIn,signedIn);assert.equal(f.ready,0);
  }
 });
-test('offline startup retains the saved account while authentication rejection shows the login gate',async()=>{
+test('offline startup retains the saved account while authentication rejection clears signed-in state',async()=>{
  for(const failureKind of ['network','account']){
   const f=fixture();f.refresh=async()=>{throw {failureKind};};await f.ui.restoreAccount();await f.run();
   assert.equal(f.ui.signedIn,failureKind==='network');assert(f.ui.accountChecked);assert.equal(f.ready,0);

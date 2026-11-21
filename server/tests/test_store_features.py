@@ -19,6 +19,8 @@ from server.hapstore.categories import CATEGORIES, LEGACY_CATEGORY_ALIASES, norm
 
 class StoreFeaturesTest(unittest.TestCase):
     def setUp(self):
+        from server.tests.repository_fixtures import mock_repository_identity
+        mock_repository_identity(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.old_db = db.DB_PATH
         db.DB_PATH = os.path.join(self.tmp.name, "store.db")
@@ -634,6 +636,7 @@ class StoreFeaturesTest(unittest.TestCase):
 
     def test_old_unique_review_table_migrates_without_losing_comments(self):
         conn = db.connect()
+        conn.execute("DROP TABLE review_reply")
         conn.execute("DROP TABLE review")
         conn.execute("""CREATE TABLE review (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -651,6 +654,10 @@ class StoreFeaturesTest(unittest.TestCase):
         db.init_db()
         db.put_review(app_id, "uid-a", "Alice", 5, "New")
         self.assertEqual(db.review_summary(app_id), {"count": 2, "average": 4.5})
+        self.assertTrue(db.put_review_reply(app_id, 1, "uid-b", "Bob", "Reply to old comment"))
+        self.assertEqual(db.list_review_replies(app_id, 1, 1, 10)["total"], 1)
+        self.assertTrue(db.delete_review(app_id, 1, "uid-a"))
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM review_reply").fetchone()[0], 0)
 
     def test_submit_requires_prepare_then_selected_hap_and_category(self):
         releases = [{"tag": "v1", "name": "v1", "body": "", "published_at": "2026-01-01",

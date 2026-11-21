@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const root = path.join(__dirname, '../entry/src/main/ets/jobs');
+const {publicConsentModule}=require('./load_ets.cjs');
 function fixture(visibleAfter) {
   const f = { now: 100000, installedAt: 0, installs: 0, waits: [] }, modules = new Map();
   function load(name) {
@@ -16,9 +17,9 @@ function fixture(visibleAfter) {
     }).outputText;
     vm.runInNewContext(code, { exports, Date: class extends Date { static now() { return f.now; } },
       setTimeout: (fn, ms) => { f.waits.push(ms); f.now += ms; fn(); return 1; },
-      require: name => name === './JobScheduler' ? { JobScheduler: { runInstall: (_id, fn) => fn() } } :
+      require: name => name === './JobScheduler' ? { JobScheduler: { runPipeline: (_job, fn) => fn(), resource:(_job,_key,_capacity,fn)=>fn() } } :
         name === './JobCancellation' ? { JobCancellation: { assertActive: () => {}, isCancelled: () => false } } :
-        name.startsWith('.') ? load(name.slice(2)) : {} });
+        name.startsWith('../data/') ? publicConsentModule(name) : name.startsWith('.') ? load(name.slice(2)) : {} });
     return exports;
   }
   const { InstallJob, InstallStage, RecoveryEvidence, FailureKind } = load('InstallJob');

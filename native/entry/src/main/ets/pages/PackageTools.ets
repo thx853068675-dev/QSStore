@@ -1,3 +1,5 @@
+import { AppBackground } from '../data/AppBackgroundPreferences';
+import { AppThemeBackground } from '../components/AppThemeBackground';
 import { displayVersion } from '../data/DisplayVersion';
 import { router,promptAction } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -20,11 +22,13 @@ class PackageEditDraft {
 }
 @Component
 struct PackageEditCard {
+  @StorageProp('appBackground') private themeState: AppBackground = new AppBackground();
   @ObjectLink draft:PackageEditDraft;
   @Prop busy:boolean=false;
   @StorageProp('darkMode') darkMode:boolean=false;
   inspect:()=>void=()=>{}; chooseIcon:()=>void=()=>{}; generate:()=>void=()=>{}; signInstall:()=>void=()=>{};
   private colors():Palette{return Palette.forMode(this.darkMode);}
+  private cardSurface(): string { return Palette.containerPaint(this.colors().surface, this.themeState.containerOpacity); }
   @Builder private fieldLabel(label:string){Text(label).fontSize(13).fontColor(this.colors().textSecondary).width(68);}
   build(){
     Column({space:16}){
@@ -57,7 +61,7 @@ struct PackageEditCard {
       }
       if(this.draft.status&&this.draft.status!=='已读取'){Text(this.draft.status).fontSize(12).fontColor(this.draft.status.includes('失败')?this.colors().danger:this.colors().textSecondary).width('100%');}
     }.width('100%').alignItems(HorizontalAlign.Start).padding(20)
-      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+      .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
   }
 }
 @CustomDialog
@@ -92,6 +96,7 @@ struct PackageInformationDialog {
 @Entry
 @Component
 struct PackageTools {
+  @StorageProp('appBackground') private themeState: AppBackground = new AppBackground();
   pageTransition() {
     PageTransitionEnter(StorePageMotion.options(RouteType.Push)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
     PageTransitionEnter(StorePageMotion.stationary(RouteType.Pop)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })
@@ -111,6 +116,7 @@ struct PackageTools {
   private informationDialog?:CustomDialogController;
   private scroller:Scroller=new Scroller();
   private colors():Palette{return Palette.forMode(this.darkMode);}
+  private cardSurface(): string { return Palette.containerPaint(this.colors().surface, this.themeState.containerOpacity); }
   aboutToAppear():void{PackageEditor.cleanup(getContext(this) as common.UIAbilityContext);this.pickerTimer=setTimeout(()=>{if(!this.disposed)this.pick();},StorePageMotion.duration+32);}
   onPageShow():void{if(!this.disposed&&!this.returning)this.headerVisible=true;}
   onPageHide():void{this.headerVisible=false;}
@@ -185,8 +191,9 @@ struct PackageTools {
   }
   build(){
     Stack({alignContent:Alignment.Top}){
+      AppThemeBackground()
       List({space:18,scroller:this.scroller}){
-        if(!this.drafts.length){ListItem(){Column({space:14}){SymbolGlyph($r('sys.symbol.square_and_pencil')).fontSize(36).fontColor([this.colors().accent]);Text(I18n.t('选择需要编辑的安装包')).fontSize(18).fontWeight(FontWeight.Bold).fontColor(this.colors().text);Text(I18n.t('HAP / APP · 可多选，每个包独立编辑')).fontSize(12).fontColor(this.colors().textSecondary);Button(I18n.t('选择安装包')).width('100%').height(46).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent).enabled(!this.busy).id('editor-select-packages').onClick(()=>this.pick());}.width('100%').padding(24).backgroundColor(this.colors().surface).borderRadius(22);}}
+        if(!this.drafts.length){ListItem(){Column({space:14}){SymbolGlyph($r('sys.symbol.square_and_pencil')).fontSize(36).fontColor([this.colors().accent]);Text(I18n.t('选择需要编辑的安装包')).fontSize(18).fontWeight(FontWeight.Bold).fontColor(this.colors().text);Text(I18n.t('HAP / APP · 可多选，每个包独立编辑')).fontSize(12).fontColor(this.colors().textSecondary);Button(I18n.t('选择安装包')).width('100%').height(46).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent).enabled(!this.busy).id('editor-select-packages').onClick(()=>this.pick());}.width('100%').padding(24).backgroundColor(this.cardSurface()).borderRadius(22);}}
         if(this.message){ListItem(){Text(this.message).fontSize(12).fontColor(this.colors().danger).width('100%');}}
         ForEach(this.drafts,(draft:PackageEditDraft)=>{
           ListItem(){PackageEditCard({draft:draft,busy:this.busy,inspect:()=>this.inspect(draft),chooseIcon:()=>this.pickIcon(draft),generate:()=>this.generate(draft),signInstall:()=>this.signInstall(draft)});}

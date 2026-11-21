@@ -8,6 +8,8 @@ import { I18n } from '../data/I18n';
 /** 四个主页面和浮层共用的布局尺度，宽屏保留舒适的阅读宽度。 */
 export class StoreLayout {
   static readonly contentWidth: number = 720;
+  /** 横屏（Pura X Max 等 940 × 664 vp）时首页改用双列合集版面，正文放宽。 */
+  static readonly landscapeContentWidth: number = 900;
   static readonly sheetWidth: number = 520;
   static readonly cardActionRadius: number = 14;
   static readonly cardActionWidth: number = 64;
@@ -16,43 +18,88 @@ export class StoreLayout {
   static readonly heroRadius: number = 24;
   static readonly dialogRadius: number = 24;
   static readonly fieldHeight: number = 46;
+  static readonly horizontalFadeLength: number = 14;
   static readonly navigationBottomMargin: number = 20;
   static readonly navigationHeight: number = 56;
   static readonly navigationActionGap: number = 8;
+  /** 居中窄胶囊页签栏宽度：窄屏保持紧凑，宽屏略放宽。 */
   static readonly navigationCompactWidth: number = 208;
   static readonly navigationLargeWidth: number = 240;
   static readonly sidebarDetailScale: number = 0.84;
   static readonly sidebarCardInset: number = 12;
+  private static readonly sidebarExitFraction: number = 0.36;
   /** One width is supplied to every native breakpoint and the fallback backplate. */
-  static navigationBarWidth(width: number, height: number): number {
+  static navigationBarWidth(width: number, height: number, sidebar: boolean): number {
     const wide = Number.isFinite(width) && (width >= 840 ||
       (width >= 600 && Number.isFinite(height) && height > 0 && width / height >= 0.8));
+    if (!sidebar) {
+      const desired = wide ? 320 : 280;
+      return Number.isFinite(width) && width > 0 ? Math.min(desired, Math.max(0, width - 24)) : desired;
+    }
     const desired = wide ? StoreLayout.navigationLargeWidth : StoreLayout.navigationCompactWidth;
-    // The native tab bar stays centered; reserve its right-hand neighbour even in narrow windows.
+    // Reserve space on both sides of the centered bar for the hand-aware action.
     return Number.isFinite(width) && width > 0 ? Math.min(desired, Math.max(160,
       width - 2 * (StoreLayout.navigationHeight + StoreLayout.navigationActionGap + 8))) : desired;
   }
   static sidebarFrameWidth(width: number): number {
     return Number.isFinite(width) && width > 0 ? Math.min(width, 1280) : 360;
   }
-  static sidebarRailWidth(width: number): number { return width >= 600 ? 96 : 64; }
-  /** Actual viewport coordinates, before the detail scene's uniform scale. */
-  static sidebarActionRight(width: number, height: number): number {
-    const safeWidth = Number.isFinite(width) && width > 0 ? width : 360;
-    const frameRight = (safeWidth + StoreLayout.sidebarFrameWidth(safeWidth)) / 2;
-    const actionRight = safeWidth / 2 + StoreLayout.navigationBarWidth(safeWidth, height) / 2 +
-      StoreLayout.navigationActionGap + StoreLayout.navigationHeight;
-    return Math.max(8, frameRight - actionRight);
+  static sidebarRailWidth(width: number): number { return width >= 600 ? 96 : 80; }
+  static sidebarRailOnRight(fromRight: boolean, progress: number): boolean {
+    return progress <= StoreLayout.sidebarExitFraction ? fromRight : !fromRight;
+  }
+  private static sidebarEntry(progress: number): number {
+    const fraction = Math.max(0, (progress - StoreLayout.sidebarExitFraction) / (1 - StoreLayout.sidebarExitFraction));
+    return fraction * fraction * (3 - 2 * fraction);
+  }
+  /** Keep the original list and article mounted. The rail only jumps when it is outside the window. */
+  static sidebarRailShift(width: number, fromRight: boolean, progress: number): number {
+    const frame = StoreLayout.sidebarFrameWidth(width);
+    const rail = StoreLayout.sidebarRailWidth(width);
+    const outside = Math.max(0, (width - frame) / 2) + 16;
+    const onRight = StoreLayout.sidebarRailOnRight(fromRight, progress);
+    const atRest = onRight ? frame - rail : 0;
+    const origin = fromRight ? frame - rail : 0;
+    const distance = progress <= StoreLayout.sidebarExitFraction ?
+      Math.pow(progress / StoreLayout.sidebarExitFraction, 2) : 1 - StoreLayout.sidebarEntry(progress);
+    return atRest - origin + (onRight ? 1 : -1) * (rail + outside) * distance;
+  }
+  static sidebarDetailShift(width: number, fromRight: boolean, progress: number): number {
+    const entry = StoreLayout.sidebarEntry(progress);
+    return (fromRight ? 1 : -1) * StoreLayout.sidebarRailWidth(width) * entry;
+  }
+  static dockExtraWidth(compactness: number): number {
+    return (StoreLayout.navigationActionGap + StoreLayout.navigationHeight) * compactness;
+  }
+  static dockNavigationX(compactness: number, leftHand: boolean): number {
+    return leftHand ? StoreLayout.dockExtraWidth(compactness) : 0;
+  }
+  static dockInstallX(barWidth: number, compactness: number, leftHand: boolean, hiddenProgress: number = 0): number {
+    const extra = StoreLayout.dockExtraWidth(compactness);
+    const resting = leftHand ? 0 : barWidth - StoreLayout.navigationHeight + extra;
+    const centered = (barWidth + extra - StoreLayout.navigationHeight) / 2;
+    const progress = Number.isFinite(hiddenProgress) ? Math.max(0, Math.min(1, hiddenProgress)) : 0;
+    return resting + (centered - resting) * progress;
   }
   static inset(width: number): number { return width > 0 && width < 360 ? 16 : 24; }
+  /** 横屏且宽度足够时启用宽版面；竖屏、分屏窄窗保持原单栏宽度。 */
+  static wideLandscape(width: number, height: number): boolean {
+    return Number.isFinite(width) && Number.isFinite(height) &&
+      width >= 600 && height > 0 && width > height * 1.05;
+  }
+  /** 首页正文宽度：横屏放宽到 landscapeContentWidth，其余沿用 contentWidth。 */
+  static discoverContentWidth(width: number, height: number): number {
+    return StoreLayout.wideLandscape(width, height) ? StoreLayout.landscapeContentWidth : StoreLayout.contentWidth;
+  }
   /** contentWidth is the readable area; frames include the same padding on both sides. */
   static frameMaxWidth(windowWidth: number = 0): number {
     return StoreLayout.contentWidth + StoreLayout.inset(windowWidth) * 2;
   }
   /** Keep the list viewport full-window while centering its readable area. */
-  static contentInset(windowWidth: number): number {
+  static contentInset(windowWidth: number, windowHeight: number = 0): number {
     if (!Number.isFinite(windowWidth) || windowWidth <= 0) return StoreLayout.inset(0);
-    return Math.max(StoreLayout.inset(windowWidth), (windowWidth - StoreLayout.contentWidth) / 2);
+    const content = StoreLayout.discoverContentWidth(windowWidth, windowHeight);
+    return Math.max(StoreLayout.inset(windowWidth), (windowWidth - content) / 2);
   }
   static sheetMaxHeight(height: number, top: number = 0, bottom: number = 0): number {
     if (!Number.isFinite(height) || height <= 0) return 640;
@@ -76,22 +123,6 @@ export struct StoreNavigationSurface {
       .borderRadius(28 / this.sceneScale).clip(true)
       .border({ width: 0.5 / this.sceneScale, color: Palette.forMode(this.darkMode).border,
         radius: 28 / this.sceneScale })
-      .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
-  }
-}
-
-/** 6.1 浮动栏的系统材质可能恢复为空，背景放在内容之上、原生页签之下。 */
-@Component
-export struct StoreTabBarBackdrop {
-  @StorageProp('darkMode') private darkMode: boolean = false;
-  @Prop barWidth: number = StoreLayout.navigationCompactWidth;
-  build() {
-    Column() {
-      StoreNavigationSurface({ darkMode: this.darkMode })
-        .width('calc(100% - 24vp)').constraintSize({ maxWidth: this.barWidth }).height(StoreLayout.navigationHeight)
-        .id('bottom-navigation-backdrop')
-        .margin({ bottom: StoreLayout.navigationBottomMargin })
-    }.width('100%').height('100%').justifyContent(FlexAlign.End)
       .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
   }
 }
@@ -138,6 +169,7 @@ export class StoreTopStyle {
 @Component
 export struct StoreTopFade {
   @Prop statusInset:number=0;
+  @Prop extraHeight:number=0;
   @Prop fadeOpacity:number=1;
   @Prop darkSurface:boolean=false;
   @StorageProp('darkMode') private darkMode:boolean=false;
@@ -150,7 +182,7 @@ export struct StoreTopFade {
           {disableSystemAdaptation:true})
       Column().width('100%').height('100%').linearGradient({angle:180,colors:StoreTopStyle.fadeStops})
         .blendMode(BlendMode.DST_IN,BlendApplyType.OFFSCREEN)
-    }.width('100%').height(this.statusInset+StoreTopStyle.height).opacity(this.fadeOpacity)
+    }.width('100%').height(this.statusInset+StoreTopStyle.height+this.extraHeight).opacity(this.fadeOpacity)
       .blendMode(BlendMode.SRC_OVER,BlendApplyType.OFFSCREEN)
       .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
   }
@@ -184,21 +216,62 @@ export struct StoreIconButton {
 @Component
 export struct StoreImmersiveIconButton {
   @Prop darkSurface:boolean=false;
-  @StorageProp('materialMode') private materialMode:string='adaptive';
-  @StorageProp('routeTransitioning') private routeTransitioning:boolean=false;
+  @StorageProp('materialMode') @Watch('onPopupRequestChanged') private materialMode:string='adaptive';
+  @StorageProp('routeTransitioning') @Watch('onPopupRequestChanged') private routeTransitioning:boolean=false;
+  @StorageProp('windowWidth') @Watch('onViewportChanged') private windowWidth:number=0;
+  @StorageProp('windowHeight') @Watch('onViewportChanged') private windowHeight:number=0;
   @Prop symbol:Resource=$r('sys.symbol.chevron_left');
   @Prop label:string=I18n.t('返回');
   title:string='';
   controlId:string='';
   action:()=>void=()=>{};
   backAction:()=>void=()=>{};
-  @Prop visible:boolean=true;
+  @Prop @Watch('onPopupRequestChanged') visible:boolean=true;
   @Prop loading:boolean=false;
   @Prop active:boolean=true;
   @StorageProp('darkMode') private darkMode:boolean=false;
   @State private showing:boolean=false;
-  aboutToAppear():void{this.showing=true;}
-  aboutToDisappear():void{this.showing=false;}
+  @State private popupVisible:boolean=false;
+  @State private anchorReady:boolean=true;
+  private reopenTimer:number=-1;
+  private retryAvailable:boolean=true;
+  aboutToAppear():void{this.showing=true;this.retryAvailable=true;}
+  aboutToDisappear():void{
+    this.showing=false;this.popupVisible=false;
+    if(this.reopenTimer!==-1)clearTimeout(this.reopenTimer);
+    this.reopenTimer=-1;
+  }
+  private popupRequested():boolean{
+    return this.showing&&this.visible&&!this.routeTransitioning&&this.anchorReady&&StoreMaterial.supported(this.materialMode);
+  }
+  private fallbackVisible():boolean{
+    return this.showing&&this.visible&&!this.routeTransitioning&&
+      (!StoreMaterial.supported(this.materialMode)||!this.popupVisible);
+  }
+  private onPopupRequestChanged():void{
+    if(!this.popupRequested())this.popupVisible=false;
+  }
+  private reopenAfterLayout():void{
+    this.popupVisible=false;this.anchorReady=false;
+    if(this.reopenTimer!==-1)clearTimeout(this.reopenTimer);
+    this.reopenTimer=setTimeout(()=>{
+      this.reopenTimer=-1;
+      if(this.showing)this.anchorReady=true;
+    },32);
+  }
+  private onViewportChanged():void{
+    // Rotation invalidates the system popup window even when its target survives.
+    // Rebind after the new anchor is laid out; keep an inline button meanwhile.
+    this.retryAvailable=true;
+    if(this.showing&&StoreMaterial.supported(this.materialMode))this.reopenAfterLayout();
+  }
+  private onPopupStateChanged(visible:boolean):void{
+    this.popupVisible=visible&&this.popupRequested();
+    if(!visible&&this.popupRequested()&&this.retryAvailable){
+      this.retryAvailable=false;
+      this.reopenAfterLayout();
+    }
+  }
   private controlWidth():number{
     if(!this.title)return 44;
     // CJK glyphs are ~16vp at 16fp, Latin ~8.5vp. Counting every code unit as
@@ -223,17 +296,22 @@ export struct StoreImmersiveIconButton {
       .id(this.controlId).accessibilityText(this.loading?I18n.t('正在刷新应用信息'):this.label).onClick(()=>this.action())
   }
   build(){
-    if(StoreMaterial.supported(this.materialMode)){
-      Column(){}.width(this.controlWidth()).height(44).bindPopup(this.showing&&this.visible&&!this.routeTransitioning,{builder:this.content,width:this.controlWidth(),radius:22,
+    Stack(){
+      if(this.fallbackVisible()){
+        Stack(){this.content();}.width(this.controlWidth()).height(44).borderRadius(22)
+          .backgroundBlurStyle(StoreMaterial.blurStyle(this.materialMode),{colorMode:this.darkMode || this.darkSurface?ThemeColorMode.DARK:ThemeColorMode.LIGHT})
+          .backgroundColor(StoreMaterial.fallbackFill(this.darkMode || this.darkSurface))
+          .border({width:0.5,color:Palette.forMode(this.darkMode || this.darkSurface).border,radius:22}).shadow(ShadowStyle.OUTER_DEFAULT_SM)
+      }
+      if(StoreMaterial.supported(this.materialMode)){
+      Column(){}.width(this.controlWidth()).height(44).bindPopup(this.popupRequested(),{builder:this.content,width:this.controlWidth(),radius:22,
         placement:Placement.Bottom,targetSpace:0,offset:{x:0,y:-44},enableArrow:false,autoCancel:false,
+        followTransformOfTarget:true,transition:TransitionEffect.IDENTITY,
+        onStateChange:(event:PopupStateChangeParam)=>this.onPopupStateChanged(event.isVisible),
         onWillDismiss:(action:DismissPopupAction)=>{if(action.reason===DismissReason.PRESS_BACK)this.backAction();},
         focusable:false,mask:false,systemMaterial:StoreMaterial.glass(this.materialMode,this.darkMode || this.darkSurface)})
-    }else{
-      Stack(){this.content();}.width(this.controlWidth()).height(44).borderRadius(22)
-        .backgroundBlurStyle(StoreMaterial.blurStyle(this.materialMode),{colorMode:this.darkMode || this.darkSurface?ThemeColorMode.DARK:ThemeColorMode.LIGHT})
-        .backgroundColor(StoreMaterial.fallbackFill(this.darkMode || this.darkSurface))
-        .border({width:0.5,color:Palette.forMode(this.darkMode || this.darkSurface).border,radius:22}).shadow(ShadowStyle.OUTER_DEFAULT_SM)
-    }
+      }
+    }.width(this.controlWidth()).height(44)
   }
 }
 
@@ -274,9 +352,12 @@ export function storeTintedImmersiveMaterial(tint: string, strength: number = 1,
 @Component
 export struct StoreImmersiveAction {
   @StorageProp('darkMode') private darkMode:boolean=false;
+  @StorageProp('windowWidth') @Watch('onViewportChanged') private windowWidth:number=0;
+  @StorageProp('windowHeight') @Watch('onViewportChanged') private windowHeight:number=0;
   @StorageProp('materialMode') @Watch('onPopupRequestChanged') private materialMode:string='adaptive';
   @StorageProp('routeTransitioning') @Watch('onPopupRequestChanged') private routeTransitioning:boolean=false;
   @Prop @Watch('onPopupRequestChanged') visible:boolean=true;
+  @Prop @Watch('onPopupRequestChanged') suspendPopup:boolean=false;
   @Prop tint:string='#1F5DEF';
   @Prop controlHeight:number=52;
   @Prop controlWidth:number=0;
@@ -295,21 +376,53 @@ export struct StoreImmersiveAction {
   private anchorX:number=NaN;
   private anchorY:number=NaN;
   @Prop popupShadow:boolean=true;
+  @Prop popupFocusable:boolean=false;
   backAction:()=>void=()=>{};
   @BuilderParam content:(immersive:boolean)=>void;
   @State @Watch('onPopupRequestChanged') private measuredWidth:number=0;
   @State private popupVisible:boolean=false;
+  @State private anchorReady:boolean=true;
+  private reopenTimer:number=-1;
+  private retryAvailable:boolean=true;
+  private disposed:boolean=false;
   private materialKey:string='';
   private materialCache:uiMaterial.ImmersiveMaterial|undefined;
+  aboutToAppear():void{this.disposed=false;this.retryAvailable=true;}
+  aboutToDisappear():void{
+    this.disposed=true;this.popupVisible=false;
+    if(this.reopenTimer!==-1)clearTimeout(this.reopenTimer);
+    this.reopenTimer=-1;
+  }
   private canUseMaterial():boolean{
     return StoreMaterial.supported(this.materialMode);
   }
   private popupWidth():number{return this.controlWidth>0?this.controlWidth:this.measuredWidth;}
-  private popupRequested():boolean{return this.canUseMaterial()&&this.visible&&!this.routeTransitioning&&this.popupWidth()>0.5;}
+  private popupRequested():boolean{return !this.disposed&&this.anchorReady&&this.canUseMaterial()&&this.visible&&!this.suspendPopup&&
+    !this.routeTransitioning&&this.popupWidth()>0.5;}
   private onPopupRequestChanged():void{if(!this.popupRequested())this.popupVisible=false;}
-  private onPopupStateChanged(visible:boolean):void{this.popupVisible=visible&&this.popupRequested();}
+  private reopenAfterLayout():void{
+    this.popupVisible=false;this.anchorReady=false;
+    if(this.reopenTimer!==-1)clearTimeout(this.reopenTimer);
+    this.reopenTimer=setTimeout(()=>{
+      this.reopenTimer=-1;
+      if(!this.disposed)this.anchorReady=true;
+    },32);
+  }
+  private onViewportChanged():void{
+    this.retryAvailable=true;
+    this.placementCorrectionX=0;this.placementCorrectionY=0;
+    this.anchorX=NaN;this.anchorY=NaN;
+    if(!this.disposed&&this.canUseMaterial())this.reopenAfterLayout();
+  }
+  private onPopupStateChanged(visible:boolean):void{
+    this.popupVisible=visible&&this.popupRequested();
+    if(!visible&&this.popupRequested()&&this.retryAvailable){
+      this.retryAvailable=false;
+      this.reopenAfterLayout();
+    }
+  }
   private fallbackVisible():boolean{
-    return this.visible&&!this.routeTransitioning&&(!this.canUseMaterial()||!this.popupVisible);
+    return !this.disposed&&this.visible&&!this.routeTransitioning&&(!this.canUseMaterial()||!this.popupVisible);
   }
   private actionMaterial():uiMaterial.ImmersiveMaterial{
     // Geometry is animated every frame. Keep the native effect object stable until its appearance changes.
@@ -367,7 +480,7 @@ export struct StoreImmersiveAction {
           // Header anchors open below themselves; the bottom install action retains its upward placement.
           placement:this.anchorAtStart?Placement.BottomLeft:Placement.Top,targetSpace:0,
           offset:this.popupOffset(),enableArrow:false,autoCancel:false,
-          focusable:false,mask:false,
+          focusable:this.popupFocusable,mask:false,
           followTransformOfTarget:this.followsTarget,transition:TransitionEffect.IDENTITY,
           levelMode:this.embedded?LevelMode.EMBEDDED:LevelMode.OVERLAY,
           shadow:this.popupShadow?undefined:{radius:0,color:Color.Transparent,offsetX:0,offsetY:0},

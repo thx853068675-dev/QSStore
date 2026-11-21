@@ -1,4 +1,13 @@
+import { AppBackground } from '../data/AppBackgroundPreferences';
+import { AppThemeBackground } from '../components/AppThemeBackground';
+import { IconViewport } from '../components/IconViewport';
+import { IconResidency } from '../data/IconResidency';
 import { SidebarDetailPane } from '../components/SidebarDetailPane';
+import { RefreshFailureNotice } from '../components/RefreshFailureNotice';
+import { SidebarInstallDock, SidebarInstallView } from '../components/SidebarInstallDock';
+import { DiscoverBanner } from '../components/DiscoverBanner';
+import { DiscoverShelf } from '../components/DiscoverShelf';
+import { OverseasCorner } from '../components/OverseasCorner';
 import { FollowingRegistry } from '../data/FollowingRegistry';
 import { FollowedApp } from '../data/Following';
 import { FollowingInfoDialog } from '../components/FollowingInfoDialog';
@@ -20,8 +29,8 @@ import { InstalledInspection } from '../data/InstalledInspection';
 import { repositoryUrl } from '../data/RepositoryAddress';
 import { InstalledSigningExpiry } from '../jobs/InstalledSigningExpiry';
 import { QueueTaskCard } from '../components/QueueTaskCard';
-import { DiscoverHeader, DiscoverMotion, DiscoverRefreshIndicator } from '../components/DiscoverHeader';
-import { DiscoverTopOverlay } from '../components/DiscoverTopAction';
+import { DiscoverHeader, DiscoverMotion, DiscoverRefreshIndicator, DiscoverToolbarMotion } from '../components/DiscoverHeader';
+import { DiscoverTopOverlay, HoldingSide } from '../components/DiscoverTopAction';
 import { RepositoryStats } from '../components/RepositoryStats';
 import { HomeAppTitle, HomeIconButton, HomeCertificatePrompt, HomeAccountPrompt } from '../components/HomeControls';
 import { HomeVisibility } from '../theme/HomeVisibility';
@@ -30,6 +39,8 @@ import { RenewalDialog } from '../components/RenewalDialog';
 import { LocalProfileDialog } from '../components/LocalProfileDialog';
 import { appendCatalogPage, filterCatalogCategory, shouldPrefetchCatalog } from '../data/CatalogPaging';
 import { DiscoverSort, DiscoverSortKey, SortDirection } from '../data/DiscoverSort';
+import { DiscoveryCollections, DiscoveryBlock, DiscoveryEntry, HomeTypeGroup } from '../data/DiscoveryCollections';
+import { repositoryCount } from '../data/RepositoryCount';
 import { DiscoverSortPreferences } from '../data/DiscoverSortPreferences';
 import { ReleaseChannelRegistry } from '../data/ReleaseChannelRegistry';
 import { releaseDisplayVersion } from '../data/DisplayVersion';
@@ -41,10 +52,11 @@ import { ReleaseUpdate } from '../jobs/ReleaseUpdate';
 import { InstalledVersionDisplay } from '../data/InstalledVersionDisplay';
 import { ClassifiedFailure } from '../data/ServiceFailure';
 import { AccountService } from '../data/AccountService';
+import { InstallAccountRecovery } from '../jobs/InstallAccountRecovery';
 import { InstallCoordinator } from '../jobs/InstallCoordinator';
 import { InstallReconnect } from '../jobs/InstallReconnect';
 import { InstallTaskState, InstallTaskSnapshot } from '../jobs/InstallTaskState';
-import { promptAction, SymbolGlyphModifier, LengthMetrics, curves } from '@kit.ArkUI';
+import { AnimatorResult, promptAction, SymbolGlyphModifier, LengthMetrics, curves } from '@kit.ArkUI';
 import { HdsTabs, hdsMaterial, HdsNavigation, HdsNavigationTitleMode,
   TitleBarStyleOptions, DividerShowType } from '@kit.UIDesignKit';
 import { common } from '@kit.AbilityKit';
@@ -63,7 +75,7 @@ import { NativeJobRuntime } from '../jobs/NativeJobRuntime';
 import { ForegroundIdle } from '../jobs/ForegroundIdle';
 import { isPending } from '../jobs/RecoveryPlanner';
 import { retryDelayMs } from '../jobs/RecoveryPlanner';
-import { LocalTool,localTools } from '../data/LocalTools';
+import { LocalDeveloperMode, LocalTool, localTools } from '../data/LocalTools';
 import { LocalBundles, InstalledBundleState } from '../jobs/LocalBundles';
 import { SelfInstallRecovery } from '../jobs/SelfInstallRecovery';
 import { InstalledAppRegistry, InstalledDeviceApp } from '../jobs/InstalledAppRegistry';
@@ -76,21 +88,26 @@ import { UpdatePolicy } from '../data/UpdatePolicy';
 import { UpdatePushSync } from '../data/UpdatePushSync';
 import { InstallDeviceCompatibility } from '../jobs/InstallDeviceCompatibility';
 import { ReleaseInfo, HapAsset } from '../data/ReleaseInfo';
-import { StoreClient, ListPage } from '../data/StoreClient';
+import { StoreClient, ListPage, UpdatePushWatchItem } from '../data/StoreClient';
 import { AccountSession, DeveloperAccount } from '../data/DeveloperAccount';
+import { HuaweiLoginSitePicker } from '../components/HuaweiLoginSitePicker';
 import { DevEcoLogin } from '../data/DevEcoLogin';
 import { LocalSigningIdentity, SigningIdentityRecovery, EnrollmentOptions, EnrollmentOutcome } from '../data/SigningIdentity';
 import { AgcClient } from '../data/AgcClient';
 import { SubmitDraft, SubmitChoice } from '../data/StoreActions';
+import { ListingPresentationDraft } from '../data/ListingPresentation';
+import { ListingPresentationEditor } from '../components/ListingPresentationEditor';
+import { GitHubAssociationReturn } from '../data/GitHubAssociationReturn';
 import { errorText } from '../jobs/ErrorText';
 import { Palette } from '../theme/Palette';
-import { StoreIconButton, StoreImmersiveIconButton, StoreLayout, StoreTopStyle, StoreTopFade, StoreTabBarBackdrop } from '../theme/StoreDesign';
+import { StoreIconButton, StoreImmersiveIconButton, StoreLayout, StoreTopStyle, StoreTopFade, StoreNavigationSurface } from '../theme/StoreDesign';
 import { StoreSelect } from '../theme/StoreSelect';
 import { StorePageMotion } from '../theme/StorePageMotion';
 import { AppDisplayName } from '../data/AppDisplayName';
 import { ManagementPreferences } from '../data/ManagementPreferences';
 import { StoreMaterial } from '../theme/StoreMaterial';
 import { PrivacyConsent } from '../data/PrivacyConsent';
+import { StartupReleasePrompt } from '../components/StartupReleasePrompt';
 import { CloudBackupConsent } from '../data/CloudBackupConsent';
 import { ExternalInstallOpen } from '../jobs/ExternalInstallOpen';
 import { privacyManager } from '@kit.AppGalleryKit';
@@ -138,6 +155,25 @@ class UpdateTarget {
   versionName: string = '';
 }
 
+class CollectionRankRow {
+  entry: DiscoveryEntry;
+  index: number;
+
+  constructor(entry: DiscoveryEntry, index: number) {
+    this.entry = entry;
+    this.index = index;
+  }
+}
+
+/** 分类入口色板，与设计稿的低饱和底 + 深色字保持一致。 */
+const CATEGORY_TILE_COLORS: string[][] = [
+  ['#EAF1FE', '#2463E9'], ['#FDEDF3', '#D9527F'], ['#EAF7EF', '#1FA36B'],
+  ['#FFF3E6', '#E0761B'], ['#F0EDFF', '#6B4EF5'], ['#E8F5FE', '#1C7FC4'],
+  ['#FCEFF0', '#D24B54'], ['#F2F4F7', '#5E6875'], ['#EDF7F6', '#1E8C82'],
+];
+const DISCOVERY_BANNER_HEIGHT: number = 162;
+const DISCOVERY_BANNER_KEYS: string[] = ['stars_week', 'downloads', 'new', 'frequent'];
+
 /** Each featured card owns its canvas. Sharing one context between ListItems
  * makes later cards lose their stars when ArkUI recycles the list. */
 @Component
@@ -161,7 +197,7 @@ struct FeaturedCardStars {
   private paint(): void {
     const w = this.ctx.width;
     const h = this.ctx.height;
-    if (w <= 0 || h <= 0) return;
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return;
     this.ctx.clearRect(0, 0, w, h);
     if (this.tier >= 2) {
       // 光晕先铺底，再绘制星点；渐变在画布内收敛，不留下圆形轮廓。
@@ -242,18 +278,29 @@ struct SidebarSkyBackdrop {
 struct Index {
   // 每个颜色使用点通过 colors() 读取此状态，主题变化会更新对应组件。
   @StorageProp('darkMode') darkMode: boolean = false;
+  @StorageProp('appBackground') private appBackground: AppBackground = new AppBackground();
+  @StorageProp('homeNavigationAutoHide') @Watch('navigationAutoHideChanged') private autoHideNavigation: boolean = true;
   @StorageProp('materialMode') private materialMode: string = 'adaptive';
+  @StorageProp('localDeveloperMode') private localDeveloperMode: boolean = false;
   @StorageProp('statusBarInset') statusBarInset: number = 0;
-  @State private discoverTitleHeight: number = 68;
-  @State private discoverLayout: string = 'normal';
+  @State private discoverToolbarRows: number = 1;
+  @State @Watch('syncNavigationWidth') private discoverLayout: string = 'normal';
   @State private sidebarSelectedId: number = 0;
   private sidebarScroller: ListScroller = new ListScroller();
   @State private discoverMotion: DiscoverMotion = new DiscoverMotion();
+  private discoverScrollFromUser: boolean = false;
   @State private discoverCanRefresh: boolean = true;
   @State private topActionEpoch: number = 0;
   private headerRouteRevision: number = 0;
   private headerRestoreGeneration: number = 0;
   private discoverScroller: ListScroller = new ListScroller();
+  /** 全量应用单独一个 Scroller：横滑过渡时两页会同时挂载，不能共用一个。 */
+  private catalogScroller: ListScroller = new ListScroller();
+  /** 二级页面返回时恢复用：两个频道列表最后停留的纵向位置。 */
+  private discoverResumeOffset: number = 0;
+  private catalogResumeOffset: number = 0;
+  /** 进入合集排行前记下的首页位置，返回首页时恢复。 */
+  private collectionReturnOffset: number = 0;
   private managementScroller: ListScroller = new ListScroller();
   private localScroller: Scroller = new Scroller();
   private mineScroller: Scroller = new Scroller();
@@ -262,8 +309,29 @@ struct Index {
   @StorageProp('navigationBottomInset') private navigationBottomInset: number = 0;
   @State private navigationFrameWidth: number = 0;
   @State private navigationFrameHeight: number = 0;
+  @State private navigationCompactness: number = 0;
+  @State private homeNavigationHidden: boolean = false;
+  @State private homeNavigationCollapsed: boolean = false;
+  @State private homeNavigationProgress: number = 0;
+  private homeNavigationTravel: number = 0;
+  private pendingHomeNavigationHidden?: boolean;
+  private homeNavigationAnimationRevision: number = 0;
+  @State private discoverHoldingSide: 'unknown' | 'left' | 'right' = 'unknown';
+  @State private sidebarRailFromRight: boolean = false;
+  @State private sidebarIconsRight: boolean = false;
+  @State private sidebarSwapProgress: number = 0;
+  @State private sidebarDockView: SidebarInstallView = new SidebarInstallView();
+  private sidebarDockAction?: () => void;
+  private navigationAnimator: AnimatorResult | undefined = undefined;
+  private sidebarSwapAnimator: AnimatorResult | undefined = undefined;
+  private navigationHolding: HoldingSide = new HoldingSide((left: boolean): void => {
+    this.getUIContext().animateTo({ duration: 220, curve: Curve.EaseInOut }, () => {
+      this.discoverHoldingSide = left ? 'left' : 'right';
+    });
+    this.moveSidebarToHoldingSide();
+  });
   @State private featuredHeights: Map<number, number> = new Map();
-  @State private currentTab: number = 0;
+  @State @Watch('syncNavigationWidth') private currentTab: number = 0;
   @State @Watch('syncManagementRows') private pendingJobs: InstallJob[] = [];
   @State @Watch('syncManagementRows') private installedJobs: InstallJob[] = [];
   /** 商店目录里、本机已安装但非轻启安装的应用（无 job 记录）。 */
@@ -275,7 +343,7 @@ struct Index {
   @StorageLink('followingCollapsed') private followingCollapsed:boolean=false;
   @StorageLink('notificationSection') @Watch('openNotificationSection') private notificationSection:string='';
   @State private followingCount:number=0;
-  @State private followingRevision:number=0;
+  @State private followedAppIds:number[]=[];
   @State private followingInformation:CatalogApp|undefined=undefined;
   private followingSubscription:number=-1;
   private followingSnapshot:FollowedApp[]=[];
@@ -308,11 +376,39 @@ struct Index {
   private catalogSortResetTop: boolean = false;
   @State private discoverSort: DiscoverSortKey = DiscoverSortPreferences.current().key;
   @State private discoverDirection: SortDirection = DiscoverSortPreferences.current().direction;
+  /** 首页顶部频道：discover 是合集推荐，apps 是全量应用（沿用原有列表）。 */
+  @State @Watch('syncNavigationWidth') private homeChannel: string = 'discover';
+  /** 0=发现，1=全量应用；手势进度同时驱动页面位移与顶部频道标题字号。 */
+  @State private channelProgress: number = 0;
+  private channelDragStart: number = 0;
+  @State private channelDragging: boolean = false;
+  @State private catalogChannelMounted: boolean = false;
+  @State private collections: DiscoveryCollections = new DiscoveryCollections();
+  @State private collectionsLoading: boolean = true;
+  @State private collectionsError: string = '';
+  @State private collectionsRefreshing: boolean = false;
+  private collectionsRefreshRunning: boolean = false;
+  /** 合集详情：非空时首页列表切到该合集的完整排行，返回即回到首页合集。 */
+  @State private collectionKey: string = '';
+  @State private collectionBasis: string = '';
+  @State @Watch('syncCollectionRows') private collectionEntries: DiscoveryEntry[] = [];
+  private collectionRows: ListDataSource<CollectionRankRow> = new ListDataSource<CollectionRankRow>(
+    (row: CollectionRankRow): string => String(row.entry.app.id),
+    (row: CollectionRankRow): string => row.index + ':' + JSON.stringify(row.entry));
+  @State private collectionLoading: boolean = false;
+  @State private collectionHasMore: boolean = false;
+  @State private collectionLoadFailed: boolean = false;
+  @State private collectionTotal: number = 0;
+  private collectionPage: number = 0;
+  private collectionRequest: number = 0;
+  private channelTransition: number = 0;
+  @State private channelTransitioning: boolean = false;
+  private collectionsToken: number = 0;
   /** 已提交给服务端的关键词（与输入框可能不同：改词后按搜索才生效）。 */
   @State private activeQuery: string = '';
   @State private activeCategory: string = '';
-  @State private discoveryCategories: string[] = [];
   @State private categoriesExpanded: boolean = false;
+  @State private discoveryCategories: string[] = [];
   /** 目录里每个应用在本机的版本（来自系统 bundleManager），0/缺失表示没装。 */
   @State private installedVersions: Map<number, number> = new Map<number, number>();
   @State @Watch('syncManagementRows') private installedDisplay: Map<string, VersionCacheEntry> = new Map();
@@ -377,6 +473,8 @@ struct Index {
   private confirmationSubscription: number = -1;
   private reconnectSubscription: number = -1;
   @State private privacyAllowed: boolean = PrivacyConsent.isBusinessAllowed();
+  @State private showStartupNotice: boolean = false;
+  @State private startupNoticeDismiss: number = 0;
   @State private privacyBusy: boolean = false;
   @State private privacyMessage: string = '';
   private privacySubscription: number = -1;
@@ -398,6 +496,10 @@ struct Index {
     (app: CatalogApp): string => JSON.stringify(app) + ':' + AppDisplayName.forCatalog(app) + ':' +
       this.installedAssets(app).concat(this.latestAssets(app)).map((asset: HapAsset): string => asset.bundleName + ':' +
         String(UpdatePolicy.disabled(asset.bundleName))).join('|'));
+  private iconResidency: IconResidency = new IconResidency();
+  private iconTrimTimer: number = -1;
+  private iconDisposed: boolean = false;
+  private localIconFlights: Set<string> = new Set();
   @State private appIcons: AppIcon[] = [];
   /** 管理页按需保留图标，不随发现页搜索或首屏刷新清空。 */
   @State private managementIcons: AppIcon[] = [];
@@ -426,7 +528,16 @@ struct Index {
   private catalogRefreshBusy: boolean = false;
   @State private account: DeveloperAccount = new DeveloperAccount();
   @State private signedIn: boolean = false;
-  /** 是否已完成启动时的登录态检查（false 时显示检查中，避免闪一下登录页）。 */
+  @State private mineGitHubStatus: string = '';
+  @State private mineGitHubLogin: string = '';
+  @State private mineGitHubBusy: boolean = false;
+  @StorageProp('githubAssociationPhase') private mineGitHubPhase: string = '';
+  @StorageProp('githubAssociationFailure') private mineGitHubFailure: string = '';
+  @StorageProp('githubAssociationRevision') @Watch('refreshMineGitHub') private mineGitHubRevision: number = 0;
+  @StorageProp('deviceOrbForeground') @Watch('onReturnFromVerification') private mineAccountForeground: boolean = true;
+  private mineGitHubChecking: boolean = false;
+  private pendingRealNameAccount: string = '';
+  /** 登录卡和账号相关操作等待本地会话恢复，商店首页独立加载。 */
   @State private accountChecked: boolean = false;
   @State private loginBusy: boolean = false;
   @State private loginMessage: string = '';
@@ -445,9 +556,10 @@ struct Index {
   @State private identityMessage: string = '';
   /** Only a requested cloud backup failure is a warning; local-only signing remains usable. */
   @State private backupWarning: string = '';
-  @State private showSubmit: boolean = false;
+  @State @Watch('releasePresentationDrafts') private showSubmit: boolean = false;
   @State private submitUrl: string = '';
   @State private submitDraft: SubmitDraft = new SubmitDraft();
+  @State private submitPresentation: ListingPresentationDraft = new ListingPresentationDraft();
   private submitGeneration: number = 0;
   @State private submitAssets: string[] = [];
   @State private submitCategory: string = '';
@@ -462,21 +574,8 @@ struct Index {
   @State private submitExistingName: string = '';
   @State @Watch('syncManagementRows') private myApps: CatalogApp[] = [];
   @State private myAppsMessage: string = '';
-  @State private removingId: number = 0;
-  @State private showAppConfig: boolean = false;
-  @State private configApp: CatalogApp = new CatalogApp();
-  @State private configCategories: string[] = [];
-  @State private configCategory: string = '';
-  @State private configBusy: boolean = false;
-  @State private configMessage: string = '';
-  @State private configSourceUrl: string = '';
-  @State private configSourceDraft: SubmitDraft = new SubmitDraft();
-  @State private configSourceRemove: boolean = false;
-  @State private configSourceMessage: string = '';
-  @State private configSourceChecking: boolean = false;
-  @State private configSourceExpanded: boolean = false;
   @State private uninstallingBundle: string = '';
-  private configSourceGeneration: number = 0;
+  private listingRevision: number = 0;
   @State @Watch('onReconnectVisibilityChanged') private showReconnect: boolean = false;
   @State private reconnectPort: string = '';
   private reconnectPortReadGeneration: number = 0;
@@ -520,7 +619,7 @@ struct Index {
   @State private showCertSheet: boolean = false;
   @State private showCertificatePrompt: boolean = false;
   @State private showAccountPrompt: boolean = false;
-  @StorageProp('accountReauthRequired') private accountReauthRequired: boolean = false;
+  @StorageProp('accountReauthRequired') @Watch('onAccountReauthChanged') private accountReauthRequired: boolean = false;
   @State private accountPromptDismiss: number = 0;
   @State private certificatePromptDismiss: number = 0;
   @State private showLocalProfiles: boolean = false;
@@ -537,6 +636,9 @@ struct Index {
 
   private colors(): Palette { return Palette.forMode(this.darkMode); }
 
+  private cardPaint(color: string): string { return Palette.containerPaint(color, this.appBackground.containerOpacity); }
+  private cardSurface(): string { return this.cardPaint(this.colors().surface); }
+
   private navigationColor(_index: number, selected: boolean, icon: boolean = false): ResourceColor {
     // 6.1 keeps the requested theme foreground; 7.0 retains native color-resource identity.
     if (!StoreMaterial.supported(this.materialMode)) return this.darkMode ? '#FFFFFF' : '#000000';
@@ -544,7 +646,11 @@ struct Index {
   }
 
   private splitFeaturedStars(): number {
-    if (this.discoverLayout !== 'sidebar' || this.currentTab !== Index.TAB_DISCOVER) return 0;
+    if (this.appBackground.theme !== 'default' || !this.darkMode || this.homeChannel !== 'apps' || this.discoverLayout !== 'sidebar' ||
+      this.currentTab !== Index.TAB_DISCOVER) return 0;
+    return this.sidebarFeaturedStars();
+  }
+  private sidebarFeaturedStars(): number {
     return this.apps.find((app: CatalogApp) => app.id === this.sidebarSelectedId)?.stars ?? 0;
   }
   private splitOnStarfield(): boolean { return this.splitFeaturedStars() > Index.STARRED_MIN_STARS; }
@@ -559,6 +665,12 @@ struct Index {
 
   private pageInset(): number { return StoreLayout.inset(this.viewportWidth); }
   private contentInset(): number { return StoreLayout.contentInset(this.viewportWidth); }
+  private discoveryInset(): number { return StoreLayout.contentInset(this.viewportWidth, this.viewportHeight); }
+  /** 横屏宽版面：首页两列排布合集，窄窗与竖屏保持原单栏。 */
+  private wideLandscape(): boolean {
+    return StoreLayout.wideLandscape(this.navigationFrameWidth || this.viewportWidth,
+      this.navigationFrameHeight || this.viewportHeight);
+  }
   private sheetMaxHeight(): number {
     return StoreLayout.sheetMaxHeight(this.viewportHeight, this.statusBarInset, this.navigationBottomInset);
   }
@@ -601,33 +713,151 @@ struct Index {
     return displayed?.version ?? confirmed;
   }
 
-  private syncDiscoverScroll(): void {
-    if (this.discoverLayout !== 'normal') return;
-    ForegroundIdle.interaction();
-    const distance = this.discoverMotion.scroll(this.discoverScrollOffset(),
-      this.discoverTitleHeight);
+  private trackDiscoverScrollSource(source: ScrollSource): void {
+    this.discoverScrollFromUser = !this.channelTransitioning && !this.channelDragging &&
+      (source === ScrollSource.DRAG || source === ScrollSource.FLING || source === ScrollSource.OTHER_USER_INPUT ||
+        source === ScrollSource.SCROLL_BAR || source === ScrollSource.SCROLL_BAR_FLING);
+  }
+
+  private consumeDiscoverScrollSource(): boolean {
+    const fromUser = this.discoverScrollFromUser;
+    this.discoverScrollFromUser = false;
+    if (fromUser) ForegroundIdle.interaction();
+    return fromUser;
+  }
+
+  private trackHomeNavigation(delta: number): void {
+    if (!this.autoHideNavigation || this.currentTab !== Index.TAB_DISCOVER || !this.pageVisible || this.channelTransitioning ||
+      this.channelDragging || !Number.isFinite(delta) || delta === 0) return;
+    const hide = delta > 0;
+    if (hide === (this.pendingHomeNavigationHidden ?? this.homeNavigationHidden)) {
+      this.homeNavigationTravel = 0;
+      return;
+    }
+    this.homeNavigationTravel += Math.abs(delta);
+    if (this.homeNavigationTravel >= (hide ? 24 : 12)) {
+      this.updateHomeNavigationAfterPaint(hide);
+      this.homeNavigationTravel = 0;
+    }
+  }
+
+  private showHomeNavigation(): void {
+    this.homeNavigationTravel = 0;
+    this.updateHomeNavigationAfterPaint(false);
+  }
+
+  private navigationAutoHideChanged(): void {
+    if (this.autoHideNavigation) return;
+    this.homeNavigationTravel = 0;
+    this.pendingHomeNavigationHidden = undefined;
+    this.homeNavigationAnimationRevision++;
+    this.homeNavigationCollapsed = false;
+    this.homeNavigationHidden = false;
+    this.homeNavigationProgress = 0;
+  }
+
+  private updateHomeNavigationAfterPaint(hidden: boolean): void {
+    if (this.pendingHomeNavigationHidden !== undefined) {
+      this.pendingHomeNavigationHidden = hidden;
+      return;
+    }
+    if (hidden === this.homeNavigationHidden) return;
+    this.pendingHomeNavigationHidden = hidden;
+    // Apply after scroll layout. Keep the native bar in the same frame throughout the fade.
+    afterPaint(this.getUIContext(), () => {
+      const next = this.pendingHomeNavigationHidden;
+      this.pendingHomeNavigationHidden = undefined;
+      if (next === undefined || !this.pageVisible) return;
+      if (next && (!this.autoHideNavigation || this.currentTab !== Index.TAB_DISCOVER ||
+        this.channelTransitioning || this.channelDragging)) return;
+      if (next === this.homeNavigationHidden) return;
+      const revision = ++this.homeNavigationAnimationRevision;
+      if (!next) this.homeNavigationCollapsed = false;
+      const sidebar = this.homeChannel === 'apps' && this.discoverLayout === 'sidebar';
+      // One native timeline fades the bar and moves the action. Reversals start
+      // from the current presentation position, without rebuilding either node.
+      this.getUIContext().animateTo({ duration: sidebar ? 300 : (next ? 180 : 220), curve: Curve.EaseInOut, onFinish: () => {
+        if (next && revision === this.homeNavigationAnimationRevision && this.homeNavigationHidden &&
+          this.pendingHomeNavigationHidden !== false) this.homeNavigationCollapsed = true;
+      } }, () => {
+        this.homeNavigationHidden = next;
+        this.homeNavigationProgress = next ? 1 : 0;
+      });
+    });
+  }
+
+  private syncDiscoverScroll(fromUser: boolean = false): void {
+    if (!this.normalHomeLayout() || this.channelTransitioning || this.channelDragging) return;
+    const distance = this.discoverMotion.scroll(this.discoverScrollOffset(), fromUser);
     const refresh = distance <= 0.5;
     if (refresh !== this.discoverCanRefresh) this.discoverCanRefresh = refresh;
+  }
+
+  /** 合计频道始终单栏渲染；只有「全量应用」沿用用户选择的侧栏布局。 */
+  private normalHomeLayout(): boolean {
+    return this.homeChannel === 'discover' || this.discoverLayout === 'normal';
   }
 
   private discoverScrollOffset(): number {
     // The normal list is unmounted in sidebar mode. Native currentOffset() can
     // also return undefined for a frame while either layout is being attached.
-    if (this.discoverLayout !== 'normal') return 0;
+    if (!this.normalHomeLayout()) return 0;
     try {
-      const offset = this.discoverScroller.currentOffset();
+      const offset = this.channelScroller().currentOffset();
       return offset && Number.isFinite(offset.yOffset) ? offset.yOffset : 0;
     } catch (_) { return 0; }
   }
 
+  /** 两个频道各有自己的列表容器：横滑过渡时两页会同时挂载。 */
+  private channelScroller(): ListScroller {
+    return this.homeChannel === 'apps' ? this.catalogScroller : this.discoverScroller;
+  }
+
+  /** 页面可见期间记录列表停留位置，供二级页面返回时恢复。 */
+  private rememberHomeScroll(channel: string): void {
+    if (!this.pageVisible) return;
+    if (channel === 'apps') this.catalogResumeOffset = this.scrollerOffset(this.catalogScroller);
+    else this.discoverResumeOffset = this.scrollerOffset(this.discoverScroller);
+  }
+
+  private scrollerOffset(scroller: Scroller): number {
+    try {
+      const offset = scroller.currentOffset();
+      return offset && Number.isFinite(offset.yOffset) ? offset.yOffset : 0;
+    } catch (_) { return 0; }
+  }
+
+  /** 只在列表被重置回顶部时恢复，避免与已经保留的位置打架。 */
+  private restoreHomeScroll(): void {
+    const restore = (scroller: Scroller, offset: number): void => {
+      if (offset <= 0.5 || this.scrollerOffset(scroller) > 0.5) return;
+      try { scroller.scrollTo({ xOffset: 0, yOffset: offset, animation: false }); } catch (_) {
+        // 布局尚未挂载时忽略，下一次回到页面会再试。
+      }
+    };
+    restore(this.discoverScroller, this.discoverResumeOffset);
+    restore(this.catalogScroller, this.catalogResumeOffset);
+    this.syncDiscoverScroll();
+  }
+
+  private restoreDiscoverOffset(offset: number): void {
+    if (offset <= 0.5) return;
+    try { this.discoverScroller.scrollTo({ xOffset: 0, yOffset: offset, animation: false }); } catch (_) { return; }
+    this.syncDiscoverScroll();
+  }
+
   private revealDiscoverTop(): void {
+    if (this.channelTransitioning || this.channelDragging) return;
+    this.showHomeNavigation();
     // 使用列表真实起点，HdsNavigation 与安全区会改变 offset 基准。
-    this.discoverMotion.reachStart(this.discoverScrollOffset());
+    const offset = this.normalHomeLayout() ? this.discoverScrollOffset() : this.scrollerOffset(this.sidebarScroller);
+    this.discoverMotion.reachStart(offset);
     if (!this.discoverCanRefresh) this.discoverCanRefresh = true;
   }
 
   private backToDiscoverTop(): void {
-    const scroller = this.discoverLayout === 'sidebar' ? this.sidebarScroller : this.discoverScroller;
+    const scroller = this.discoverLayout === 'sidebar' && this.homeChannel === 'apps' ?
+      this.sidebarScroller : this.channelScroller();
     try { scroller.scrollEdge(Edge.Top); } catch (_) { /* Layout may still be attaching. */ }
     this.revealDiscoverTop();
   }
@@ -653,6 +883,7 @@ struct Index {
 
   aboutToAppear(): void {
     this.discoverLayout = DiscoverSortPreferences.currentLayout();
+    this.discoverToolbarRows = DiscoverSortPreferences.currentToolbarRows();
     // A real first paint precedes the native material/navigation initialization.
     afterPaint(this.getUIContext(), () => { this.shellReady = true; });
     this.installerVersionName = LocalBundles.selfVersionName();
@@ -692,6 +923,7 @@ struct Index {
     if (this.businessInitialized) return;
     this.businessInitialized = true;
     const followingContext=getContext(this) as common.UIAbilityContext;
+    AccountService.configure(followingContext);
     this.followingSubscription=FollowingRegistry.subscribe(()=>this.onFollowingChanged());
     ManagementSortPreferences.load(followingContext).then(()=>{this.syncManagementRows();this.openNotificationSection();}).catch(()=>{});
     ForegroundIdle.defer('index-following-boot',()=>{
@@ -713,7 +945,7 @@ struct Index {
     // compete with HDS initialization or the system's opening animation.
     ForegroundIdle.defer('index-boot-catalog', () => {
       if (!PrivacyConsent.isBusinessAllowed()) return;
-      this.loadCatalogFromCache(); this.loadApps();
+      this.loadCatalogFromCache(); this.loadApps(); this.loadCollections();
     });
     this.recoverDownloads().finally(() => {
       if (!PrivacyConsent.isBusinessAllowed()) return;
@@ -737,6 +969,7 @@ struct Index {
     AppStorage.setOrCreate<boolean>('homePageVisible', true);
     this.observePrivacy();
     if (!PrivacyConsent.isBusinessAllowed()) return;
+    if (this.navigationCompactness === 1 && this.discoverChromeReady) this.navigationHolding.start();
     this.initializeBusiness();
     // Home/background returns keep the same component and gesture observer.
     // Renew ownership after an actual page transition, outside the first paint.
@@ -747,6 +980,8 @@ struct Index {
         if (!this.pageVisible || generation !== this.headerRestoreGeneration) return;
         this.headerRouteRevision = routeRevision;
         this.topActionEpoch++;
+        // 从详情页等二级页面返回：列表若被重置回顶部，恢复到离开前的位置。
+        this.restoreHomeScroll();
       });
     }
     this.refreshOpeningSettings = false;
@@ -761,18 +996,27 @@ struct Index {
       this.observeInstallTasks();
       this.drainInstallQueue();
       this.syncViewedCatalog();
+      this.syncPublicationChanges();
       this.syncFollowing();
       if (this.managementRowsPending) this.syncManagementRows();
       this.refreshCatalogInstallState();
       if (this.currentTab === Index.TAB_MANAGE) {
         this.scanDeviceInstalled(); this.syncManagementIcons(); this.loadSigningExpiries();
-        this.syncDeviceIcons();
+        this.syncDeviceIcons(); this.loadMyApps();
+      } else if (this.currentTab === Index.TAB_MINE) {
+        this.refreshMineGitHub();
       }
       this.reconcileInterruptedInstalls().then(() => this.reconcileStuckJobs());
     });
   }
 
   private cancelResumeMaintenance(): void {
+    this.navigationHolding?.stop();
+    if (this.sidebarSwapAnimator !== undefined) this.settleSidebarSwap();
+    if (this.navigationAnimator !== undefined) {
+      this.cancelNavigationWidthAnimation();
+      this.navigationCompactness = this.navigationWidthTarget();
+    }
     ForegroundIdle.cancel('index-resume');
     ForegroundIdle.cancel('index-tab');
     ForegroundIdle.cancel('catalog-wireless');
@@ -794,6 +1038,7 @@ struct Index {
         this.syncDeviceIcons();
         // loadJobs already refreshes signing expiries; avoid a competing second scan.
       } else if (index === Index.TAB_MINE) {
+        this.refreshMineGitHub();
         this.recoverSigningIdentity();
         this.checkDevice().then(() => this.refreshCatalogInstallState());
       }
@@ -825,8 +1070,28 @@ struct Index {
     }
   }
 
+  private syncPublicationChanges(): void {
+    const revision = StoreClient.publicationRevision();
+    if (revision === this.listingRevision) return;
+    this.listingRevision = revision;
+    const removed = StoreClient.takeUnlisted();
+    if (removed.length > 0) {
+      this.myApps = this.myApps.filter(app => !removed.includes(app.id));
+      this.apps = this.apps.filter(app => !removed.includes(app.id));
+      this.updateCatalog = this.updateCatalog.filter(app => !removed.includes(app.id));
+    }
+    this.loadApps(true, false, true);
+    this.loadCollections();
+  }
+
   aboutToDisappear(): void {
+    this.iconDisposed = true;
+    if (this.iconTrimTimer !== -1) clearTimeout(this.iconTrimTimer);
+    const catalogIcons = this.appIcons.concat(this.managementIcons), localIcons = this.localIcons;
+    this.appIcons = []; this.managementIcons = []; this.localIcons = [];
+    this.releaseUnusedIcons(catalogIcons, localIcons);
     ForegroundIdle.cancel('index-following-boot');ForegroundIdle.cancel('index-following-account');
+    ForegroundIdle.cancel('index-channel-warm');
     FollowingRegistry.unsubscribe(this.followingSubscription);
     this.followingSubscription=-1;
     PrivacyConsent.unsubscribe(this.privacySubscription);
@@ -834,7 +1099,6 @@ struct Index {
     if (this.fixedPortInputTimer !== -1) clearTimeout(this.fixedPortInputTimer);
     this.headerRestoreGeneration++;
     this.dismissCardActions(-1);
-    this.configSourceGeneration++;
     this.expiryReadToken++;
     this.pageVisible = false;
     this.homeVisibility.visible = false;
@@ -883,6 +1147,7 @@ struct Index {
       ForegroundIdle.defer('index-following-account',()=>UpdatePushSync.syncBestEffort(context));
       this.account = saved;
       this.signedIn = true;
+      if (this.currentTab === Index.TAB_MINE) this.refreshMineGitHub();
       this.loginMessage = '';
       ForegroundIdle.defer('index-account-refresh', () => this.refreshRestoredAccount(saved, context));
     } catch (_) {
@@ -894,13 +1159,21 @@ struct Index {
     }
   }
 
-  private async refreshRestoredAccount(saved: DeveloperAccount, context: common.UIAbilityContext): Promise<void> {
+  private onAccountReauthChanged(): void {
+    if (!this.accountReauthRequired && !this.loginBusy && this.accountChecked && PrivacyConsent.isBusinessAllowed()) {
+      this.restoreAccount();
+    }
+  }
+
+  private async refreshRestoredAccount(saved: DeveloperAccount, context: common.UIAbilityContext,
+    force: boolean = false): Promise<void> {
     if (!PrivacyConsent.isBusinessAllowed()) return;
     try {
       AccountService.configure(context);
-      const refreshed = await AccountService.refresh(saved);
+      const refreshed = await AccountService.refresh(saved, force);
       if (!PrivacyConsent.isBusinessAllowed() || this.account !== saved || !this.signedIn) return;
-      this.account = refreshed; this.sessionNotice = '';
+      this.account = force ? DeveloperAccount.fromJson(JSON.parse(refreshed.toJson()) as Record<string, Object>) : refreshed;
+      this.sessionNotice = '';
       UpdatePushSync.sync(context,true).catch(()=>{});
       InstallCoordinator.conditionReady(context, InstallStage.WAITING_ACCOUNT);
       this.drainInstallQueue(); this.recoverSigningIdentity(); this.loadMyApps();
@@ -908,6 +1181,8 @@ struct Index {
       if (this.account !== saved || !this.signedIn) return;
       if ((error as ClassifiedFailure).failureKind === FailureKind.NETWORK) {
         this.sessionNotice = I18n.t('账号服务暂时不可用，正在使用本地登录态');
+      } else if (InstallAccountRecovery.requiresLogin(errorText(error))) {
+        this.sessionNotice = I18n.t('登录状态需要重新核验');
       } else {
         this.signedIn = false; this.loginMessage = I18n.t('登录状态已过期，请重新登录');
       }
@@ -915,7 +1190,7 @@ struct Index {
   }
 
   private async login(): Promise<void> {
-    if (!PrivacyConsent.isBusinessAllowed()) return;
+    if (!PrivacyConsent.isBusinessAllowed() || !this.accountChecked || this.loginBusy) return;
     this.loginBusy = true;
     this.loginMessage = I18n.t('请在浏览器中完成华为开发者账号登录');
     try {
@@ -923,11 +1198,14 @@ struct Index {
       const account = await DevEcoLogin.login(context);
       if (!PrivacyConsent.isBusinessAllowed()) return;
       await AccountSession.save(context, account);
-      AppStorage.setOrCreate('accountReauthRequired', false);
+      InstallAccountRecovery.resolved();
       this.syncFollowing();
       ForegroundIdle.defer('index-following-account',()=>UpdatePushSync.syncBestEffort(context));
       this.account = account;
       this.signedIn = true;
+      this.mineGitHubStatus = '';
+      this.mineGitHubLogin = '';
+      if (this.currentTab === Index.TAB_MINE) this.refreshMineGitHub();
       this.loginMessage = I18n.t('登录成功');
       InstallCoordinator.conditionReady(context, InstallStage.WAITING_ACCOUNT);
       this.updateInstallScanPrompt();
@@ -943,10 +1221,12 @@ struct Index {
 
   private async signOut(): Promise<void> {
     await AccountSession.clear(getContext(this) as common.UIAbilityContext);
-    AppStorage.setOrCreate('accountReauthRequired', false);
+    InstallAccountRecovery.resolved();
     FollowingRegistry.load(getContext(this) as common.UIAbilityContext).catch(()=>{});
     this.account = new DeveloperAccount();
     this.signedIn = false;
+    this.mineGitHubStatus = '';
+    this.mineGitHubLogin = '';
     this.loginMessage = '';
     this.identityMessage = '';
     this.myApps = [];
@@ -1121,8 +1401,10 @@ struct Index {
       return synced;
     } catch (error) {
       if (this.account.userId !== account.userId) return false;
-      this.backupWarning = I18n.t('签名身份尚未备份到云端（') + errorText(error) +
-        I18n.t('）。已保留本机材料，下次核对身份时会重试备份。');
+      this.backupWarning = InstallAccountRecovery.requiresLogin(errorText(error)) ?
+        I18n.t('请重新登录后重试云备份，本机签名材料已保留。') :
+        I18n.t('签名身份尚未备份到云端（') + errorText(error) +
+          I18n.t('）。已保留本机材料，下次核对身份时会重试备份。');
       return false;
     }
   }
@@ -1399,21 +1681,27 @@ struct Index {
 
   /** 目录每页条数；服务端 /apps 的 page_size 上限为 100。 */
   private static readonly CATALOG_PAGE_SIZE: number = 30;
+  private catalogScope: string = '';
+  private collectionsScope: string = '';
+  private updateCatalogScope: string = '';
 
   private catalogHasMore(): boolean {
     return this.catalogPage > 0 && this.catalogPage * Index.CATALOG_PAGE_SIZE < this.catalogTotal &&
       !this.catalogLoading && !this.catalogMoreBusy && !this.discoverHydrating;
   }
 
-  private async loadApps(reset: boolean = true, rescanInstalled: boolean = false, forceCatalog: boolean = false): Promise<void> {
+  private async loadApps(reset: boolean = true, rescanInstalled: boolean = false, forceCatalog: boolean = false,
+    deferState: boolean = false): Promise<void> {
     if (reset) {
       if (this.catalogFilterTimer !== -1) clearTimeout(this.catalogFilterTimer);
       this.catalogFilterTimer = -1;
       this.catalogLoading = true;
       this.catalogError = '';
       this.catalogLocalRows = !rescanInstalled && !forceCatalog && this.updateCatalogReady &&
+        this.updateCatalogScope.length > 0 && this.updateCatalogScope === StoreClient.currentScope() &&
         this.activeQuery.length === 0 && this.activeCategory.length > 0 ?
-        filterCatalogCategory(this.updateCatalog, this.activeCategory, this.discoverSort, this.discoverDirection) : undefined;
+        filterCatalogCategory(this.updateCatalog.filter((app: CatalogApp) => !app.overseas ||
+          this.updateCatalogScope === 'overseas'), this.activeCategory, this.discoverSort, this.discoverDirection) : undefined;
     } else if (!this.catalogHasMore()) {
       return;
     }
@@ -1450,16 +1738,26 @@ struct Index {
         sort !== this.discoverSort || direction !== this.discoverDirection) return;
       // 先加载的页在后，追加时按 id 去重，避免上架/删除后翻页出现重复项。
       const previous: CatalogApp[] = reset ? [] : this.apps;
+      if (page.networkScope) {
+        if (this.catalogScope && this.catalogScope !== page.networkScope) this.updateCatalogReady = false;
+        this.catalogScope = page.networkScope;
+      }
       const appended = appendCatalogPage(previous, page.items);
       const fresh = appended.slice(previous.length);
       this.apps = appended;
       // 只保留仍在列表里、且本轮不需要重新拉取的图标：
       // 重置整表会把缓存刚恢复的图标一起清掉，看起来像图标丢了。
       if (reset) {
-        const keep = new Set<number>(page.items.map((app: CatalogApp) => app.id));
+        // 发现页合集与全量列表共用图标缓存，重置列表时不能把合集图标一起丢掉。
+        const keep = new Map<number, string>();
+        for (const item of page.items) keep.set(item.id, item.iconRev);
+        for (const app of this.collections.apps().concat(this.collectionEntries.map((entry: DiscoveryEntry) => entry.app))) {
+          if (!keep.has(app.id)) keep.set(app.id, app.iconRev);
+        }
+        const oldIcons = this.appIcons;
         this.appIcons = this.appIcons.filter((entry: AppIcon) =>
-          keep.has(entry.id) && page.items.some((app: CatalogApp) =>
-            app.id === entry.id && app.iconRev.length > 0 && app.iconRev === entry.rev));
+          entry.rev.length > 0 && keep.get(entry.id) === entry.rev);
+        this.releaseUnusedIcons(oldIcons, []);
       }
       // 目录先提交，图标下载、解码和缓存都不占用刷新动画。
       const cacheablePage = reset && query.length === 0 && category.length === 0;
@@ -1469,18 +1767,23 @@ struct Index {
       if (reset && this.catalogSortResetTop) { this.catalogSortResetTop = false; this.backToDiscoverTop(); }
       this.catalogError = '';
       // 目录变了就重算「装没装」，卡片按钮跟着更新
-      const channels = ReleaseChannelRegistry.refreshTargets(getContext(this) as common.UIAbilityContext,
-        reset ? this.apps : fresh, rescanInstalled);
-      if (rescanInstalled) await channels;
-      const recognition = this.refreshCatalogInstallState(rescanInstalled, reset ? undefined : fresh);
+      if (!deferState) {
+        const channels = ReleaseChannelRegistry.refreshTargets(getContext(this) as common.UIAbilityContext,
+          reset ? this.apps : fresh, rescanInstalled);
+        if (rescanInstalled) await channels;
+        else channels.catch(() => {});
+      }
       // 只缓存干净的第一页：缓存与分页混在一起会得到半新半旧的列表
       if (cacheablePage) {
         const context = getContext(this) as common.UIAbilityContext;
         CatalogCache.save(context, page.items, page.rawItems, sort, direction, cacheGeneration);
       }
       this.loadCatalogIcons(client, reset ? this.apps : fresh, query);
-      // 主动下拉等待本轮真实识别完成；启动、搜索和翻页继续异步识别。
-      if (rescanInstalled) await recognition;
+      if (!deferState) {
+        const recognition = this.refreshCatalogInstallState(rescanInstalled, reset ? undefined : fresh);
+        if (rescanInstalled) await recognition;
+        else recognition.catch(() => {});
+      }
     } catch (error) {
       if (token !== this.catalogToken || query !== this.activeQuery || category !== this.activeCategory ||
         sort !== this.discoverSort || direction !== this.discoverDirection) return;
@@ -1491,6 +1794,331 @@ struct Index {
         this.catalogMoreBusy = false;
         this.catalogLoading = false;
       }
+    }
+  }
+
+  private async loadCollections(force: boolean = false): Promise<void> {
+    const token = ++this.collectionsToken;
+    this.collectionsLoading = true;
+    this.collectionsError = '';
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const client = new StoreClient(context);
+      const data = await client.collections(7, 8, '', 1, force);
+      if (token !== this.collectionsToken) return;
+      this.collections = data;
+      if (data.networkScope) this.collectionsScope = data.networkScope;
+      const apps = data.apps();
+      this.loadCatalogIcons(client, apps, this.activeQuery, true);
+      ReleaseChannelRegistry.refreshTargets(context, apps, false).catch(() => {});
+    } catch (error) {
+      if (token === this.collectionsToken) this.collectionsError = errorText(error);
+    } finally {
+      if (token === this.collectionsToken) this.collectionsLoading = false;
+    }
+  }
+
+  private selectHomeChannel(channel: string): void {
+    const next = channel === 'apps' ? 'apps' : 'discover';
+    const target = next === 'apps' ? 1 : 0;
+    if (next === this.homeChannel && Math.abs(this.channelProgress - target) < 0.001) return;
+    this.settleChannelTo(target);
+  }
+
+  /** 无动画地落到某个频道：搜索等入口需要立即就位。 */
+  private applyHomeChannel(channel: string): void {
+    const next = channel === 'apps' ? 'apps' : 'discover';
+    this.channelTransition++;
+    this.channelTransitioning = false;
+    this.channelDragging = false;
+    this.prepareChannel(next);
+    if (next === 'apps') this.discoverMotion.revealChannelRow();
+    this.homeChannel = next;
+    this.channelProgress = next === 'apps' ? 1 : 0;
+    this.afterChannelSwitch();
+  }
+
+  /** Warm only the view tree after interaction; this never downloads a second catalog. */
+  private warmHomeChannels(): void {
+    if (this.catalogChannelMounted) return;
+    ForegroundIdle.defer('index-channel-warm', () => {
+      if (this.pageVisible && this.currentTab === Index.TAB_DISCOVER) this.catalogChannelMounted = true;
+    });
+  }
+
+  private mountHomeChannel(channel: string): boolean {
+    const mounted = channel !== 'apps' || this.catalogChannelMounted;
+    if (channel === 'apps') this.catalogChannelMounted = true;
+    return mounted;
+  }
+
+  private prepareChannel(channel: string): void {
+    this.mountHomeChannel(channel);
+    const scope = StoreClient.currentScope();
+    const staleCollections = this.collectionsScope !== scope;
+    const staleCatalog = this.catalogScope !== scope;
+    if (channel === 'discover' && (this.collections.blocks.length === 0 || staleCollections) && !this.collectionsLoading) {
+      this.loadCollections(staleCollections);
+    }
+    if (channel === 'apps' && (this.apps.length === 0 || staleCatalog) && !this.catalogLoading) this.loadApps(true, false, staleCatalog);
+  }
+
+  private channelSettleDuration(target: number): number {
+    return Math.max(110, Math.round(Index.CHANNEL_SWITCH_MS * Math.abs(target - this.channelProgress)));
+  }
+
+  /** Retain both scenes; a release continues immediately from the last finger position. */
+  private settleChannelTo(target: number): void {
+    const next = target > 0.5 ? 'apps' : 'discover';
+    const mounted = this.mountHomeChannel(next);
+    const transition = ++this.channelTransition;
+    this.channelTransitioning = true;
+    this.channelDragging = false;
+    ForegroundIdle.interaction(Index.CHANNEL_SWITCH_MS + 150);
+    if (next === 'apps' && this.homeChannel === 'discover') this.discoverMotion.revealChannelRow();
+    const savedOffset = next === 'apps' ? this.catalogResumeOffset : this.discoverResumeOffset;
+    const targetScroller = next === 'apps' ? this.catalogScroller : this.discoverScroller;
+    const animate = (): void => {
+      if (transition !== this.channelTransition) return;
+      // Usually the retained list is already at its saved offset. Do not force
+      // another synchronous scroll/layout at the end of each finger movement.
+      if (savedOffset > 0.5 && Math.abs(this.scrollerOffset(targetScroller) - savedOffset) > 0.5) {
+        try { targetScroller.scrollTo({ xOffset: 0, yOffset: savedOffset, animation: false }); } catch (_) {}
+      }
+      this.getUIContext().animateTo({
+        duration: this.channelSettleDuration(target), curve: Curve.EaseOut,
+        onFinish: () => {
+          if (transition !== this.channelTransition) return;
+          this.homeChannel = next;
+          this.channelProgress = target;
+          this.channelTransitioning = false;
+          this.afterChannelSwitch();
+          this.prepareChannel(next);
+        }
+      }, () => { this.channelProgress = target; });
+    };
+    // Only the very first non-prewarmed click needs a layout before animation.
+    if (mounted) animate();
+    else afterPaint(this.getUIContext(), animate);
+  }
+
+  private afterChannelSwitch(): void {
+    this.discoverScrollFromUser = false;
+    this.discoverMotion.pull(0);
+    const offset = this.homeChannel === 'apps' ? this.catalogResumeOffset : this.discoverResumeOffset;
+    if (offset <= 0.5) this.revealDiscoverTop();
+    else this.syncDiscoverScroll();
+    const transition = this.channelTransition;
+    afterPaint(this.getUIContext(), () => {
+      if (transition !== this.channelTransition) return;
+      this.restoreHomeScroll();
+      this.syncDiscoverScroll();
+    });
+  }
+
+  private judgeChannelGesture(info: GestureInfo, event: BaseGestureEvent): GestureJudgeResult {
+    if (info.tag !== 'home-channel-swipe') return GestureJudgeResult.CONTINUE;
+    if (this.channelTransitioning) return GestureJudgeResult.REJECT;
+    if (this.homeChannel !== 'discover' || event.fingerList.length === 0) return GestureJudgeResult.CONTINUE;
+    const pan = event as PanGestureEvent;
+    const finger = event.fingerList[0];
+    const ui = this.getUIContext();
+    // Gesture coordinates are vp; component rectangles are px. Test the original
+    // touch point so a swipe that leaves a shelf still belongs to that shelf.
+    const x = ui.vp2px(finger.globalX - pan.offsetX);
+    const y = ui.vp2px(finger.globalY - pan.offsetY);
+    const regions: string[] = ['discover-week-banner-carousel', 'discover-shelf-overseas',
+      'discover-shelf-downloads', 'discover-shelf-new', 'discover-shelf-frequent'];
+    for (const id of regions) {
+      try {
+        // Resolve once at recognition, not on every move: ancestor scrolling and
+        // rotation can change these bounds without an onAreaChange callback.
+        const rect = ui.getComponentUtils().getRectangleById(id);
+        if (rect.size.width > 0 && rect.size.height > 0 &&
+          x >= rect.windowOffset.x && x <= rect.windowOffset.x + rect.size.width &&
+          y >= rect.windowOffset.y && y <= rect.windowOffset.y + rect.size.height) {
+          return GestureJudgeResult.REJECT;
+        }
+      } catch (_) {}
+    }
+    return GestureJudgeResult.CONTINUE;
+  }
+
+  /** 手势在横向位移，进度按窗口宽度归一化。 */
+  private channelGestureProgress(offsetX: number): number {
+    const width = Math.max(1, this.viewportWidth);
+    return Math.min(1, Math.max(0, this.channelDragStart - offsetX / width));
+  }
+
+  private channelGestureStart(offsetX: number): void {
+    if (this.channelTransitioning) return;
+    if (this.homeChannel === 'discover' ? offsetX > 0 : offsetX < 0) return;
+    this.channelDragging = true;
+    this.channelDragStart = this.channelProgress;
+    ForegroundIdle.interaction(600);
+    this.mountHomeChannel(this.homeChannel === 'discover' ? 'apps' : 'discover');
+  }
+
+  private channelGestureUpdate(offsetX: number): void {
+    if (!this.channelDragging) return;
+    ForegroundIdle.interaction();
+    const progress = this.channelGestureProgress(offsetX);
+    if (this.homeChannel === 'discover' && this.channelProgress <= 0.001 && progress > 0.001) {
+      this.discoverMotion.revealChannelRow();
+    }
+    this.channelProgress = progress;
+  }
+
+  private channelGestureEnd(offsetX: number, velocityX: number): void {
+    if (!this.channelDragging) return;
+    ForegroundIdle.interaction();
+    const progress = this.channelGestureProgress(offsetX);
+    const width = Math.max(1, this.viewportWidth);
+    const travel = (progress - this.channelDragStart) * width;
+    const movedFarEnough = Math.abs(travel) >= Math.min(96, width * 0.28);
+    const flicked = Math.abs(travel) >= 12 && Math.abs(velocityX) >= 400 && travel * velocityX < 0;
+    this.channelProgress = progress;
+    this.finishChannelDrag(movedFarEnough || flicked ? 1 - this.channelDragStart : this.channelDragStart);
+  }
+
+  private channelGestureCancel(): void {
+    if (!this.channelDragging) return;
+    this.finishChannelDrag(this.channelDragStart);
+  }
+
+  private finishChannelDrag(target: number): void {
+    if (target === this.channelDragStart && this.channelProgress === target) {
+      this.channelDragging = false;
+      return;
+    }
+    this.settleChannelTo(target);
+  }
+
+  /** 合集右上角「更多」：留在首页频道，切到该合集的完整排行。 */
+  private openCollectionsMore(key: string): void {
+    if (key.length === 0) {
+      this.selectHomeChannel('apps');
+      return;
+    }
+    if (this.collectionKey === key) return;
+    this.collectionReturnOffset = this.scrollerOffset(this.discoverScroller);
+    const preview = this.collections.block(key);
+    const request = ++this.collectionRequest;
+    this.discoverMotion.reachStart(0);
+    this.backToDiscoverTop();
+    this.getUIContext().animateTo({
+      duration: Index.COLLECTION_SWITCH_MS, curve: Curve.FastOutSlowIn
+    }, () => {
+      if (request !== this.collectionRequest) return;
+      this.collectionBasis = preview.basis;
+      this.collectionEntries = preview.entries;
+      this.collectionTotal = preview.total;
+      this.collectionPage = 0;
+      this.collectionLoadFailed = false;
+      this.collectionLoading = false;
+      this.collectionHasMore = true;
+      this.collectionKey = key;
+      this.loadCollectionDetail(key);
+    });
+  }
+
+  private syncCollectionRows(): void {
+    this.collectionRows.update(this.collectionEntries.map(
+      (entry: DiscoveryEntry, index: number) => new CollectionRankRow(entry, index)));
+  }
+
+  private closeCollectionDetail(): void {
+    if (this.collectionKey.length === 0) return;
+    this.collectionRequest++;
+    const returnOffset = this.collectionReturnOffset;
+    this.collectionReturnOffset = 0;
+    this.getUIContext().animateTo({
+      duration: Index.COLLECTION_SWITCH_MS, curve: Curve.FastOutSlowIn
+    }, () => {
+      this.collectionKey = '';
+      this.collectionEntries = [];
+      this.collectionLoading = false;
+    });
+    // 首页内容完成布局后再滚回进入前的位置，避免被合集列表的高度裁掉。
+    afterPaint(this.getUIContext(), () => this.restoreDiscoverOffset(returnOffset));
+  }
+
+  private collectionTitle(key: string): string {
+    if (key === 'stars_week') {
+      const basis = this.collectionKey === key ? this.collectionBasis : this.collections.block(key).basis;
+      return I18n.t(basis === 'today' ? '今日星数榜' : '本周星数榜');
+    }
+    if (key === 'new') return I18n.t('本周新上');
+    if (key === 'frequent') return I18n.t('本周更新最频繁');
+    if (key === 'downloads') return I18n.t('下载榜');
+    if (key === 'updated') return I18n.t('本周更新');
+    if (key === 'overseas') return I18n.t('出海应用');
+    return I18n.t('星数榜');
+  }
+
+  /** 合集详情与首页列表互换时，进出内容统一淡入轻抬。 */
+  private collectionItemTransition(): TransitionEffect {
+    return TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 16 }));
+  }
+
+  private async loadCollectionDetail(key: string, reset: boolean = false): Promise<void> {
+    if (key.length === 0 || this.collectionKey !== key ||
+      (!reset && (this.collectionLoading || !this.collectionHasMore))) return;
+    const request = ++this.collectionRequest;
+    const page = reset ? 1 : this.collectionPage + 1;
+    this.collectionLoadFailed = false;
+    this.collectionLoading = true;
+    try {
+      const client = new StoreClient(getContext(this) as common.UIAbilityContext);
+      const data = await client.collections(7, 24, key, page, reset);
+      if (request !== this.collectionRequest || this.collectionKey !== key) return;
+      const block = data.block(key);
+      if (block.key !== key || block.page !== page || block.pageSize <= 0) {
+        this.collectionLoadFailed = true;
+        return;
+      }
+      if (page > 1 && block.basis !== this.collectionBasis) {
+        await this.loadCollectionDetail(key, true);
+        return;
+      }
+      this.collectionBasis = block.basis;
+      const previous: DiscoveryEntry[] = page === 1 ? [] : this.collectionEntries;
+      const seen = new Set<number>(previous.map((entry: DiscoveryEntry) => entry.app.id));
+      this.collectionEntries = previous.concat(block.entries.filter((entry: DiscoveryEntry) => !seen.has(entry.app.id)));
+      this.collectionTotal = block.total;
+      this.collectionPage = block.page;
+      this.collectionHasMore = block.page * block.pageSize < block.total;
+      this.loadCatalogIcons(client, data.apps(), this.activeQuery, true);
+    } catch (_) {
+      // Keep the last good page and allow retry without losing scroll position.
+      if (request === this.collectionRequest) this.collectionLoadFailed = true;
+    } finally {
+      if (request === this.collectionRequest) this.collectionLoading = false;
+    }
+  }
+
+  /** 分类入口与类型合集的「更多」：带到全量应用的对应分类。 */
+  private openCategoryInCatalog(category: string): void {
+    if (category.length > 0) this.selectDiscoveryCategory(category);
+    this.applyHomeChannel('apps');
+    this.backToDiscoverTop();
+  }
+
+  private async pullRefreshCollections(): Promise<void> {
+    if (this.collectionsRefreshRunning) return;
+    this.collectionsRefreshRunning = true;
+    this.collectionsRefreshing = true;
+    StoreClient.beginRefresh();
+    ForegroundIdle.promote();
+    const startedAt = Date.now();
+    try {
+      if (this.collectionKey.length > 0) await this.loadCollectionDetail(this.collectionKey, true);
+      else await this.loadCollections(true);
+      const remaining = Index.REFRESH_MIN_VISIBLE_MS - (Date.now() - startedAt);
+      if (remaining > 0) await new Promise<void>((resolve: () => void) => setTimeout(resolve, remaining));
+    } finally {
+      this.collectionsRefreshRunning = false;
+      this.collectionsRefreshing = false;
     }
   }
 
@@ -1507,17 +2135,22 @@ struct Index {
   private static readonly REFRESH_MIN_VISIBLE_MS: number = 250;
   /** 超过这个星数用大卡。 */
   private static readonly STARRED_MIN_STARS: number = 100;
+  /** 频道切换/吸附动画时长，和手势跟手进度共用。 */
+  private static readonly CHANNEL_SWITCH_MS: number = 300;
+  /** 首页合集与合集详情互换的过渡时长。 */
+  private static readonly COLLECTION_SWITCH_MS: number = 240;
 
   private async pullRefreshCatalog(): Promise<void> {
     if (this.catalogRefreshBusy) return;
     this.catalogRefreshBusy = true;
     this.catalogRefreshing = true;
+    StoreClient.beginRefresh();
     ForegroundIdle.promote();
     this.catalogRefreshConnectionCancelled = false;
     const startedAt = Date.now();
     try {
       // 只读取服务端已有目录；GitHub 采集由服务端周期任务或详情页主动检查负责。
-      await this.loadApps(true, true);
+      await this.loadApps(true, false, true, true);
     } finally {
       const elapsed = Date.now() - startedAt;
       if (elapsed < Index.REFRESH_MIN_VISIBLE_MS) {
@@ -1529,7 +2162,10 @@ struct Index {
       if (this.catalogError.length === 0 && !this.catalogRefreshConnectionCancelled) {
         // 完整管理目录属于后续同步，等刷新收回及滚动稳定后再补齐。
         ForegroundIdle.defer('index-refresh-catalog', () => {
-          if (this.pageVisible) this.loadUpdateCatalog(true);
+          if (!this.pageVisible) return;
+          this.loadUpdateCatalog(true);
+          ReleaseChannelRegistry.refreshTargets(getContext(this) as common.UIAbilityContext, this.apps, true).catch(() => {});
+          this.refreshCatalogInstallState(true).catch(() => {});
         });
       }
       console.info('Catalog refresh complete: elapsedMs=' + (Date.now() - startedAt));
@@ -1586,23 +2222,23 @@ struct Index {
 
 
   /** 同查询、同图标修订只下载一次；翻页和重复刷新共用尚未完成的请求。 */
-  private async loadCatalogIcons(client: StoreClient, apps: CatalogApp[], query: string): Promise<void> {
+  private async loadCatalogIcons(client: StoreClient, apps: CatalogApp[], query: string, collection: boolean = false): Promise<void> {
     const cacheGeneration = CatalogCache.generation();
     const category = this.activeCategory;
-    const missing = apps.filter((app: CatalogApp) => app.iconRev.length > 0 &&
+    const missing = apps.filter((app: CatalogApp) => this.iconResidency.wanted('catalog:' + app.id) && app.iconRev.length > 0 &&
       !this.appIcons.some((icon: AppIcon) => icon.id === app.id && icon.rev === app.iconRev));
     if (missing.length === 0) return;
     const cached = await CatalogCache.loadIcons(getContext(this) as common.UIAbilityContext, missing);
     const records: CachedIcon[] = [];
     let cursor = 0;
     const worker = async (): Promise<void> => {
-      while (cursor < missing.length && query === this.activeQuery && category === this.activeCategory) {
+      while (cursor < missing.length && (collection || (query === this.activeQuery && category === this.activeCategory))) {
         const app = missing[cursor++];
         if (this.appIcons.some((icon: AppIcon) => icon.id === app.id && icon.rev === app.iconRev)) continue;
-        const key = app.id + ':' + app.iconRev + ':' + query + ':' + cacheGeneration;
+        const key = app.id + ':' + app.iconRev + ':' + (collection ? ':collections' : query) + ':' + cacheGeneration;
         let load = this.catalogIconFlights.get(key);
         if (load === undefined) {
-          load = this.loadAppIcon(client, app, query, cached.get(app.id));
+          load = this.loadAppIcon(client, app, query, cached.get(app.id), collection);
           this.catalogIconFlights.set(key, load);
           load.then(() => this.catalogIconFlights.delete(key));
         }
@@ -1612,36 +2248,43 @@ struct Index {
     };
     // 下载和 PixelMap 解码都限制为四路，避免一页的图标同时争抢滚动帧。
     await Promise.all([worker(), worker(), worker(), worker()]);
-    if (query !== this.activeQuery || category !== this.activeCategory) return;
+    if (!collection && (query !== this.activeQuery || category !== this.activeCategory)) return;
+    const visible = collection ? this.collectionApps() : this.apps;
     const current = records.filter((record: CachedIcon | undefined) =>
-      record !== undefined && this.apps.some((app: CatalogApp) =>
+      record !== undefined && visible.some((app: CatalogApp) =>
         String(app.id) === record.id && app.iconRev === record.rev)) as CachedIcon[];
     if (current.length > 0) {
       await CatalogCache.saveIcons(getContext(this) as common.UIAbilityContext, current, cacheGeneration);
     }
   }
 
-  private isCurrentCatalogIcon(app: CatalogApp, query: string): boolean {
-    return query === this.activeQuery && this.apps.some((row: CatalogApp) =>
+  private collectionApps(): CatalogApp[] {
+    return this.collections.apps().concat(this.collectionEntries.map((entry: DiscoveryEntry) => entry.app));
+  }
+
+  private isCurrentCatalogIcon(app: CatalogApp, query: string, collection: boolean): boolean {
+    if (this.iconDisposed || !this.iconResidency.wanted('catalog:' + app.id)) return false;
+    const rows = collection ? this.collectionApps() : this.apps;
+    return (collection || query === this.activeQuery) && rows.some((row: CatalogApp) =>
       row.id === app.id && row.iconRev === app.iconRev);
   }
 
   private async loadAppIcon(client: StoreClient, app: CatalogApp,
-    query: string, cached?: ArrayBuffer): Promise<CachedIcon | undefined> {
+    query: string, cached?: ArrayBuffer, collection: boolean = false): Promise<CachedIcon | undefined> {
     try {
       if (app.iconRev.length === 0 || app.iconUrl.length === 0) return undefined;
       const attempts = cached === undefined ? 2 : 3;
       for (let attempt = 0; attempt < attempts; attempt++) {
-        if (!this.isCurrentCatalogIcon(app, query)) return undefined;
+        if (!this.isCurrentCatalogIcon(app, query, collection)) return undefined;
         const fromCache = attempt === 0 && cached !== undefined;
         try {
           const bytes = fromCache ? cached : await client.appIconBytes(app);
           if (bytes === undefined) continue;
-          if (!this.isCurrentCatalogIcon(app, query)) return undefined;
+          if (!this.isCurrentCatalogIcon(app, query, collection)) return undefined;
           const source = image.createImageSource(bytes);
           try {
             const pixels = await source.createPixelMap({ desiredSize: { width: 192, height: 192 } });
-            if (!this.isCurrentCatalogIcon(app, query) ||
+            if (!this.isCurrentCatalogIcon(app, query, collection) ||
               this.appIcons.some((icon: AppIcon) => icon.id === app.id && icon.rev === app.iconRev)) {
               await pixels.release();
               return undefined;
@@ -1650,7 +2293,7 @@ struct Index {
             icon.id = app.id;
             icon.rev = app.iconRev;
             icon.pixels = pixels;
-            this.appIcons = this.appIcons.filter((old: AppIcon) => old.id !== app.id).concat([icon]);
+            this.replaceCatalogIcon(icon, false);
             if (!fromCache && CatalogCache.iconWithinLimit(bytes)) {
               const record = new CachedIcon();
               record.id = String(app.id);
@@ -1683,7 +2326,8 @@ struct Index {
     const sort = this.discoverSort;
     const direction = this.discoverDirection;
     await ReleaseChannelRegistry.restore(context);
-    const cached = await CatalogCache.load(context, sort, direction);
+    const cached = (await CatalogCache.load(context, sort, direction)).filter((app: CatalogApp) =>
+      !app.overseas || StoreClient.currentScope() === 'overseas');
     if (cached.length === 0) return;
     // 期间已经拿到新数据就不要用旧数据覆盖
     if (this.apps.length > 0 || this.activeQuery.length > 0 || this.activeCategory.length > 0 ||
@@ -1692,26 +2336,146 @@ struct Index {
     this.catalogTotal = Math.max(this.catalogTotal, cached.length);
     this.refreshCatalogInstallState();
     this.catalogLoading = false;
-    const icons = await CatalogCache.loadIcons(context, cached);
-    for (const id of icons.keys()) {
-      await ForegroundIdle.wait();
-      if (this.activeQuery.length > 0 || this.activeCategory.length > 0) return;
-      const expected = cached.find((app: CatalogApp) => app.id === id)?.iconRev;
-      if (!expected || !this.apps.some((app: CatalogApp) => app.id === id && app.iconRev === expected) ||
-        this.iconFor(id) !== undefined) continue;
-      const bytes = icons.get(id);
-      if (bytes === undefined) continue;
-      const source = image.createImageSource(bytes);
-      try {
-        const pixels = await source.createPixelMap({ desiredSize: { width: 192, height: 192 } });
-        if (this.activeQuery.length > 0 || this.activeCategory.length > 0 || !this.apps.some((app: CatalogApp) =>
-          app.id === id && app.iconRev === expected) || this.iconFor(id) !== undefined) {
-          await pixels.release(); continue;
-        }
-        const icon = new AppIcon(); icon.id = id; icon.rev = expected; icon.pixels = pixels;
-        this.appIcons = this.appIcons.concat([icon]);
-      } catch (_) {} finally { await source.release(); }
+    this.loadCatalogIcons(new StoreClient(context), cached, this.activeQuery);
+  }
+
+  private observeCatalogIcon(app: CatalogApp, visible: boolean, management: boolean = false): void {
+    this.iconResidency.visible('catalog:' + app.id, visible);
+    if (visible && !this.iconDisposed) {
+      const client = new StoreClient(getContext(this) as common.UIAbilityContext);
+      if (management) this.loadManagementIcons();
+      else this.loadCatalogIcons(client, [app], this.activeQuery, this.collectionApps().some((row: CatalogApp) => row.id === app.id));
     }
+    this.scheduleIconTrim();
+  }
+
+  private observeJobIcon(job: InstallJob, visible: boolean): void {
+    this.iconResidency.visible('job:' + job.id, visible);
+    const app = this.catalogForJob(job);
+    if (app) this.observeCatalogIcon(app, visible, true);
+    if (visible && !this.iconDisposed) {
+      if (job.id.startsWith('device-')) this.syncDeviceIcons();
+      else this.loadLocalIcon(job);
+    }
+    this.scheduleIconTrim();
+  }
+
+  private replaceCatalogIcon(icon: AppIcon, management: boolean): void {
+    const old = this.appIcons.concat(this.managementIcons);
+    if (management) this.managementIcons = this.managementIcons.filter((row: AppIcon) => row.id !== icon.id).concat([icon]);
+    else this.appIcons = this.appIcons.filter((row: AppIcon) => row.id !== icon.id).concat([icon]);
+    this.releaseUnusedIcons(old, []); this.scheduleIconTrim();
+  }
+
+  private scheduleIconTrim(): void {
+    if (this.iconTrimTimer !== -1 || this.iconDisposed) return;
+    this.iconTrimTimer = setTimeout(() => {
+      this.iconTrimTimer = -1;
+      const old = this.appIcons.concat(this.managementIcons), local = this.localIcons;
+      const keys = old.map((row: AppIcon) => 'catalog:' + row.id).concat(local.map((row: LocalIcon) => 'job:' + row.jobId));
+      const keep = this.iconResidency.keep(keys);
+      const catalog = this.appIcons.filter((row: AppIcon) => keep.has('catalog:' + row.id));
+      const management = this.managementIcons.filter((row: AppIcon) => keep.has('catalog:' + row.id));
+      const jobs = local.filter((row: LocalIcon) => keep.has('job:' + row.jobId));
+      if (catalog.length !== this.appIcons.length) this.appIcons = catalog;
+      if (management.length !== this.managementIcons.length) this.managementIcons = management;
+      if (jobs.length !== local.length) this.localIcons = jobs;
+      this.releaseUnusedIcons(old, local);
+    }, 160);
+  }
+
+  private releaseUnusedIcons(catalog: AppIcon[], local: LocalIcon[]): void {
+    const live = new Set<image.PixelMap>();
+    for (const row of this.appIcons.concat(this.managementIcons)) if (row.pixels) live.add(row.pixels);
+    for (const row of this.localIcons) if (row.pixels) live.add(row.pixels);
+    // The information page borrows the selected image until its own icon is loaded.
+    if (InstalledInspection.selectedIcon) live.add(InstalledInspection.selectedIcon);
+    const retired = new Set<image.PixelMap>();
+    for (const row of catalog) if (row.pixels && !live.has(row.pixels)) retired.add(row.pixels);
+    for (const row of local) if (row.pixels && !live.has(row.pixels)) retired.add(row.pixels);
+    // Let the UI commit removal before destroying a native image still in the previous frame.
+    if (retired.size > 0) afterPaint(this.getUIContext(), () => {
+      retired.forEach((pixels: image.PixelMap) => { pixels.release().catch(() => {}); });
+    });
+  }
+
+  @Builder
+  private followingIconPixels(item: FollowedApp) {
+      if(this.managedIconFor(item.app)){
+        Image(this.managedIconFor(item.app)).width(46).height(46).borderRadius(13).onClick(()=>this.openDetail(item.app.id))
+      }else{
+        Text(AppDisplayName.forCatalog(item.app).substring(0,1)).fontSize(20).fontColor(this.colors().accent)
+          .width(46).height(46).textAlign(TextAlign.Center).backgroundColor(this.colors().accentSoft).borderRadius(13)
+          .onClick(()=>this.openDetail(item.app.id))
+      }
+
+  }
+
+  @Builder
+  private collectionIconPixels(app: CatalogApp, size: number, cornerRadius: number, starfield: boolean) {
+        if (this.iconFor(app.id)) {
+          Image(this.iconFor(app.id)).width(size).height(size)
+            .borderRadius(cornerRadius > 0 ? cornerRadius : size / 3)
+        } else {
+          Text(AppDisplayName.forCatalog(app).length > 0 ? AppDisplayName.forCatalog(app).substring(0, 1) : I18n.t('应'))
+            .fontSize(size >= 60 ? 23 : size / 2.2).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
+            .width(size).height(size).textAlign(TextAlign.Center)
+            .backgroundColor(starfield ? this.colors().surface : this.colors().accentSoft)
+            .borderRadius(cornerRadius > 0 ? cornerRadius : size / 3)
+        }
+
+  }
+
+  @Builder
+  private sidebarIconPixels(app: CatalogApp) {
+              if (this.iconFor(app.id)) {
+                Image(this.iconFor(app.id)).width(48).height(48).borderRadius(24)
+                  .objectFit(ImageFit.Cover)
+                  .shadow({ radius: 9, color: this.darkMode ? '#66000000' : '#33445A83', offsetX: 0, offsetY: 4 })
+              } else {
+                Text(AppDisplayName.forCatalog(app).substring(0, 1) || I18n.t('应'))
+                  .fontSize(21).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
+                  .width(48).height(48).textAlign(TextAlign.Center)
+                  .backgroundColor(this.colors().accentSoft).borderRadius(24)
+                  .shadow({ radius: 9, color: this.darkMode ? '#66000000' : '#33445A83', offsetX: 0, offsetY: 4 })
+              }
+
+  }
+
+  @Builder
+  private installedIconPixels(job: InstallJob) {
+            if (this.jobIcon(job)) {
+              Image(this.jobIcon(job)).width(46).height(46).borderRadius(13)
+            } else {
+              Text(this.jobTitle(job).length > 0 ? this.jobTitle(job).substring(0, 1) : I18n.t('应'))
+                .fontSize(19).fontColor(this.colors().accent).textAlign(TextAlign.Center)
+                .width(46).height(46).backgroundColor(this.colors().accentSoft).borderRadius(13)
+            }
+
+  }
+
+  @Builder
+  private queueIconPixels(job: InstallJob) {
+              QueueTaskCard({ jobId: job.id, fallback: job, active: this.currentTab === Index.TAB_MANAGE,
+                title: this.jobTitle(job), version: this.managementVersion(job), icon: this.jobIcon(job),
+                hasIcon: this.jobIcon(job) !== undefined, iconRevision: this.catalogForJob(job)?.iconRev ?? '',
+                resolveTitle: (live: InstallJob): string => this.jobTitle(live),
+                resolveVersion: (live: InstallJob): string => this.managementVersion(live),
+                resolveIcon: (live: InstallJob): image.PixelMap | undefined => this.jobIcon(live),
+                onGroupAction:(live:InstallJob)=>{this.showQueueActions(live,'',true);} })
+
+  }
+
+  @Builder
+  private publishedIconPixels(app: CatalogApp) {
+                  if (this.managedIconFor(app)) {
+                    Image(this.managedIconFor(app)).width(42).height(42).borderRadius(11)
+                  } else {
+                    Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : I18n.t('应'))
+                      .fontSize(18).fontColor(this.colors().accent).textAlign(TextAlign.Center)
+                      .width(42).height(42).backgroundColor(this.colors().accentSoft).borderRadius(11)
+                  }
+
   }
 
   private iconFor(id: number): image.PixelMap | undefined {
@@ -1747,7 +2511,7 @@ struct Index {
   private isCurrentManagementIcon(app: CatalogApp): boolean {
     this.managementIconApps();
     const current = this.managementIconById.get(app.id);
-    return current !== undefined && current.iconRev === app.iconRev;
+    return !this.iconDisposed && this.iconResidency.wanted('catalog:' + app.id) && current !== undefined && current.iconRev === app.iconRev;
   }
 
   private async loadManagementIcon(client: StoreClient, app: CatalogApp): Promise<void> {
@@ -1775,7 +2539,7 @@ struct Index {
           await ForegroundIdle.wait();
           if (!this.isCurrentManagementIcon(app)) { await pixels.release(); return; }
           const icon = new AppIcon(); icon.id = app.id; icon.rev = app.iconRev; icon.pixels = pixels;
-          this.managementIcons = this.managementIcons.filter((old: AppIcon) => old.id !== app.id).concat([icon]);
+          this.replaceCatalogIcon(icon, true);
           if (attempt > 0 && CatalogCache.iconWithinLimit(bytes)) {
             const record = new CachedIcon(); record.id = String(app.id); record.rev = app.iconRev;
             record.data = new util.Base64Helper().encodeToStringSync(new Uint8Array(bytes));
@@ -1801,7 +2565,7 @@ struct Index {
   private async runManagementIconBatches(): Promise<void> {
     do {
       this.managementIconPending = false;
-      const apps = this.managementIconApps();
+      const apps = this.managementIconApps().filter((app: CatalogApp) => this.iconResidency.wanted('catalog:' + app.id));
       const client = new StoreClient(getContext(this) as common.UIAbilityContext);
       let cursor = 0;
       const worker = async (): Promise<void> => {
@@ -1840,7 +2604,9 @@ struct Index {
    * `resources/base/media/<app.icon>`。读不到就保持文字占位，不算错误。
    */
   private async loadLocalIcon(job: InstallJob): Promise<void> {
-    if (this.localIcons.some((entry: LocalIcon) => entry.jobId === job.id)) return;
+    if (this.iconDisposed || !this.iconResidency.wanted('job:' + job.id) || this.localIconFlights.has(job.id) ||
+      this.localIcons.some((entry: LocalIcon) => entry.jobId === job.id)) return;
+    this.localIconFlights.add(job.id);
     try {
       const context = getContext(this) as common.UIAbilityContext;
       if (job.cachePath.length > 0 && fileIo.accessSync(job.cachePath)) {
@@ -1860,13 +2626,14 @@ struct Index {
         const icon = new LocalIcon();
         icon.jobId = job.id;
         icon.pixels = pixels;
-        this.localIcons = this.localIcons.concat([icon]);
+        if (this.iconDisposed || !this.iconResidency.wanted('job:' + job.id)) { await pixels.release(); return; }
+        this.localIcons = this.localIcons.concat([icon]); this.scheduleIconTrim();
       } finally {
         await source.release();
       }
     } catch (_) {
       // 图标读不出来不影响安装结果，保持占位即可
-    }
+    } finally { this.localIconFlights.delete(job.id); }
   }
 
   private async loadLocalIcons(jobs: InstallJob[]): Promise<void> {
@@ -1954,9 +2721,10 @@ struct Index {
   }
 
   private jobTitle(job: InstallJob): string {
+    const app = this.catalogForJob(job);
+    if (app?.customDisplayName) return app.customDisplayName;
     const label = AppDisplayName.forBundle(job.bundleName, '');
     if (label.length > 0) return label;
-    const app = this.catalogForJob(job);
     if (app && app.displayName.length > 0) {
       const asset = this.installedAssets(app).find((item: HapAsset) => item.bundleName === job.bundleName);
       return app.displayName + (/^HiCar[-_.]/i.test(asset?.name ?? job.assetName) ? ' · HiCar' : '');
@@ -2092,6 +2860,10 @@ struct Index {
       this.submitCategoryIndex = index >= 0 ? index : 0;
       this.submitCategory = categories.length > 0 ? categories[this.submitCategoryIndex] : '';
       this.classifySubmitRepo(this.submitDraft);
+      const existing = this.myApps.find((app: CatalogApp) => app.id === this.submitDraft.existingAppId);
+      this.submitPresentation = existing ?
+        ListingPresentationDraft.create(existing.displayName, existing.description, existing.screenshots) :
+        ListingPresentationDraft.create(this.submitDraft.displayName, this.submitDraft.description);
       this.submitMessage = this.submitDraft.choices.length + I18n.t(' 个安装包可选择，请确认上架内容');
     } catch (error) {
       if (generation !== this.submitGeneration || !this.showSubmit) return;
@@ -2104,6 +2876,7 @@ struct Index {
   }
 
   private async confirmSubmit(): Promise<void> {
+    if (this.submitPresentation.processing || !this.submitPresentation.name.trim()) return;
     if (this.submitExisting === Index.SUBMIT_STATE_OTHER) {
       this.submitMessage = I18n.t('该仓库已由其他账号上架，无法重复上架');
       return;
@@ -2113,7 +2886,7 @@ struct Index {
       I18n.t('正在更新已上架的应用…') : I18n.t('正在上架…');
     try {
       const app = await new StoreClient(getContext(this) as common.UIAbilityContext)
-        .confirmSubmit(this.submitDraft, this.submitAssets, this.submitCategory, this.account);
+        .confirmSubmit(this.submitDraft, this.submitAssets, this.submitCategory, this.account, this.submitPresentation.edits());
       const wasUpdate = this.submitExisting === Index.SUBMIT_STATE_MINE;
       this.animateOverlay(() => { this.showSubmit = false; });
       this.submitDraft = new SubmitDraft();
@@ -2131,119 +2904,13 @@ struct Index {
     }
   }
 
-  private removeMyApp(app: CatalogApp): void {
-    AlertDialog.show({
-      title: I18n.t('下架应用'),
-      message: I18n.t('确定下架「') + app.displayName + I18n.t('」？已安装的应用不会被删除。'),
-      primaryButton: { value: I18n.t('取消'), action: () => {} },
-      secondaryButton: { value: I18n.t('下架'), action: async () => {
-        this.removingId = app.id;
-        try {
-          await new StoreClient(getContext(this) as common.UIAbilityContext)
-            .removeMyApp(app.id, this.account);
-          this.animateOverlay(() => { this.showAppConfig = false; });
-          await this.loadMyApps();
-          await this.loadApps();
-        } catch (error) {
-          this.myAppsMessage = errorText(error);
-          if (this.showAppConfig) this.configMessage = this.myAppsMessage;
-        } finally {
-          this.removingId = 0;
-        }
-      } }
-    });
+  private openAppConfig(app: CatalogApp): void {
+    StorePageMotion.pushUrl({ url: 'pages/PublishedAppConfig', params: { id: app.id } })
+      .catch((error: Error) => { this.myAppsMessage = errorText(error); });
   }
 
-  private async openAppConfig(app: CatalogApp): Promise<void> {
-    this.configApp = app;
-    this.configCategory = app.category;
-    this.configSourceGeneration++;
-    this.configSourceUrl = repositoryUrl(app.secondaryRepo);
-    this.configSourceExpanded = app.secondaryRepo.length > 0;
-    this.configSourceDraft = new SubmitDraft();
-    this.configSourceRemove = false;
-    this.configSourceMessage = '';
-    this.configSourceChecking = false;
-    this.configMessage = '';
-    this.configCategories = [];
-    this.animateOverlay(() => { this.showAppConfig = true; });
-    this.configBusy = true;
-    try {
-      this.configCategories = await new StoreClient(getContext(this) as common.UIAbilityContext).categories();
-    } catch (error) { this.configMessage = errorText(error); }
-    finally { this.configBusy = false; }
-  }
-
-  private async saveAppConfig(): Promise<void> {
-    if (this.configBusy || !this.configCategories.includes(this.configCategory) ||
-      (this.configSourceChanged() && this.configSourceDraft.token.length === 0 && !this.configSourceRemove)) return;
-    this.configBusy = true;
-    this.configMessage = '';
-    try {
-      const saved = await new StoreClient(getContext(this) as common.UIAbilityContext)
-        .configureMyApp(this.configApp.id, this.configCategory, this.account,
-          this.configSourceDraft.token, this.configSourceRemove);
-      if (saved.category !== this.configCategory) {
-        throw new Error(I18n.t('服务器未保存所选分类，请重试'));
-      }
-      if ((this.configSourceDraft.token.length > 0 && saved.secondaryRepo.toLowerCase() !==
-          this.configSourceDraft.repo.toLowerCase()) || (this.configSourceRemove && saved.secondaryRepo.length > 0)) {
-        throw new Error(I18n.t('服务器未保存子仓配置，请先更新服务端'));
-      }
-      await ReleaseChannelRegistry.refreshTargets(getContext(this) as common.UIAbilityContext, [saved], true);
-      // Keep both already-open lists in sync immediately. The subsequent fetch
-      // also catches changes made from another device.
-      this.myApps = this.myApps.map((app: CatalogApp) => app.id === saved.id ? saved : app);
-      this.apps = this.apps.map((app: CatalogApp) => app.id === saved.id ? saved : app);
-      this.animateOverlay(() => { this.showAppConfig = false; });
-      await this.loadMyApps();
-      await this.loadApps();
-    } catch (error) { this.configMessage = errorText(error); }
-    finally { this.configBusy = false; }
-  }
-
-  private configSourceChanged(): boolean {
-    const original = repositoryUrl(this.configApp.secondaryRepo).toLowerCase();
-    return this.configSourceUrl.trim().replace(/\/+$/, '').toLowerCase() !== original;
-  }
-
-  private async checkAppSource(): Promise<void> {
-    if (this.configBusy || this.configSourceUrl.trim().length === 0) return;
-    const generation = ++this.configSourceGeneration;
-    this.configBusy = true;
-    this.configSourceChecking = true;
-    this.configSourceDraft = new SubmitDraft();
-    this.configSourceMessage = I18n.t('正在检查子仓安装包…');
-    try {
-      const client = new StoreClient(getContext(this) as common.UIAbilityContext);
-      let draft = await client.prepareAppSource(this.configApp.id, this.configSourceUrl.trim(), this.account);
-      const deadline = Date.now() + 300000;
-      while (draft.inspectionStatus !== 'ready') {
-        if (generation !== this.configSourceGeneration || !this.showAppConfig) return;
-        this.configSourceMessage = I18n.t('正在后台解析安装包并核验包名…');
-        await new Promise<void>((resolve) => setTimeout(resolve, 2000));
-        if (generation !== this.configSourceGeneration || !this.showAppConfig) return;
-        if (Date.now() > deadline) throw new Error(I18n.t('检查仍在后台进行，请稍后再点检查'));
-        draft = await client.submitStatus(draft, this.account);
-      }
-      if (generation !== this.configSourceGeneration || !this.showAppConfig) return;
-      const bundles = this.configApp.latestAssets.map((asset: HapAsset) => asset.bundleName);
-      const matches = draft.choices.filter((choice: SubmitChoice) =>
-        choice.bundleName.length > 0 && bundles.includes(choice.bundleName));
-      if (matches.length === 0) throw new Error(I18n.t('子仓安装包与主仓包名不一致，无法关联'));
-      this.configSourceDraft = draft;
-      this.configSourceRemove = false;
-      this.configSourceMessage = I18n.t('包名核验通过：') + matches.map((choice: SubmitChoice) =>
-        choice.bundleName).filter((bundle: string, index: number, all: string[]) =>
-        all.indexOf(bundle) === index).join(I18n.t('、')) + I18n.t('。保存后关联。');
-    } catch (error) {
-      if (generation === this.configSourceGeneration) this.configSourceMessage = errorText(error);
-    } finally {
-      if (generation === this.configSourceGeneration) {
-        this.configBusy = false;
-        this.configSourceChecking = false;
-      }
-    }
+  private releasePresentationDrafts(): void {
+    if (!this.showSubmit) this.submitPresentation = new ListingPresentationDraft();
   }
 
   private async cancelInstall(job: InstallJob): Promise<void> {
@@ -2569,15 +3236,19 @@ struct Index {
       const resource = InstalledAppRegistry.iconResource(job.bundleName);
       const key = job.bundleName + ':' + job.versionCode + ':' + (resource?.id ?? 0) + ':' +
         (resource?.moduleName ?? '');
-      if (job.mainAbility.length === 0 || this.deviceIconRequested.has(key)) continue;
+      if (this.iconDisposed || !this.iconResidency.wanted('job:' + job.id) || job.mainAbility.length === 0 ||
+        this.localIcons.some((icon: LocalIcon) => icon.jobId === job.id) || this.deviceIconRequested.has(key)) continue;
       this.deviceIconRequested.add(key);
       LocalBundles.installedIcon(getContext(this) as common.UIAbilityContext, job.bundleName,
         job.mainAbility).then(async (pixels: image.PixelMap | undefined) => {
         if (pixels === undefined) return;
         await ForegroundIdle.wait();
+        if (this.iconDisposed || !this.iconResidency.wanted('job:' + job.id)) { await pixels.release(); return; }
         const icon = new LocalIcon(); icon.jobId = job.id; icon.pixels = pixels;
+        const old = this.localIcons;
         this.localIcons = this.localIcons.filter((row: LocalIcon) => row.jobId !== job.id).concat([icon]);
-      });
+        this.releaseUnusedIcons([], old); this.scheduleIconTrim();
+      }).finally(() => { this.deviceIconRequested.delete(key); });
     }
   }
 
@@ -2670,49 +3341,80 @@ struct Index {
   }
 
   @Builder
-  private catalogMetadata(app: CatalogApp, featured: boolean = false) {
+  private catalogMetadata(app: CatalogApp, featured: boolean = false, starsOnly: boolean = false) {
     Row({ space: 6 }) {
       Text(I18n.category(app.category)).fontSize(11).fontWeight(FontWeight.Medium).maxLines(1).flexShrink(0)
         .fontColor(featured ? '#E8EEFF' : this.colors().textSecondary)
         .padding({ left: 5, right: 5, top: 3, bottom: 3 })
         .backgroundColor(featured ? '#1AFFFFFF' : this.colors().fill).borderRadius(6)
-      RepositoryStats({ stars: app.stars, downloads: app.githubDownloads, compact: true,
+      // 榜单行宽度较窄，只保留排行依据的星数，下载数交给下载榜。
+      RepositoryStats({ stars: app.stars, downloads: starsOnly ? -1 : app.githubDownloads, compact: true,
         color: featured ? (this.featuredTier(app.stars) >= 2 ? '#EAD9B4' : '#E8EEFF') : this.colors().textSecondary,
         tagBackground: featured ? '#14FFFFFF' : this.colors().fill }).layoutWeight(1)
     }.width('100%').alignItems(VerticalAlign.Center)
   }
 
+  /** 合集卡片/榜单行比主列表更窄，动作按钮需要一个更矮、可铺满的尺寸。 */
+  private actionWidth(wide: boolean, fill: boolean): Length {
+    if (fill) return '100%';
+    return wide ? StoreLayout.cardWideActionWidth : StoreLayout.cardActionWidth;
+  }
+
+  private actionHeight(compact: boolean): number {
+    return compact ? 30 : 44;
+  }
+
+  private actionFont(compact: boolean, wide: boolean): number {
+    if (compact) return wide ? 11 : 12;
+    return wide ? 12 : 13;
+  }
+
+  private actionPadding(compact: boolean): number {
+    return compact ? 0 : 8;
+  }
+
   @Builder
-  private catalogCardAction(app: CatalogApp, featured: boolean = false) {
+  private catalogCardAction(app: CatalogApp, featured: boolean = false, compact: boolean = false, fill: boolean = false) {
     Column() {
       if (this.taskPending(app.id, (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName ?? '')) {
         Column() {
           this.taskIndicator(app.id, (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName ?? '', '', featured)
-        }.width(StoreLayout.cardActionWidth).padding({ top: 2, bottom: 2 })
+        }.width(this.actionWidth(false, fill)).padding({ top: 2, bottom: 2 })
           .onClick(() => { this.currentTab = Index.TAB_MANAGE; })
       } else if (this.enqueuingAppIds.includes(app.id)) {
-        Column() { this.taskIndicator(app.id, (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName ?? '', '', featured) }.width(StoreLayout.cardActionWidth)
+        Column() { this.taskIndicator(app.id, (app.latestAsset ?? this.installedAssets(app)[0])?.bundleName ?? '', '', featured) }
+          .width(this.actionWidth(false, fill))
       } else if (app.channelUnavailable && !UpdatePolicy.disabled(this.installedBundleOf(app.id))) {
-        Button(I18n.t('暂无预览版'), { type: ButtonType.Normal }).width(StoreLayout.cardWideActionWidth).height(44).padding({ left: 8, right: 8 }).fontSize(12)
+        Button(I18n.t('暂无预览版'), { type: ButtonType.Normal })
+          .width(this.actionWidth(true, fill)).height(this.actionHeight(compact))
+          .padding({ left: this.actionPadding(compact), right: this.actionPadding(compact) })
+          .fontSize(this.actionFont(compact, true))
           .fontColor(featured ? '#DAE6FF' : this.colors().textTertiary)
           .backgroundColor(featured ? '#22FFFFFF' : this.colors().fill).borderRadius(StoreLayout.cardActionRadius).enabled(false)
       } else if (this.installTargetCount<2 && this.installTargetName.length===0 && this.installedBundleOf(app.id).length > 0) {
         if (this.updateForApp(app.id) !== undefined) {
           Button(I18n.t('更新'), { type: ButtonType.Normal })
-            .width(StoreLayout.cardActionWidth).height(44).padding({ left: 8, right: 8 }).fontSize(13)
+            .width(this.actionWidth(false, fill)).height(this.actionHeight(compact))
+            .padding({ left: this.actionPadding(compact), right: this.actionPadding(compact) })
+            .fontSize(this.actionFont(compact, false))
             .fontColor(featured ? '#25448A' : this.colors().onAccent)
             .backgroundColor(featured ? '#F0FFFFFF' : this.colors().accent).borderRadius(StoreLayout.cardActionRadius)
             .onClick(() => this.installFromCatalog(app))
         } else {
           Button(I18n.t('打开'), { type: ButtonType.Normal })
-            .width(StoreLayout.cardActionWidth).height(44).padding({ left: 8, right: 8 }).fontSize(13)
+            .width(this.actionWidth(false, fill)).height(this.actionHeight(compact))
+            .padding({ left: this.actionPadding(compact), right: this.actionPadding(compact) })
+            .fontSize(this.actionFont(compact, false))
             .fontColor(featured ? '#25448A' : this.colors().accent)
             .backgroundColor(featured ? '#F0FFFFFF' : this.colors().accentSoft)
             .borderRadius(StoreLayout.cardActionRadius)
             .onClick(() => this.openCatalogApp(app))
         }
       } else if (!this.catalogInstallable(app.id)) {
-        Button(I18n.t('查看'), { type: ButtonType.Normal }).width(StoreLayout.cardActionWidth).height(44).padding({ left: 8, right: 8 }).fontSize(13)
+        Button(I18n.t('查看'), { type: ButtonType.Normal })
+          .width(this.actionWidth(false, fill)).height(this.actionHeight(compact))
+          .padding({ left: this.actionPadding(compact), right: this.actionPadding(compact) })
+          .fontSize(this.actionFont(compact, false))
           .fontColor(featured ? '#25448A' : this.colors().accent)
           .backgroundColor(featured ? '#F0FFFFFF' : this.colors().accentSoft).borderRadius(StoreLayout.cardActionRadius)
           .onClick(() => this.openDetail(app.id))
@@ -2720,19 +3422,27 @@ struct Index {
         // 权限不足且无线调试未连接时，状态无法核实；不能让用户永远卡在检查按钮。
         // 允许先下载并准备任务，设备连接在真正需要授权/安装时再处理。
         Button(UpdatePolicy.disabled(this.catalogBundleName(app.id)) ? I18n.t('已停更') : I18n.t('安装/更新'),
-          { type: ButtonType.Normal }).width(StoreLayout.cardWideActionWidth).height(44).padding({ left: 8, right: 8 }).fontSize(12)
+          { type: ButtonType.Normal })
+          .width(this.actionWidth(true, fill)).height(this.actionHeight(compact))
+          .padding({ left: this.actionPadding(compact), right: this.actionPadding(compact) })
+          .fontSize(this.actionFont(compact, true))
           .fontColor(featured ? '#25448A' : this.colors().onAccent)
           .backgroundColor(featured ? '#F0FFFFFF' : this.colors().accent).borderRadius(StoreLayout.cardActionRadius)
           .enabled(!UpdatePolicy.disabled(this.catalogBundleName(app.id)))
           .onClick(() => this.installFromCatalog(app))
       } else {
-        Button(this.installTargetName&&this.taskForApp(app.id)?.job.stage===InstallStage.INSTALLED?I18n.t('已安装'):I18n.t('安装'), { type: ButtonType.Normal })
-          .width(StoreLayout.cardActionWidth).height(44).padding({ left: 8, right: 8 }).fontSize(13)
+        Button(this.installTargetName&&this.taskForApp(app.id)?.job.stage===InstallStage.INSTALLED?I18n.t('已安装'):I18n.t('安装'),
+          { type: ButtonType.Normal })
+          .width(this.actionWidth(false, fill)).height(this.actionHeight(compact))
+          .padding({ left: this.actionPadding(compact), right: this.actionPadding(compact) })
+          .fontSize(this.actionFont(compact, false))
           .fontColor(featured ? '#25448A' : this.colors().onAccent)
           .backgroundColor(featured ? '#F0FFFFFF' : this.colors().accent).borderRadius(StoreLayout.cardActionRadius)
           .onClick(() => this.installFromCatalog(app))
       }
-    }
+    }.focusable(false).accessibilityLevel('no')
+      // Reserve this area for the action even when the button is disabled or shows progress.
+      .onClick(() => {})
   }
 
   /**
@@ -2780,9 +3490,17 @@ struct Index {
     const rows = this.updateCatalogReady ? this.updateCatalog :
       (this.activeQuery.length === 0 && this.activeCategory.length === 0 ? this.apps : []);
     if (!this.updateCatalogReady && rows.length === 0) return;
-    const categories = Array.from(new Set(rows.map((app: CatalogApp) => app.category.trim())
-      .filter((category: string) => category.length > 0))).sort((a: string, b: string) => a.localeCompare(b));
+    const categories = DiscoverSortPreferences.orderedCategories(Array.from(new Set(rows.filter(
+      (app: CatalogApp) => !app.personalOnly).map(
+      (app: CatalogApp) => app.category.trim()).filter((category: string) => category.length > 0)))
+      .sort((a: string, b: string) => a.localeCompare(b)));
     if (JSON.stringify(categories) !== JSON.stringify(this.discoveryCategories)) this.discoveryCategories = categories;
+  }
+
+  private async saveDiscoveryCategoryOrder(order: string[]): Promise<void> {
+    await DiscoverSortPreferences.saveCategoryOrder(getContext(this) as common.UIAbilityContext, order);
+    const categories = this.discoveryCategories.slice().sort((a: string, b: string) => a.localeCompare(b));
+    this.discoveryCategories = DiscoverSortPreferences.orderedCategories(categories);
   }
 
   private selectDiscoveryCategory(category: string): void {
@@ -2809,10 +3527,6 @@ struct Index {
     }, delayMs);
   }
 
-  private toggleDiscoveryCategories(): void {
-    this.categoriesExpanded = !this.categoriesExpanded;
-  }
-
   private selectDiscoverySort(key: string, reverse: boolean = false): void {
     const sort = DiscoverSort.key(key);
     const direction: SortDirection = reverse ? (this.discoverDirection === 'desc' ? 'asc' : 'desc') :
@@ -2824,11 +3538,6 @@ struct Index {
     this.catalogSortResetTop = true;
     // Coalesce rapid arrow/menu taps. Retain cards and decoded icons until the latest result is ready.
     this.resetCatalogFilter(180, true);
-  }
-
-  private openDiscoverySearch(): void {
-    this.categoriesExpanded = false;
-    this.selectDiscoveryCategory('');
   }
 
   /** 上架入口统一在这里：发现页原来那个 ＋ 已改成搜索。 */
@@ -2911,7 +3620,8 @@ struct Index {
       const job = await store.enqueue(app.id, asset.name, asset.url, asset.sha256,
         asset.mirrorUrls, asset.versionName, asset.bundleName, asset.versionCode,
         asset.releaseTag, asset.releaseName, Boolean(pinnedTarget) || (installedVersion > 0 && installedVersion === asset.versionCode),
-        InstallDeviceCompatibility.confirmedFingerprint(asset, pinnedTarget), pinnedTarget);
+        InstallDeviceCompatibility.confirmedFingerprint(asset, pinnedTarget), pinnedTarget,
+        (currentApp ?? app).customDisplayName);
       if (job.stage === InstallStage.INSTALLED) {
         // Explicit reinstall after an external uninstall must re-enter the FIFO.
         job.stage = InstallStage.QUEUED; job.stageHistory = []; job.lastError = '';
@@ -3037,7 +3747,7 @@ struct Index {
     if (!this.needsInstallScan || !this.updateCatalogReady || !this.accountChecked ||
       !this.signedIn || this.catalogProbeBusy || this.wirelessDebugRestoring || this.initialScanDismissed ||
       InstalledAppRegistry.hasCatalogSnapshot() || this.showReconnect || this.showSubmit ||
-      this.showAppConfig || this.activeJobId.length > 0 || this.pendingJobs.length > 0) return;
+      this.activeJobId.length > 0 || this.pendingJobs.length > 0) return;
     this.openInstallScan();
   }
 
@@ -3291,7 +4001,11 @@ struct Index {
   }
 
   private catalogApp(appId: number): CatalogApp | undefined {
-    return this.catalogLookup().app(appId) ?? FollowingRegistry.entries().find((item:FollowedApp)=>item.app.id===appId)?.app;
+    const known = this.catalogLookup().app(appId);
+    if (known !== undefined) return known;
+    const collection = this.collectionApps().find((app: CatalogApp) => app.id === appId);
+    return collection === undefined ? FollowingRegistry.entries().find((item: FollowedApp) => item.app.id === appId)?.app :
+      ReleaseChannelRegistry.apply(collection);
   }
 
   private installedAssets(app: CatalogApp): HapAsset[] {
@@ -3391,8 +4105,13 @@ struct Index {
       const collected: CatalogApp[] = [];
       const seen = new Set<number>();
       let pageNumber = 1;
+      let scope = '';
       while (true) {
         const page = await client.listApps(pageNumber, 100, 'new', '', '', forceRefresh);
+        if (page.networkScope) {
+          if (scope && scope !== page.networkScope) throw new Error(I18n.t('网络已切换，请重新刷新'));
+          scope = page.networkScope;
+        }
         const before = collected.length;
         for (const app of page.items) {
           if (seen.has(app.id)) continue;
@@ -3406,6 +4125,24 @@ struct Index {
         if (collected.length === before) throw new Error(I18n.t('应用目录分页未完成，请重试'));
         pageNumber++;
       }
+      if (this.signedIn && this.account?.jwtToken.length > 0) {
+        const items: UpdatePushWatchItem[] = [];
+        const bundles = new Set<string>();
+        for (const job of this.allInstalledJobs()) {
+          if (!job.bundleName || bundles.has(job.bundleName) || InstalledAppRegistry.isAppGallery(job.bundleName)) continue;
+          const code = this.displayInstalledVersion(job.bundleName);
+          if (code <= 0) continue;
+          const item = new UpdatePushWatchItem();
+          item.app_id = Math.max(0, job.appId); item.bundle_name = job.bundleName; item.version_code = code;
+          items.push(item); bundles.add(job.bundleName);
+        }
+        const personal = await client.personalCatalog(this.account,
+          await UpdatePushSync.clientId(getContext(this) as common.UIAbilityContext), items);
+        for (const app of personal) {
+          if (!seen.has(app.id)) { collected.push(app); seen.add(app.id); }
+        }
+      }
+      if (scope && scope !== StoreClient.currentScope()) return;
       const changed = !this.updateCatalogReady || JSON.stringify(collected) !== JSON.stringify(this.updateCatalog);
       const knownBundles = new Set<string>();
       if (changed) {
@@ -3416,6 +4153,7 @@ struct Index {
         }
         this.updateCatalog = collected;
       }
+      this.updateCatalogScope = scope;
       this.updateCatalogReady = true;
       this.syncDiscoveryCategories();
       this.updateCatalogError = '';
@@ -3650,6 +4388,7 @@ struct Index {
   }
 
   onBackPress(): boolean {
+    if (this.showStartupNotice) { this.startupNoticeDismiss++; return true; }
     if(this.followingInformation!==undefined){this.followingInformation=undefined;return true;}
     if(StorePageMotion.dismissDevicePanel?.())return true;
     if (this.showMultiDevice) { this.closeMultiDevice(); return true; }
@@ -3683,12 +4422,8 @@ struct Index {
       }
       return true;
     }
-    if (this.showAppConfig) {
-      if ((!this.configBusy || this.configSourceChecking) && this.removingId === 0) {
-        this.configSourceGeneration++;
-        this.configBusy = false; this.configSourceChecking = false;
-        this.animateOverlay(() => { this.showAppConfig = false; });
-      }
+    if (this.currentTab === Index.TAB_DISCOVER && this.homeChannel === 'discover' && this.collectionKey.length > 0) {
+      this.closeCollectionDetail();
       return true;
     }
     return false;
@@ -3972,29 +4707,28 @@ struct Index {
   }
 
   private onFollowingChanged():void{
-    this.followingSnapshot=FollowingRegistry.entries();this.followingRevision++;
+    this.followingSnapshot=FollowingRegistry.entries();
+    this.followedAppIds=this.followingSnapshot.map((item:FollowedApp)=>item.app.id);
     this.syncManagementRows();this.syncManagementIcons();
   }
   private async syncFollowing(reportError:boolean=false):Promise<void>{
     try{await FollowingRegistry.sync(getContext(this) as common.UIAbilityContext,reportError);}
     catch(error){if(reportError)promptAction.showToast({message:I18n.t('关注同步失败：')+errorText(error)});}
   }
-  private followActions(app:CatalogApp):ManagementAction[]{
-    const revision=this.followingRevision;
-    const enabled=FollowingRegistry.has(app.id);
-    return [new ManagementAction(enabled?'unfollow':'follow',I18n.t(enabled?'取消关注':'关注应用'),I18n.t(enabled?'取关':'关注'))];
-  }
   private closeFollowSwipe():void{
     // HDS mounts tabs lazily. An unopened tab has no bound ListScroller.
-    try{if(this.currentTab===Index.TAB_MANAGE)this.managementScroller.closeAllSwipeActions();
-      else this.discoverScroller.closeAllSwipeActions();}catch(_){ /* Saving a follow never depends on animation. */ }
+    try{if(this.currentTab===Index.TAB_MANAGE)this.managementScroller.closeAllSwipeActions();}
+    catch(_){ /* Saving a follow never depends on animation. */ }
   }
   private async toggleFollow(app:CatalogApp):Promise<void>{
     this.closeFollowSwipe();
     ForegroundIdle.interaction();
     try{const context=getContext(this) as common.UIAbilityContext;
-      await FollowingRegistry.set(context,app,!FollowingRegistry.has(app.id));
+      await FollowingRegistry.load(context);
+      const follow=!FollowingRegistry.has(app.id);
+      await FollowingRegistry.set(context,app,follow);
       this.syncFollowing(true);
+      promptAction.showToast({message:follow?I18n.t('已关注'):I18n.t('已取消关注')});
     }catch(error){promptAction.showToast({message:errorText(error)});}
   }
   private openFollowingInformation(app:CatalogApp):void{
@@ -4031,13 +4765,7 @@ struct Index {
   }
   @Builder private followingCard(item:FollowedApp){
     Row({space:12}){
-      if(this.managedIconFor(item.app)){
-        Image(this.managedIconFor(item.app)).width(46).height(46).borderRadius(13).onClick(()=>this.openDetail(item.app.id))
-      }else{
-        Text(AppDisplayName.forCatalog(item.app).substring(0,1)).fontSize(20).fontColor(this.colors().accent)
-          .width(46).height(46).textAlign(TextAlign.Center).backgroundColor(this.colors().accentSoft).borderRadius(13)
-          .onClick(()=>this.openDetail(item.app.id))
-      }
+IconViewport({ active: this.currentTab === Index.TAB_MANAGE && this.pageVisible && this.homeVisibility.visible, changed: (visible: boolean) => { this.observeCatalogIcon(item.app, visible, true); }, content: (): void => { this.followingIconPixels(item); } })
       Column({space:5}){
         HomeAppTitle({title:AppDisplayName.forCatalog(item.app),version:this.latestVersionTag(item.app),
           color:this.colors().text,versionColor:this.colors().surface,versionBackground:this.colors().text,
@@ -4049,7 +4777,7 @@ struct Index {
         if(item.publishedAt){Text(FollowedApp.date(item.publishedAt)).fontSize(10).fontColor(this.colors().textTertiary)}
       }.alignItems(HorizontalAlign.Start).layoutWeight(1).onClick(()=>this.openDetail(item.app.id))
       this.catalogCardAction(item.app)
-    }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+    }.width('100%').padding(16).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
   }
 
   private recentInstalledJobs(): InstallJob[] {
@@ -4263,8 +4991,12 @@ struct Index {
       .onSubmit(() => this.applySearch())
   }
 
+  private navigationBackground(): ResourceColor {
+    return this.appBackground.theme === 'default' ? this.colors().bg : Color.Transparent;
+  }
+
   private discoverTitleBarStyle(): TitleBarStyleOptions {
-    return this.scrollTitleBarStyle(this.discoverTitleHeight);
+    return this.scrollTitleBarStyle(DiscoverToolbarMotion.channelHeight, true);
   }
 
   private scrollTitleBarStyle(titleHeight: number, pinned: boolean = false): TitleBarStyleOptions {
@@ -4285,10 +5017,24 @@ struct Index {
   }
 
   @Builder
-  private discoverPage() {
+  private discoverChannels() {
     Stack({ alignContent: Alignment.Top }) {
       HdsNavigation() {
-        if (this.discoverListReady && this.discoverLayout === 'normal') { this.discoverList() }
+        if (this.discoverListReady) {
+          Stack({ alignContent: Alignment.TopStart }) {
+            Column() { this.discoveryHome() }
+              .width('100%').height('100%')
+              .translate({ x: -this.channelProgress * this.viewportWidth })
+              .accessibilityLevel(this.homeChannel === 'discover' ? 'auto' : 'no-hide-descendants')
+            if (this.discoverLayout === 'normal' &&
+              this.catalogChannelMounted) {
+              Column() { this.discoverList() }
+                .width('100%').height('100%')
+                .translate({ x: (1 - this.channelProgress) * this.viewportWidth })
+                .accessibilityLevel(this.homeChannel === 'apps' ? 'auto' : 'no-hide-descendants')
+            }
+          }.width('100%').height('100%').clip(true)
+        }
       }.titleBar({
         style: this.discoverTitleBarStyle(),
         avoidLayoutSafeArea: true,
@@ -4296,53 +5042,90 @@ struct Index {
       }).titleMode(HdsNavigationTitleMode.MINI).mode(NavigationMode.Stack).hideBackButton(true)
         .systemBarStyle({ statusBarContentColor: this.discoverChromeDark() ? '#FFFFFF' : this.colors().text },
           { statusBarContentColor: this.discoverChromeDark() ? '#FFFFFF' : this.colors().text })
-        .bindToScrollable([this.discoverScroller])
+        .bindToScrollable([this.discoverScroller, this.catalogScroller])
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
         .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
         .width('100%').height('100%')
         .onAppear(() => {
           afterPaint(this.getUIContext(), () => {
             this.discoverChromeReady = true;
-            afterPaint(this.getUIContext(), () => { this.discoverListReady = true; });
+            if (this.pageVisible && this.navigationWidthTarget() === 1) this.navigationHolding.start();
+            afterPaint(this.getUIContext(), () => { this.discoverListReady = true; this.warmHomeChannels(); });
           });
         })
-      if (this.discoverLayout === 'sidebar' && this.discoverListReady && this.currentTab === Index.TAB_DISCOVER) {
-        SidebarSkyBackdrop({ appId: this.sidebarSelectedId, stars: this.splitFeaturedStars(),
-          viewportHeight: this.viewportHeight })
-        this.discoverSplitView()
+      if (this.discoverLayout === 'sidebar' && this.discoverListReady && this.currentTab === Index.TAB_DISCOVER &&
+        this.catalogChannelMounted) {
+        Stack({ alignContent: Alignment.TopStart }) {
+          if (this.darkMode && this.appBackground.theme === 'default') {
+            SidebarSkyBackdrop({ appId: this.sidebarSelectedId, stars: this.sidebarFeaturedStars(),
+              viewportHeight: this.viewportHeight })
+          }
+          this.discoverSplitView()
+        }.width('100%').height('100%').backgroundColor(this.navigationBackground())
+          .translate({ x: (1 - this.channelProgress) * this.viewportWidth })
+          .accessibilityLevel(this.homeChannel === 'apps' ? 'auto' : 'no-hide-descendants')
       }
+    }.width('100%').height('100%')
+      // 轮播和横向分区优先浏览自身内容，其余区域横滑切换频道。
+      .gesture(PanGesture({ direction: PanDirection.Horizontal, distance: 12 })
+        .tag('home-channel-swipe')
+        .onActionStart((event: GestureEvent) => this.channelGestureStart(event.offsetX))
+        .onActionUpdate((event: GestureEvent) => this.channelGestureUpdate(event.offsetX))
+        .onActionEnd((event: GestureEvent) => this.channelGestureEnd(event.offsetX, event.velocityX))
+        .onActionCancel(() => this.channelGestureCancel()))
+      .onGestureJudgeBegin((info: GestureInfo, event: BaseGestureEvent) => this.judgeChannelGesture(info, event))
+  }
+
+  @Builder
+  private discoverPage() {
+    Stack({ alignContent: Alignment.Top }) {
+      this.discoverChannels()
       if (this.discoverChromeReady) {
-      if (this.discoverLayout === 'sidebar') {
-        StoreTopFade({ statusInset: this.statusBarInset, fadeOpacity: 1, darkSurface: this.splitOnStarfield() })
+      if ((this.homeChannel === 'apps' || this.channelTransitioning || this.channelDragging) &&
+        (this.discoverLayout === 'sidebar' || this.discoverToolbarRows === 2)) {
+        StoreTopFade({ statusInset: this.statusBarInset, fadeOpacity: this.channelProgress,
+          extraHeight: DiscoverToolbarMotion.channelHeight +
+            (this.discoverToolbarRows === 2 ? DiscoverToolbarMotion.secondRowOffset : 0) })
           .position({ x: 0, y: 0 })
       }
-      if (this.discoverLayout === 'normal') { DiscoverRefreshIndicator({ motion: this.discoverMotion, darkMode: this.darkMode, refreshing: this.catalogRefreshing,
-        statusInset: this.statusBarInset, titleHeight: this.discoverTitleHeight }) }
+      if (this.normalHomeLayout()) { DiscoverRefreshIndicator({ motion: this.discoverMotion, darkMode: this.darkMode, refreshing: this.homeChannel === 'apps' ? this.catalogRefreshing : this.collectionsRefreshing,
+        statusInset: this.statusBarInset,
+        toolbarHeight: this.homeChannel === 'apps' ? DiscoverToolbarMotion.height(this.discoverToolbarRows) : 10 }) }
       DiscoverHeader({ backAction: () => this.materialBack(), motion: this.discoverMotion, homeVisibility: this.homeVisibility, darkMode: this.darkMode, starfield: this.splitOnStarfield(),
         sortKey: this.discoverSort, sortDirection: this.discoverDirection, sortLoading: this.catalogLoading,
-        layoutMode: this.discoverLayout, onLayoutChange: (layout: string) => this.selectDiscoveryLayout(layout),
+        layoutMode: this.homeChannel === 'discover' ? 'normal' : this.discoverLayout, onLayoutChange: (layout: string) => this.selectDiscoveryLayout(layout),
+        toolbarRows: this.discoverToolbarRows, onToolbarRowsChange: (rows: number) => this.selectDiscoveryToolbarRows(rows),
+        channel: this.homeChannel, channelProgress: this.channelProgress,
+        channelInMotion: this.channelTransitioning || this.channelDragging,
+        onChannel: (channel: string) => this.selectHomeChannel(channel),
         onSort: (key: string) => this.selectDiscoverySort(key),
         onReverseSort: () => this.selectDiscoverySort(this.discoverSort, true),
+        onSaveCategoryOrder: (order: string[]) => this.saveDiscoveryCategoryOrder(order),
         categories: this.discoveryCategories, selectedCategory: this.activeCategory, categoriesExpanded: this.categoriesExpanded,
-        onToggleCategories: () => this.toggleDiscoveryCategories(),
-        onOpenSearch: () => this.openDiscoverySearch(),
+        onToggleCategories: () => { this.categoriesExpanded = !this.categoriesExpanded; },
+        onOpenSearch: () => {
+          this.categoriesExpanded = false;
+          if (this.homeChannel === 'discover') this.selectHomeChannel('apps');
+        },
         onCategory: (category: string) => this.selectDiscoveryCategory(category),
-        active: this.currentTab === Index.TAB_DISCOVER && this.signedIn &&
-          !this.showRenewal && !this.showAppConfig && !this.showSubmit && !this.showReconnect && !this.showCertificatePrompt && !this.showCertSheet &&
+        active: this.currentTab === Index.TAB_DISCOVER && !this.showStartupNotice &&
+          !this.showRenewal && !this.showSubmit && !this.showReconnect && !this.showCertificatePrompt && !this.showCertSheet &&
           !this.showCardActions && !this.showLocalProfiles && !this.showFixedPort && !this.showMultiDevice && !this.taskDetailId,
-        statusInset: this.statusBarInset, inset: this.pageInset(), titleHeight: this.discoverTitleHeight,
-        onTitleSize: (height: number): void => {
-          // 收起时子组件会受裁切视口约束；不能把此时的高度保存成标题自然高度。
-          if (this.discoverMotion.scrollOffset === 0 && Number.isFinite(height) && height > 0 &&
-            Math.abs(height - this.discoverTitleHeight) > 0.5) {
-            this.discoverTitleHeight = height;
-          }
-        }, searchContent: (): void => this.discoverSearchInput() }).zIndex(20)
-      if (this.discoverLayout === 'normal') { DiscoverTopOverlay({ backAction: () => this.materialBack(), motion: this.discoverMotion, homeVisibility: this.homeVisibility, darkMode: this.darkMode, inset: this.contentInset(),
-        active: this.currentTab === Index.TAB_DISCOVER, epoch: this.topActionEpoch,
+        statusInset: this.statusBarInset, inset: this.pageInset(), searchContent: (): void => this.discoverSearchInput() }).zIndex(20)
+      if (this.homeChannel === 'apps' && this.discoverLayout === 'sidebar' &&
+        this.catalogError.length > 0 && this.apps.length > 0) {
+        Column() {
+          RefreshFailureNotice({ message: this.catalogError,
+            darkMode: this.darkMode, retry: () => { this.pullRefreshCatalog(); } })
+        }.width('100%').padding({ left: this.discoveryInset(), right: this.discoveryInset() })
+          .position({ x: 0, y: this.statusBarInset + DiscoverToolbarMotion.channelHeight +
+            DiscoverToolbarMotion.height(this.discoverToolbarRows) }).zIndex(19)
+      }
+      if (this.normalHomeLayout()) { DiscoverTopOverlay({ backAction: () => this.materialBack(), motion: this.discoverMotion, homeVisibility: this.homeVisibility, darkMode: this.darkMode, inset: this.discoveryInset(),
+        active: this.currentTab === Index.TAB_DISCOVER && !this.showStartupNotice, epoch: this.topActionEpoch,
         action: () => this.backToDiscoverTop() }) }
       }
-    }.width('100%').height('100%').backgroundColor(this.colors().bg).id('navigation-content-0')
+    }.width('100%').height('100%').backgroundColor(this.navigationBackground()).id('navigation-content-0')
   }
 
   private selectDiscoveryLayout(layout: string): void {
@@ -4351,6 +5134,560 @@ struct Index {
     this.discoverLayout = next;
     this.discoverMotion.reachStart(0);
     DiscoverSortPreferences.saveLayout(getContext(this) as common.UIAbilityContext, next).catch(() => {});
+  }
+
+  private selectDiscoveryToolbarRows(rows: number): void {
+    const next = rows === 2 ? 2 : 1;
+    if (next === this.discoverToolbarRows) return;
+    this.discoverToolbarRows = next;
+    DiscoverSortPreferences.saveToolbarRows(getContext(this) as common.UIAbilityContext, next).catch(() => {});
+  }
+
+  private settleSidebarSwap(): void {
+    const animation = this.sidebarSwapAnimator;
+    this.sidebarSwapAnimator = undefined;
+    animation?.cancel();
+    this.sidebarRailFromRight = this.discoverHoldingSide === 'right';
+    this.sidebarIconsRight = this.sidebarRailFromRight;
+    this.sidebarSwapProgress = 0;
+  }
+
+  private moveSidebarToHoldingSide(): void {
+    const right = this.discoverHoldingSide === 'right';
+    if (this.sidebarSwapAnimator !== undefined || right === this.sidebarRailFromRight) return;
+    if (!this.pageVisible || this.navigationWidthTarget() !== 1 || !this.discoverListReady) {
+      this.settleSidebarSwap();
+      return;
+    }
+    const animation = this.getUIContext().createAnimator({
+      begin: 0, end: 1, duration: 300, easing: 'linear', delay: 0, fill: 'forwards', direction: 'normal', iterations: 1
+    });
+    this.sidebarSwapAnimator = animation;
+    animation.onFrame = (progress: number): void => {
+      if (this.sidebarSwapAnimator !== animation) return;
+      this.sidebarSwapProgress = Math.min(1, Math.max(0, progress));
+      const iconsRight = StoreLayout.sidebarRailOnRight(this.sidebarRailFromRight, this.sidebarSwapProgress);
+      if (iconsRight !== this.sidebarIconsRight) this.sidebarIconsRight = iconsRight;
+    };
+    animation.onFinish = (): void => {
+      if (this.sidebarSwapAnimator !== animation) return;
+      this.sidebarSwapAnimator = undefined;
+      this.sidebarRailFromRight = right;
+      this.sidebarIconsRight = right;
+      this.sidebarSwapProgress = 0;
+      this.moveSidebarToHoldingSide();
+    };
+    animation.play();
+  }
+
+  @Builder
+  private discoveryHome() {
+    Column() {
+      Refresh({ refreshing: $$this.collectionsRefreshing, builder: this.silentRefreshHeader }) {
+        List({ space: this.collectionKey.length > 0 ? 4 : 24, scroller: this.discoverScroller }) {
+          // 顶部标题与频道由 DiscoverHeader 覆盖绘制，这里只留滚动占位。
+          ListItem() {
+            Row().width('100%').height(DiscoverToolbarMotion.channelHeight + 10)
+              .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+          }
+          if (this.collectionsError.length > 0 && this.collections.loaded) {
+            ListItem() {
+              RefreshFailureNotice({ message: this.collectionsError,
+                darkMode: this.darkMode, retry: () => { this.pullRefreshCollections(); } })
+            }.width('100%')
+          }
+          if (this.collectionsLoading && !this.collections.loaded) {
+            ListItem() {
+              Row() { LoadingProgress().width(30).height(30).color(this.colors().accent) }
+                .width('100%').justifyContent(FlexAlign.Center).padding({ top: 36 })
+            }.width('100%')
+          } else if (this.collectionsError.length > 0 && !this.collections.loaded) {
+            ListItem() {
+              RefreshFailureNotice({ message: this.collectionsError,
+                darkMode: this.darkMode, retry: () => { this.pullRefreshCollections(); } })
+            }.width('100%')
+          } else if (this.collectionsEmpty()) {
+            ListItem() {
+              Column({ space: 10 }) {
+                Text(I18n.t('还没有可展示的合集')).fontSize(17).fontWeight(FontWeight.Medium)
+                  .fontColor(this.colors().text)
+                Text(I18n.t('下拉可重新加载')).fontSize(12).fontColor(this.colors().textSecondary)
+              }.width('100%').padding(26).backgroundColor(this.cardSurface()).borderRadius(20)
+            }.width('100%')
+          } else if (this.collectionKey.length > 0) {
+            ListItem() {
+              Row({ space: 8 }) {
+                Text(this.collectionTitle(this.collectionKey)).fontSize(19).fontWeight(FontWeight.Bold)
+                  .fontColor(this.colors().text)
+                if (this.collectionTotal > 0) {
+                  Text(String(this.collectionTotal)).fontSize(12)
+                    .fontColor(this.colors().textTertiary).margin({ left: 4 })
+                }
+                Blank()
+                StoreIconButton({ action: () => this.closeCollectionDetail() })
+              }.width('100%').height(44).alignItems(VerticalAlign.Center)
+            }.width('100%').transition(this.collectionItemTransition())
+            LazyForEach(this.collectionRows, (row: CollectionRankRow) => {
+              ListItem() {
+                this.collectionRankRow(row.entry, row.index, this.collectionKey)
+              }.width('100%').backgroundColor(this.cardSurface()).borderRadius(14)
+            }, (row: CollectionRankRow) => this.collectionRows.key(row))
+            ListItem() {
+              Row({ space: 8 }) {
+                if (this.collectionLoading) {
+                  LoadingProgress().width(16).height(16).color(this.colors().accent)
+                  Text(I18n.t('加载中…')).fontSize(12).fontColor(this.colors().textSecondary)
+                } else if (this.collectionLoadFailed) {
+                  Text(I18n.t('加载未完成，点击重试')).fontSize(12).fontColor(this.colors().accent)
+                    .onClick(() => this.loadCollectionDetail(this.collectionKey))
+                } else {
+                  Text(I18n.t(this.collectionHasMore ? '上划加载' : '已经到底了'))
+                    .fontSize(12).fontColor(this.colors().textTertiary)
+                }
+              }.width('100%').height(44).justifyContent(FlexAlign.Center)
+            }.width('100%')
+          } else {
+            if (this.discoveryBannerBlocks().length > 0) {
+              ListItem() { this.discoveryPrimary() }.width('100%').transition(this.collectionItemTransition())
+            }
+            if (this.collections.block('frequent').entries.length > 0 || this.collections.categories.length > 0) {
+              ListItem() { this.discoverySecondary() }.width('100%').transition(this.collectionItemTransition())
+            }
+            if (this.collections.typeGroups.length > 0) {
+              ListItem() { this.typeCollectionSection() }.width('100%').transition(this.collectionItemTransition())
+            }
+            if (this.recentUpdates().length > 0) {
+              ListItem() { this.weeklyUpdateSection() }.width('100%').transition(this.collectionItemTransition())
+            }
+            if (this.collections.showOverseasSection && this.collections.block('overseas').entries.length > 0) {
+              ListItem() {
+                this.collectionShelf('overseas', '出海应用', this.collections.block('overseas'))
+              }.width('100%').transition(this.collectionItemTransition())
+            }
+          }
+          ListItem() { Row().width('100%').height(110) }
+        }.width('100%').padding({ left: this.discoveryInset(), right: this.discoveryInset() })
+          .cachedCount(2)
+          // 横滑时页面会整体位移，自动滚动条会跟着页面边缘闪出，这里统一关闭。
+          .scrollBar(BarState.Off)
+          .contentStartOffset(this.statusBarInset)
+          .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
+          .onWillScroll((_offset: number, _state: ScrollState, source: ScrollSource) => {
+            if (this.homeChannel === 'discover') this.trackDiscoverScrollSource(source);
+          })
+          .onDidScroll((delta: number, state: ScrollState) => {
+            if (this.homeChannel !== 'discover') return;
+            const fromUser = this.consumeDiscoverScrollSource();
+            if (fromUser && state !== ScrollState.Fling) this.trackHomeNavigation(delta);
+            this.syncDiscoverScroll(fromUser);
+            this.rememberHomeScroll('discover');
+          })
+          .onReachStart(() => { if (this.homeChannel === 'discover') this.revealDiscoverTop(); })
+          .onReachEnd(() => {
+            if (this.homeChannel === 'discover' && this.collectionKey.length > 0 && !this.collectionLoadFailed) {
+              this.loadCollectionDetail(this.collectionKey);
+            }
+          })
+      }.width('100%').layoutWeight(1)
+        .pullToRefresh(this.discoverCanRefresh)
+        .onOffsetChange((offset: number) => {
+          if (this.homeChannel === 'discover' && !this.channelTransitioning && !this.channelDragging) {
+            this.discoverMotion.pull(offset);
+          }
+        })
+        .onRefreshing(() => this.pullRefreshCollections())
+    }.width('100%').height('100%').backgroundColor(this.navigationBackground())
+  }
+
+  /** Keep the same carousel and shelves mounted across rotations. */
+  @Builder
+  private discoveryPrimary() {
+    Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Start,
+      space: { main: LengthMetrics.vp(18), cross: LengthMetrics.vp(24) } }) {
+      Column({ space: this.wideLandscape() ? 22 : 24 }) {
+        this.homeBanner(this.discoveryBannerBlocks())
+        if (this.collections.block('stars_week').entries.length > 0) {
+          Column() {
+            this.sectionHead(this.collectionTitle('stars_week'), 'stars_week', '更多')
+            this.collectionRankRows(this.collections.block('stars_week').entries.slice(0, 3), 'stars_week')
+          }.width('100%')
+        }
+      }.width(this.wideLandscape() ? 'calc(50% - 9vp)' : '100%').alignItems(HorizontalAlign.Start)
+      if (this.collections.block('downloads').entries.length > 0 || this.collections.block('new').entries.length > 0) {
+        Column({ space: this.wideLandscape() ? 22 : 24 }) {
+          if (this.collections.block('downloads').entries.length > 0) {
+            this.collectionShelf('downloads', '下载榜', this.collections.block('downloads'))
+          }
+          if (this.collections.block('new').entries.length > 0) {
+            this.collectionShelf('new', '本周新上', this.collections.block('new'))
+          }
+        }.width(this.wideLandscape() ? 'calc(50% - 9vp)' : '100%').alignItems(HorizontalAlign.Start)
+      }
+    }.width('100%')
+  }
+
+  /** 横屏时将更新最频繁与分类入口并排。 */
+  @Builder
+  private discoverySecondary() {
+    Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Start,
+      space: { main: LengthMetrics.vp(18), cross: LengthMetrics.vp(24) } }) {
+      if (this.collections.block('frequent').entries.length > 0) {
+        Column() {
+          this.collectionShelf('frequent', '本周更新最频繁', this.collections.block('frequent'))
+        }.width(this.wideLandscape() && this.collections.categories.length > 0 ? 'calc(50% - 9vp)' : '100%')
+          .alignItems(HorizontalAlign.Start)
+      }
+      if (this.collections.categories.length > 0) {
+        Column() { this.categorySection() }
+          .width(this.wideLandscape() && this.collections.block('frequent').entries.length > 0 ? 'calc(50% - 9vp)' : '100%')
+          .alignItems(HorizontalAlign.Start)
+      }
+    }.width('100%')
+  }
+
+  private collectionsEmpty(): boolean {
+    return this.collections.blocks.length === 0 ||
+      this.collections.blocks.every((block: DiscoveryBlock) => block.entries.length === 0);
+  }
+
+  @Builder
+  private sectionHead(title: string, key: string, moreLabel: string) {
+    Row() {
+      Text(I18n.t(title)).fontSize(19).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+      Blank()
+      if (moreLabel.length > 0) {
+        Row({ space: 1 }) {
+          Text(I18n.t(moreLabel)).fontSize(12).fontColor(this.colors().textTertiary)
+          SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(12).fontColor([this.colors().textTertiary])
+        }.onClick(() => this.openCollectionsMore(key))
+      }
+    }.width('100%').padding({ bottom: 10 }).alignItems(VerticalAlign.Center)
+  }
+
+  private discoveryBannerBlocks(): DiscoveryBlock[] {
+    return DISCOVERY_BANNER_KEYS.map((key: string) => this.collections.block(key))
+      .filter((block: DiscoveryBlock) => block.entries.length > 0);
+  }
+
+  /** Each slide is a complete collection card. */
+  @Builder
+  private homeBanner(blocks: DiscoveryBlock[]) {
+    DiscoverBanner({
+      blocks: blocks,
+      cardHeight: DISCOVERY_BANNER_HEIGHT,
+      active: this.homeVisibility.visible && this.currentTab === Index.TAB_DISCOVER &&
+        this.homeChannel === 'discover' && !this.channelDragging && !this.channelTransitioning,
+      card: (block: DiscoveryBlock): void => this.discoveryBannerCard(block),
+      label: (key: string): string => this.collectionTitle(key)
+    })
+  }
+
+  @Builder
+  private discoveryBannerCard(block: DiscoveryBlock) {
+    Stack({ alignContent: Alignment.TopStart }) {
+      FeaturedCardStars({ appId: 71 + DISCOVERY_BANNER_KEYS.indexOf(block.key), tier: 2, cardHeight: DISCOVERY_BANNER_HEIGHT })
+      Row({ space: 10 }) {
+        Column() {
+          Text(this.collectionTitle(block.key)).fontSize(10).fontWeight(FontWeight.Medium).fontColor('#FFFFFF')
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .padding({ left: 9, right: 9, top: 4, bottom: 4 }).backgroundColor('#2EFFFFFF').borderRadius(999)
+          Text(this.bannerDescription(block) + '\n' + block.total + I18n.t(' 个应用'))
+            .fontSize(20).fontWeight(FontWeight.Bold).fontColor('#FFFFFF').lineHeight(27)
+            .maxLines(3).textOverflow({ overflow: TextOverflow.Ellipsis }).margin({ top: 10 })
+          if (block.key === 'stars_week' && block.observedDays > 1) {
+            Text(this.weekRangeLabel(block.observedFrom)).fontSize(11).fontColor('#D5E0FF').maxLines(1)
+              .margin({ top: 6 })
+          }
+        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+        Column({ space: 7 }) {
+          Row({ space: 7 }) {
+            ForEach(block.entries.slice(0, 2), (entry: DiscoveryEntry) => {
+              Row() { this.collectionIcon(entry.app, 42) }.onClick(() => this.openDetail(entry.app.id))
+                .gesture(LongPressGesture({ repeat: false, duration: 450 })
+                  .onAction(() => { this.toggleFollow(entry.app); }))
+            }, (entry: DiscoveryEntry) => String(entry.app.id))
+          }
+          if (block.entries.length > 2) {
+            Row({ space: 7 }) {
+              ForEach(block.entries.slice(2, 4), (entry: DiscoveryEntry) => {
+                Row() { this.collectionIcon(entry.app, 42) }.onClick(() => this.openDetail(entry.app.id))
+                .gesture(LongPressGesture({ repeat: false, duration: 450 })
+                  .onAction(() => { this.toggleFollow(entry.app); }))
+              }, (entry: DiscoveryEntry) => String(entry.app.id))
+            }
+          }
+        }.width(Math.min(block.entries.length, 2) * 42 + (block.entries.length > 1 ? 7 : 0))
+      }.width('100%').height('100%').padding(20).alignItems(VerticalAlign.Center)
+    }.width('100%').height(DISCOVERY_BANNER_HEIGHT)
+      .linearGradient({ angle: 118, colors: this.bannerColors(block.key) })
+      .borderRadius(20).clip(true)
+      .id('discover-banner-' + block.key).accessibilityText(this.collectionTitle(block.key))
+      .onClick(() => this.openCollectionsMore(block.key))
+  }
+
+  private bannerColors(key: string): Array<[string, number]> {
+    if (key === 'downloads') return [['#173D68', 0], ['#21618E', 0.46], ['#3A8AA8', 1]];
+    if (key === 'new') return [['#2B3477', 0], ['#4A4A9F', 0.46], ['#6A65C3', 1]];
+    if (key === 'frequent') return [['#244669', 0], ['#2E687C', 0.46], ['#4A899A', 1]];
+    return [['#173A8F', 0], ['#2B57C9', 0.46], ['#4E7BF0', 1]];
+  }
+
+  @Builder
+  private collectionShelf(key: string, title: string, block: DiscoveryBlock) {
+    Column() {
+      this.sectionHead(title, key, '更多')
+      DiscoverShelf({ shelfKey: key, entries: block.entries, darkMode: this.darkMode,
+        homeVisibility: this.homeVisibility,
+        active: this.currentTab === Index.TAB_DISCOVER && this.homeChannel === 'discover' &&
+          !this.channelDragging && !this.channelTransitioning,
+        backAction: () => this.materialBack(),
+        card: (entry: DiscoveryEntry): void => this.collectionCard(entry, key) })
+    }.width('100%')
+  }
+
+  @Builder
+  private collectionCard(entry: DiscoveryEntry, key: string) {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Column() {
+        Row() { this.collectionIcon(entry.app, 46, false) }.width('100%')
+        Text(AppDisplayName.forCatalog(entry.app)).fontSize(13).fontWeight(FontWeight.Medium)
+          .fontColor(this.colors().text).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%').margin({ top: 10 })
+        Text(I18n.category(entry.app.category)).fontSize(10).fontColor(this.colors().textTertiary)
+          .maxLines(1).width('100%').margin({ top: 3 })
+        Text(this.collectionMetric(key, entry)).fontSize(10)
+          .fontColor(key === 'stars_week' ? this.colors().accent : this.colors().textSecondary)
+          .maxLines(1).width('100%').margin({ top: 6 })
+        Row() { this.catalogCardAction(this.catalogApp(entry.app.id) ?? entry.app, false, true, true) }.width('100%').margin({ top: 9 })
+      }.width('100%').padding(12).alignItems(HorizontalAlign.Start)
+      if (entry.app.overseas) { OverseasCorner({ compact: true }) }
+    }.width(124).clip(true)
+      .backgroundColor(this.cardSurface()).borderRadius(16)
+      .onClick(() => this.openDetail(entry.app.id))
+      .gesture(LongPressGesture({ repeat: false, duration: 450 })
+        .onAction(() => { this.toggleFollow(entry.app); }))
+  }
+
+  @Builder
+  private collectionRankRows(entries: DiscoveryEntry[], key: string) {
+    Column() {
+      ForEach(entries, (entry: DiscoveryEntry, index: number) => {
+        if (index > 0) {
+          Row().width('100%').height(1).backgroundColor(this.colors().fill)
+        }
+        this.collectionRankRow(entry, index, key)
+      }, (entry: DiscoveryEntry) => 'rank-' + key + '-' + entry.app.id)
+    }.width('100%').padding({ top: 4, bottom: 4 })
+      .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
+  }
+
+  @Builder
+  private collectionRankRow(entry: DiscoveryEntry, index: number, key: string) {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Row({ space: 12 }) {
+        Text(String(index + 1)).width(20).textAlign(TextAlign.Center).fontSize(16)
+          .fontWeight(FontWeight.Bold).fontStyle(FontStyle.Italic)
+          .fontColor(index < 3 ? this.colors().accent : this.colors().textTertiary)
+        this.collectionIcon(entry.app, 50, false)
+        Column({ space: 4 }) {
+          HomeAppTitle({ title: AppDisplayName.forCatalog(entry.app), version: this.latestVersionTag(this.catalogApp(entry.app.id) ?? entry.app),
+            color: this.colors().text, versionColor: this.colors().surface,
+            versionBackground: this.colors().text, active: this.currentTab === 0 && this.homeChannel === 'discover' &&
+              !this.channelDragging && !this.channelTransitioning })
+          Row({ space: 6 }) {
+            Text(I18n.category(entry.app.category)).fontSize(11)
+              .fontColor(this.colors().textTertiary).maxLines(1)
+            Text('·').fontSize(11).fontColor(this.colors().textTertiary)
+            Text(this.collectionMetric(key, entry)).fontSize(11).fontWeight(FontWeight.Medium)
+              .fontColor(key === 'stars_week' ? this.colors().accent : this.colors().textSecondary).maxLines(1)
+          }.width('100%')
+        }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+        this.catalogCardAction(this.catalogApp(entry.app.id) ?? entry.app, false, true)
+      }.width('100%').padding({ left: 12, right: 12, top: 10, bottom: 10 }).alignItems(VerticalAlign.Center)
+      if (entry.app.overseas) { OverseasCorner({ compact: true }) }
+    }.width('100%').clip(true).borderRadius(14)
+      .onClick(() => this.openDetail(entry.app.id))
+      .gesture(LongPressGesture({ repeat: false, duration: 450 })
+        .onAction(() => { this.toggleFollow(entry.app); }))
+  }
+
+  @Builder
+  private categorySection() {
+    Column() {
+      this.sectionHead('分类找应用', '', '全部')
+      Column() {
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(this.collections.categories.slice(0, 9), (category: string, index: number) => {
+            this.categoryTile(category, index)
+          }, (category: string) => 'category-' + category)
+          Column({ space: 7 }) {
+            Stack() {
+              Text('…').fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.colors().textSecondary)
+            }.width(44).height(44).backgroundColor(this.colors().fill).borderRadius(14)
+            Text(I18n.t('更多')).fontSize(11).fontColor(this.colors().textSecondary).maxLines(1)
+          }.width('20%').padding({ top: 6, bottom: 6 })
+            .onClick(() => this.openCategoryInCatalog(''))
+        }.width('100%')
+      }.width('100%').padding({ left: 4, right: 4, top: 12, bottom: 12 })
+        .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
+    }.width('100%')
+  }
+
+  @Builder
+  private categoryTile(category: string, index: number) {
+    Column({ space: 7 }) {
+      Stack() {
+        Text(category.substring(0, 1)).fontSize(16).fontWeight(FontWeight.Bold)
+          .fontColor(CATEGORY_TILE_COLORS[index % CATEGORY_TILE_COLORS.length][1])
+      }.width(44).height(44)
+        .backgroundColor(CATEGORY_TILE_COLORS[index % CATEGORY_TILE_COLORS.length][0]).borderRadius(14)
+      Text(I18n.category(category)).fontSize(11).fontColor(this.colors().textSecondary)
+        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+    }.width('20%').padding({ top: 6, bottom: 6 })
+      .onClick(() => this.openCategoryInCatalog(category))
+  }
+
+  @Builder
+  private typeCollectionSection() {
+    Column() {
+      this.sectionHead('按类型逛', '', '更多合集')
+      Row({ space: 10 }) {
+        ForEach(this.collections.typeGroups, (group: HomeTypeGroup) => {
+          Column() {
+            Row() {
+              Text(I18n.category(group.title)).fontSize(13).fontWeight(FontWeight.Bold)
+                .fontColor(this.colors().text).maxLines(1).layoutWeight(1)
+              Row({ space: 1 }) {
+                Text(I18n.t('更多')).fontSize(10).fontColor(this.colors().textTertiary)
+                SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(10)
+                  .fontColor([this.colors().textTertiary])
+              }.onClick(() => this.openCategoryInCatalog(group.title))
+            }.width('100%')
+            Text(I18n.t('按星数精选')).fontSize(10).fontColor(this.colors().textTertiary)
+              .width('100%').margin({ top: 3, bottom: 10 })
+            Flex({ wrap: FlexWrap.Wrap }) {
+              ForEach(group.apps, (app: CatalogApp) => {
+                Column({ space: 5 }) {
+                  Row() { this.collectionIcon(app, 38) }
+                  Text(AppDisplayName.forCatalog(app)).fontSize(9.5).fontColor(this.colors().textSecondary)
+                    .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .width('100%').textAlign(TextAlign.Center)
+                }.width('50%').padding({ bottom: 9 })
+                  .onClick(() => this.openDetail(app.id))
+                  .gesture(LongPressGesture({ repeat: false, duration: 450 })
+                    .onAction(() => { this.toggleFollow(app); }))
+              }, (app: CatalogApp) => 'type-' + group.title + '-' + app.id)
+            }.width('100%')
+          }.layoutWeight(1).padding(12).alignItems(HorizontalAlign.Start)
+            .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
+        }, (group: HomeTypeGroup) => 'type-group-' + group.title)
+      }.width('100%').alignItems(VerticalAlign.Top)
+    }.width('100%')
+  }
+
+  @Builder
+  private weeklyUpdateSection() {
+    Column() {
+      this.sectionHead('本周更新', 'updated', '全部')
+      Column() {
+        ForEach(this.recentUpdates(), (entry: DiscoveryEntry, index: number) => {
+          if (index > 0) {
+            Row().width('calc(100% - 24vp)').height(1).backgroundColor(this.colors().fill)
+          }
+          Row({ space: 12 }) {
+            this.collectionIcon(entry.app, 44)
+            Column({ space: 3 }) {
+              Text(AppDisplayName.forCatalog(entry.app)).fontSize(14).fontWeight(FontWeight.Medium)
+                .fontColor(this.colors().text).maxLines(1)
+              Text(this.releaseLine(entry.app)).fontSize(11).fontColor(this.colors().textTertiary).maxLines(1)
+            }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+            this.catalogCardAction(this.catalogApp(entry.app.id) ?? entry.app, false, true)
+          }.width('100%').padding({ left: 12, right: 12, top: 9, bottom: 9 }).alignItems(VerticalAlign.Center)
+            .onClick(() => this.openDetail(entry.app.id))
+            .gesture(LongPressGesture({ repeat: false, duration: 450 })
+              .onAction(() => { this.toggleFollow(entry.app); }))
+        }, (entry: DiscoveryEntry) => 'recent-' + entry.app.id)
+      }.width('100%').padding({ top: 4, bottom: 4 })
+        .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
+    }.width('100%')
+  }
+
+  private bannerDescription(block: DiscoveryBlock): string {
+    if (block.key === 'downloads') return I18n.t('累计下载量');
+    if (block.key === 'new') return I18n.t('最近上架的应用');
+    if (block.key === 'frequent') return I18n.t('按本周更新次数');
+    if (block.basis === 'today') return I18n.t('今天采集的星数');
+    if (block.observedDays <= 1) return I18n.t('今日星数增长');
+    return I18n.t('近 ') + block.observedDays + I18n.t(' 天星数增长');
+  }
+
+  private weekRangeLabel(start: number): string {
+    const format = (ts: number): string => {
+      const date = new Date(ts * 1000);
+      return (date.getMonth() + 1) + '.' + date.getDate();
+    };
+    return I18n.t('统计 ') + format(start) + ' – ' + format(this.collections.generatedAt);
+  }
+
+  private recentUpdates(): DiscoveryEntry[] {
+    return this.collections.block('updated').entries.slice(0, 3);
+  }
+
+  private releaseLine(app: CatalogApp): string {
+    const at = Date.parse(app.latestPublishedAt);
+    const version = this.latestVersionTag(app);
+    if (!Number.isFinite(at)) return version;
+    const days = Math.max(0, Math.floor((Date.now() - at) / 86400000));
+    const ago = days === 0 ? I18n.t('今天') : days + I18n.t(' 天前');
+    return version.length > 0 ? version + ' · ' + ago : ago;
+  }
+
+  @Builder
+  private homeFollowMark(appId: number, size: number = 18) {
+    if (this.followedAppIds.includes(appId)) {
+      Stack({ alignContent: Alignment.Center }) {
+        SymbolGlyph($r('sys.symbol.star_fill')).fontSize(size * 0.55).fontColor(['#FFFFFF'])
+      }.width(size).height(size).backgroundColor(this.colors().accent).borderRadius(size / 2)
+        .border({ width: 1.5, color: this.colors().surface })
+        .hitTestBehavior(HitTestMode.None).accessibilityText(I18n.t('已关注'))
+        .id('home-follow-mark-' + appId).transition(TransitionEffect.OPACITY)
+    }
+  }
+
+  @Builder
+  private collectionIcon(app: CatalogApp, size: number, markOverseas: boolean = true,
+    cornerRadius: number = 0, starfield: boolean = false) {
+    Stack({ alignContent: Alignment.BottomEnd }) {
+      Stack({ alignContent: Alignment.TopStart }) {
+IconViewport({ active: this.currentTab === Index.TAB_DISCOVER && this.pageVisible && this.homeVisibility.visible, changed: (visible: boolean) => { this.observeCatalogIcon(app, visible); }, content: (): void => { this.collectionIconPixels(app, size, cornerRadius, starfield); } })
+        if (app.overseas && markOverseas) {
+          OverseasCorner({ compact: true }).position({ x: 0, y: 0 })
+            .scale({ x: Math.min(1, size / 42), y: Math.min(1, size / 42), centerX: '0%', centerY: '0%' })
+        }
+      }.width(size).height(size).borderRadius(cornerRadius > 0 ? cornerRadius : size / 3).clip(true)
+      this.homeFollowMark(app.id, size < 48 ? 14 : 18)
+    }.width(size).height(size)
+  }
+
+  private collectionMetric(key: string, entry: DiscoveryEntry): string {
+    const app = entry.app;
+    if (key === 'stars_week') {
+      return entry.starsToday >= 0 ? I18n.t('星数 ') + repositoryCount(entry.starsToday) :
+        I18n.t('本周 ') + '+' + repositoryCount(entry.starsDelta) + ' ★';
+    }
+    if (key === 'updated') return this.releaseLine(app);
+    if (key === 'frequent') {
+      return I18n.t('本周更新 ') + entry.updatesInWindow + I18n.t(' 次');
+    }
+    if (key === 'new') {
+      const days = Math.max(0, Math.floor((Date.now() - app.createdAt * 1000) / 86400000));
+      return days === 0 ? I18n.t('今天上架') : I18n.t('上架 ') + days + I18n.t(' 天');
+    }
+    if (key === 'downloads') {
+      return app.githubDownloads >= 0 ?
+        repositoryCount(app.githubDownloads) + I18n.t(' 次下载') : I18n.t('暂无下载数据');
+    }
+    return I18n.t('星数 ') + repositoryCount(app.stars);
   }
 
   @Builder
@@ -4369,22 +5706,15 @@ struct Index {
                   .opacity(this.sidebarSelectedId === app.id ? 1 : 0)
                   .animation({ duration: 240, curve: Curve.EaseOut })
                   .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
-              if (this.iconFor(app.id)) {
-                Image(this.iconFor(app.id)).width(48).height(48).borderRadius(24)
-                  .objectFit(ImageFit.Cover)
-                  .shadow({ radius: 9, color: this.darkMode ? '#66000000' : '#33445A83', offsetX: 0, offsetY: 4 })
-              } else {
-                Text(AppDisplayName.forCatalog(app).substring(0, 1) || I18n.t('应'))
-                  .fontSize(21).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
-                  .width(48).height(48).textAlign(TextAlign.Center)
-                  .backgroundColor(this.colors().accentSoft).borderRadius(24)
-                  .shadow({ radius: 9, color: this.darkMode ? '#66000000' : '#33445A83', offsetX: 0, offsetY: 4 })
-              }
+IconViewport({ active: this.currentTab === Index.TAB_DISCOVER && this.pageVisible && this.homeVisibility.visible, changed: (visible: boolean) => { this.observeCatalogIcon(app, visible); }, content: (): void => { this.sidebarIconPixels(app); } })
+              Stack() { this.homeFollowMark(app.id, 16) }.width(16).height(16)
+                .position({ x: 40, y: 40 }).hitTestBehavior(HitTestMode.None)
             }.width(60).height(60).borderRadius(30)
               .backgroundColor(Color.Transparent)
               .scale({ x: this.sidebarSelectedId === app.id ? 1.08 : 1,
                 y: this.sidebarSelectedId === app.id ? 1.08 : 1 })
               .animation({ duration: 260, curve: curves.interpolatingSpring(0, 1, 260, 28) })
+              .translate({ x: (this.sidebarIconsRight ? -1 : 1) * StoreLayout.sidebarCardInset / 2 })
             // Reserve both text lines: selection weight and image transforms never reflow neighbouring rows.
             Text(AppDisplayName.forCatalog(app)).width('100%').height(26).fontSize(10).lineHeight(13)
               .fontWeight(this.sidebarSelectedId === app.id ? FontWeight.Bold : FontWeight.Regular)
@@ -4392,10 +5722,14 @@ struct Index {
                 (this.sidebarSelectedId === app.id ? Palette.forMode(this.discoverChromeDark()).text :
                   Palette.forMode(this.discoverChromeDark()).textSecondary))
               .textAlign(TextAlign.Center).maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+              .padding({ left: this.sidebarIconsRight ? 0 : StoreLayout.sidebarCardInset,
+                right: this.sidebarIconsRight ? StoreLayout.sidebarCardInset : 0 })
               .accessibilityLevel('no')
             }.width('100%').alignItems(HorizontalAlign.Center)
               .accessibilityText((this.sidebarSelectedId === app.id ? I18n.t('已选择') + '，' : '') + AppDisplayName.forCatalog(app))
               .id('discover-sidebar-app-' + app.id).onClick(() => { this.sidebarSelectedId = app.id; })
+              .gesture(LongPressGesture({ repeat: false, duration: 450 })
+                .onAction(() => { this.toggleFollow(app); }))
           }.width('100%')
         }, (app: CatalogApp) => this.discoverRows.key(app))
         if (this.catalogMoreBusy) {
@@ -4405,28 +5739,51 @@ struct Index {
             .onClick(() => { this.catalogMoreError = ''; this.loadMoreApps(); }) }
         }
       }.width(StoreLayout.sidebarRailWidth(this.viewportWidth)).height('100%')
-        .contentStartOffset(this.statusBarInset + 78)
+        .translate({ x: StoreLayout.sidebarRailShift(this.viewportWidth, this.sidebarRailFromRight, this.sidebarSwapProgress) })
+        .id('discover-sidebar-rail')
+        .contentStartOffset(this.statusBarInset + DiscoverToolbarMotion.channelHeight + DiscoverToolbarMotion.height(this.discoverToolbarRows) + 8)
         .contentEndOffset(StoreLayout.navigationHeight + StoreLayout.navigationBottomMargin + 16)
         .scrollBar(BarState.Off).cachedCount(2)
+        .onWillScroll((_offset: number, _state: ScrollState, source: ScrollSource) => {
+          if (this.homeChannel === 'apps' && this.discoverLayout === 'sidebar') this.trackDiscoverScrollSource(source);
+        })
+        .onDidScroll((delta: number, state: ScrollState) => {
+          if (this.homeChannel !== 'apps' || this.discoverLayout !== 'sidebar') return;
+          const fromUser = this.consumeDiscoverScrollSource();
+          if (fromUser && state !== ScrollState.Fling) this.trackHomeNavigation(delta);
+          if (!this.channelTransitioning && !this.channelDragging) {
+            this.discoverMotion.scroll(this.scrollerOffset(this.sidebarScroller), fromUser);
+          }
+        })
+        .onReachStart(() => {
+          if (this.homeChannel === 'apps' && this.discoverLayout === 'sidebar') this.revealDiscoverTop();
+        })
         .onScrollIndex((_start: number, end: number) => this.prefetchCatalog(end))
         .onReachEnd(() => this.loadMoreApps())
+      Stack() {
       if (this.sidebarSelectedId > 0 && this.apps.some((app: CatalogApp) => app.id === this.sidebarSelectedId)) {
-        SidebarDetailPane({ appId: this.sidebarSelectedId, visible: this.homeVisibility.visible,
-          topInset: this.statusBarInset + 70, starfield: this.splitOnStarfield(),
-          actionRight: StoreLayout.sidebarActionRight(this.viewportWidth, this.viewportHeight),
-          onBack: () => this.materialBack() }).layoutWeight(1).height('100%')
+        SidebarDetailPane({ appId: this.sidebarSelectedId, visible: this.homeVisibility.visible && this.homeChannel === 'apps',
+          topInset: this.statusBarInset + DiscoverToolbarMotion.channelHeight + DiscoverToolbarMotion.height(this.discoverToolbarRows),
+          onScroll: (delta: number): void => this.trackHomeNavigation(delta),
+          onDockChange: (view: SidebarInstallView, action?: () => void): void => this.setSidebarDock(view, action)
+        }).width('100%').height('100%')
       } else if (this.catalogLoading) {
         Column() { LoadingProgress().width(26).height(26).color(this.colors().accent) }
-          .layoutWeight(1).height('100%').justifyContent(FlexAlign.Center)
+          .width('100%').height('100%').justifyContent(FlexAlign.Center)
       } else {
-        Column() { Text(this.catalogError ? I18n.t('暂时无法读取应用') : I18n.t('没有匹配的应用'))
-          .fontSize(14).fontColor(this.colors().textSecondary)
+        Column() {
           if (this.catalogError.length > 0) {
-            Button(I18n.t('重试')).onClick(() => this.loadApps())
+            RefreshFailureNotice({ message: this.catalogError,
+              darkMode: this.darkMode, retry: () => { this.pullRefreshCatalog(); } })
+          } else {
+            Text(I18n.t('没有匹配的应用')).fontSize(14).fontColor(this.colors().textSecondary)
           } }
-          .layoutWeight(1).height('100%').justifyContent(FlexAlign.Center)
+          .width('100%').height('100%').justifyContent(FlexAlign.Center)
       }
-    }.width('100%').constraintSize({ maxWidth: StoreLayout.sidebarFrameWidth(this.viewportWidth) })
+      }.layoutWeight(1).height('100%')
+        .translate({ x: StoreLayout.sidebarDetailShift(this.viewportWidth, this.sidebarRailFromRight, this.sidebarSwapProgress) })
+    }.reverse(this.sidebarRailFromRight)
+      .width('100%').constraintSize({ maxWidth: StoreLayout.sidebarFrameWidth(this.viewportWidth) })
       .height('100%')
       .position({ x: Math.max(0, (this.viewportWidth - StoreLayout.sidebarFrameWidth(this.viewportWidth)) / 2), y: 0 })
       .id('discover-sidebar-layout')
@@ -4438,10 +5795,10 @@ struct Index {
       // Refresh 保持稳定，标题和搜索组件位于其外部。
       // 加载态与错误态改为列表项，列表本身始终存在。
       Refresh({ refreshing: $$this.catalogRefreshing, builder: this.silentRefreshHeader }) {
-        List({ space: 0, scroller: this.discoverScroller }) {
+        List({ space: 0, scroller: this.catalogScroller }) {
             // 占位随列表滚出；实际标题和搜索框在 Refresh 外，下拉时保持原位。
             ListItem() {
-              Row().width('100%').height(this.discoverTitleHeight + 70)
+              Row().width('100%').height(DiscoverToolbarMotion.channelHeight + DiscoverToolbarMotion.height(this.discoverToolbarRows))
                 .hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
             }
             if (this.activeQuery.length > 0) {
@@ -4459,13 +5816,8 @@ struct Index {
               }
             } else if (this.catalogError.length > 0) {
               ListItem() {
-                Column({ space: 12 }) {
-                  Text(I18n.t('暂时无法读取应用')).fontSize(17).fontWeight(FontWeight.Medium)
-                    .fontColor(this.colors().text)
-                  Text(I18n.t('检查网络后再试一次')).fontSize(12).fontColor(this.colors().textSecondary)
-                  Text(I18n.t('下拉可重新加载')).fontSize(12).fontColor(this.colors().accent)
-                }.padding(25).backgroundColor(this.colors().surface).borderRadius(20)
-                  .width('88%').margin({ top: 18 })
+                RefreshFailureNotice({ message: this.catalogError,
+                  darkMode: this.darkMode, retry: () => { this.pullRefreshCatalog(); } }).margin({ bottom: 12 })
               }.width('100%')
             } else if (this.apps.length === 0) {
               ListItem() {
@@ -4476,7 +5828,7 @@ struct Index {
                     I18n.t('换个关键词试试，或清除搜索看全部应用') :
                     I18n.t('在「管理」页的「我上架的应用」里可以从 GitHub / Gitee 添加'))
                     .fontSize(12).fontColor(this.colors().textSecondary).textAlign(TextAlign.Center)
-                }.width('100%').padding(26).backgroundColor(this.colors().surface).borderRadius(20)
+                }.width('100%').padding(26).backgroundColor(this.cardSurface()).borderRadius(20)
               }
             }
             LazyForEach(this.discoverRows, (app: CatalogApp) => {
@@ -4488,30 +5840,22 @@ struct Index {
                     FeaturedCardStars({ appId: app.id, tier: this.featuredTier(app.stars),
                       cardHeight: this.featuredHeights.get(app.id) ?? 92 })
                     Row({ space: 14 }) {
-                      if (this.iconFor(app.id)) {
-                        Image(this.iconFor(app.id)).width(62).height(62).borderRadius(17)
-                          .onClick(() => this.openDetail(app.id))
-                      } else {
-                        Text(AppDisplayName.forCatalog(app).length > 0 ? AppDisplayName.forCatalog(app).substring(0, 1) : I18n.t('应'))
-                          .fontSize(23).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
-                          .width(62).height(62).textAlign(TextAlign.Center)
-                          .backgroundColor(this.colors().surface).borderRadius(17)
-                          .onClick(() => this.openDetail(app.id))
-                      }
+                      this.collectionIcon(app, 62, false, 17, true)
                       Column({ space: 5 }) {
                         HomeAppTitle({ title: AppDisplayName.forCatalog(app), version: this.latestVersionTag(app),
                           color: '#FFFFFF', versionColor: this.featuredColors(app.stars)[0][0],
-                          versionBackground: '#FFFFFF', active: this.currentTab === 0 })
+                          versionBackground: '#FFFFFF', active: this.currentTab === 0 && this.homeChannel === 'apps' &&
+                            !this.channelDragging && !this.channelTransitioning })
                         Text(app.summary).fontSize(12)
                           .fontColor('#E5ECFF').maxLines(1)
                         this.catalogMetadata(app, true)
                       }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-                        .onClick(() => this.openDetail(app.id))
                       this.catalogCardAction(app, true)
                     }.width('100%').padding(15).alignItems(VerticalAlign.Center)
                       .onSizeChange((_oldSize: SizeOptions, size: SizeOptions) => {
                         this.rememberFeaturedHeight(app.id, Number(size.height));
                       })
+                    if (app.overseas) { OverseasCorner({ starfield: true }) }
                   }.width('100%').id('discover-featured-' + app.id)
                     .onVisibleAreaChange([0], (visible: boolean) => {
                       if (visible) this.visibleFeatured.add(app.id);
@@ -4521,36 +5865,31 @@ struct Index {
                     .linearGradient({ angle: 120, colors: this.featuredColors(app.stars) })
                     .borderRadius(StoreLayout.cardRadius)
                     .clip(true)
+                    .onClick(() => this.openDetail(app.id))
                     .margin({ bottom: 10 })
                   } else {
-                    Column() {
+                    Stack({ alignContent: Alignment.TopStart }) {
                       Row({ space: 14 }) {
-                        if (this.iconFor(app.id)) {
-                          Image(this.iconFor(app.id)).width(62).height(62).borderRadius(17)
-                            .onClick(() => this.openDetail(app.id))
-                        } else {
-                          Text(AppDisplayName.forCatalog(app).length > 0 ? AppDisplayName.forCatalog(app).substring(0, 1) : I18n.t('应'))
-                            .fontSize(23).fontWeight(FontWeight.Bold).fontColor(this.colors().accent)
-                            .width(62).height(62).textAlign(TextAlign.Center)
-                            .backgroundColor(this.colors().accentSoft).borderRadius(17)
-                            .onClick(() => this.openDetail(app.id))
-                        }
+                        this.collectionIcon(app, 62, false, 17, false)
                         Column({ space: 5 }) {
                           HomeAppTitle({ title: AppDisplayName.forCatalog(app), version: this.latestVersionTag(app),
                             color: this.colors().text, versionColor: this.colors().surface,
-                            versionBackground: this.colors().text, active: this.currentTab === 0 })
+                            versionBackground: this.colors().text, active: this.currentTab === 0 && this.homeChannel === 'apps' &&
+                              !this.channelDragging && !this.channelTransitioning })
                           Text(app.summary).fontSize(12).fontColor(this.colors().textSecondary).maxLines(1)
                           this.catalogMetadata(app)
                         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-                          .onClick(() => this.openDetail(app.id))
                         this.catalogCardAction(app)
                       }.width('100%').padding(15)
-                    }.width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+                      if (app.overseas) { OverseasCorner() }
+                    }.width('100%').backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius).clip(true)
+                      .onClick(() => this.openDetail(app.id))
                       .margin({ bottom: 10 })
                   }
                 }.width('100%')
-              }.swipeAction({end:{builder:()=>{this.cardSwipeActions(this.followActions(app), 'follow-'+app.id,
-                (_key:string)=>this.toggleFollow(app),10);},actionAreaDistance:72},edgeEffect:SwipeEdgeEffect.Spring})
+              }
+              .gesture(LongPressGesture({ repeat: false, duration: 450 })
+                .onAction(() => { this.toggleFollow(app); }))
             }, (app: CatalogApp) => this.discoverRows.key(app))
             // 接近页尾预取；固定高度的尾项避免加载状态切换改变滚动范围。
             if (this.catalogPage * Index.CATALOG_PAGE_SIZE < this.catalogTotal) {
@@ -4577,24 +5916,39 @@ struct Index {
             ListItem() {
               Row().width('100%').height(110)
             }
-        }.width('100%').padding({ left: this.contentInset(), right: this.contentInset() })
+        }.width('100%').padding({ left: this.discoveryInset(), right: this.discoveryInset() })
           .cachedCount(2)
+          // 与发现页一致：横滑位移时不显示自动滚动条。
+          .scrollBar(BarState.Off)
           // 留白属于滚动内容；列表视口一直延伸到透明状态栏下。
           .contentStartOffset(this.statusBarInset)
           .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
-          .onDidScroll(() => { this.syncDiscoverScroll(); })
+          .onWillScroll((_offset: number, _state: ScrollState, source: ScrollSource) => {
+            if (this.homeChannel === 'apps' && this.discoverLayout === 'normal') this.trackDiscoverScrollSource(source);
+          })
+          .onDidScroll((delta: number, state: ScrollState) => {
+            if (this.homeChannel !== 'apps' || this.discoverLayout !== 'normal') return;
+            const fromUser = this.consumeDiscoverScrollSource();
+            if (fromUser && state !== ScrollState.Fling) this.trackHomeNavigation(delta);
+            this.syncDiscoverScroll(fromUser);
+            this.rememberHomeScroll('apps');
+          })
           .onScrollIndex((_start: number, end: number) => this.prefetchCatalog(end))
-          .onReachStart(() => this.revealDiscoverTop())
+          .onReachStart(() => { if (this.homeChannel === 'apps') this.revealDiscoverTop(); })
           .onReachEnd(() => this.loadMoreApps())
         }
         // 下拉容器撑满列表视口，顶部仅保留不响应触摸的占位。
         .width('100%').layoutWeight(1)
         .pullToRefresh(this.discoverCanRefresh)
-        .onOffsetChange((offset: number) => this.discoverMotion.pull(offset))
+        .onOffsetChange((offset: number) => {
+          if (this.homeChannel === 'apps' && !this.channelTransitioning && !this.channelDragging) {
+            this.discoverMotion.pull(offset);
+          }
+        })
         .onRefreshing(() => this.pullRefreshCatalog())
     // Window composition already caches this surface during its scale animation.
     // Extra list/card offscreen layers are rebuilt together on foreground return.
-    }.width('100%').height('100%').backgroundColor(this.colors().bg)
+    }.width('100%').height('100%').backgroundColor(this.navigationBackground())
   }
 
   @Builder
@@ -4605,7 +5959,7 @@ struct Index {
       Text(tool.formats).fontSize(11).fontColor(this.colors().textTertiary)
     }.width('100%').constraintSize({ minHeight: 156 }).padding(18)
       .alignItems(HorizontalAlign.Center).justifyContent(FlexAlign.Center)
-      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius).id(tool.id)
+      .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius).id(tool.id)
       .onClick(()=>StorePageMotion.pushUrl({url:tool.page}))
   }
 
@@ -4616,13 +5970,13 @@ struct Index {
       Column() {
         Flex({ wrap: FlexWrap.Wrap, alignItems: ItemAlign.Stretch,
           space: { main: LengthMetrics.vp(12), cross: LengthMetrics.vp(12) } }) {
-          ForEach(localTools(), (tool: LocalTool) => {
+          ForEach(localTools(this.localDeveloperMode), (tool: LocalTool) => {
             Column() { this.localToolCard(tool) }.width('calc(50% - 6vp)')
           }, (tool: LocalTool) => tool.id)
         }.width('100%')
       }.width('100%').constraintSize({maxWidth:StoreLayout.contentWidth+this.pageInset()*2})
         .padding({left:this.pageInset(),right:this.pageInset(),top:this.statusBarInset+72,bottom:110}).alignItems(HorizontalAlign.Start)
-    }.width('100%').height('100%').scrollBar(BarState.Off).align(Alignment.Top).backgroundColor(this.colors().bg)
+    }.width('100%').height('100%').scrollBar(BarState.Off).align(Alignment.Top).backgroundColor(this.navigationBackground())
     }.titleBar({style:this.scrollTitleBarStyle(56),avoidLayoutSafeArea:true,
       content:{stackBuilder:()=>this.simpleTitleBar(I18n.t('本地')),divider:{showType:DividerShowType.OFF}}
     }).titleMode(HdsNavigationTitleMode.MINI).mode(NavigationMode.Stack).hideBackButton(true)
@@ -4630,7 +5984,7 @@ struct Index {
       .bindToScrollable([this.localScroller])
       .expandSafeArea([SafeAreaType.SYSTEM],[SafeAreaEdge.TOP,SafeAreaEdge.BOTTOM])
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],[LayoutSafeAreaEdge.BOTTOM])
-      .width('100%').height('100%').backgroundColor(this.colors().bg).id('navigation-content-1')
+      .width('100%').height('100%').backgroundColor(this.navigationBackground()).id('navigation-content-1')
   }
 
   @Builder
@@ -4644,7 +5998,7 @@ struct Index {
       .bindToScrollable([this.managementScroller])
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
-      .width('100%').height('100%').backgroundColor(this.colors().bg).id('navigation-content-2')
+      .width('100%').height('100%').backgroundColor(this.navigationBackground()).id('navigation-content-2')
   }
 
   @Builder
@@ -4667,7 +6021,7 @@ struct Index {
   }
 
   private rootHeaderVisible(tab: number): boolean {
-    return this.followingInformation===undefined && this.currentTab === tab && !this.showSubmit && !this.showAppConfig &&
+    return !this.showStartupNotice && this.followingInformation===undefined && this.currentTab === tab && !this.showSubmit &&
       !this.showRenewal && !this.showReconnect && !this.showCertSheet && !this.showLocalProfiles && !this.showFixedPort && !this.showMultiDevice &&
       !this.showCertificatePrompt && !this.showCardActions && !this.taskDetailId;
   }
@@ -4735,7 +6089,7 @@ struct Index {
   }
 
   @Builder
-  private cardSwipeActions(actions: ManagementAction[], owner: string, select: (key: string) => void, bottomInset:number=0) {
+  private cardSwipeActions(actions: ManagementAction[], owner: string, select: (key: string) => void) {
     Row({ space: 8 }) {
       ForEach(actions, (action: ManagementAction) => {
         Button({ type: ButtonType.Normal }) {
@@ -4752,11 +6106,10 @@ struct Index {
           .borderRadius(16).accessibilityText(action.label).id('card-swipe-' + owner + '-' + action.key)
           .onClick(() => select(action.key))
       }, (action: ManagementAction) => action.key)
-    }.height('100%').padding({ left: 8,bottom:bottomInset })
+    }.height('100%').padding({ left: 8 })
   }
 
   private cardSwipeSymbol(key: string): Resource {
-    if(key==='follow')return $r('sys.symbol.star');
     if(key==='unfollow')return $r('sys.symbol.star_fill');
     if (key === 'cleanup' || key === 'uninstall') return $r('sys.symbol.trash');
     if (key === 'renew') return $r('sys.symbol.arrow_clockwise');
@@ -4773,13 +6126,7 @@ struct Index {
       ListItem() {
         Column({ space: 10 }) {
           Row({ space: 12 }) {
-            if (this.jobIcon(job)) {
-              Image(this.jobIcon(job)).width(46).height(46).borderRadius(13)
-            } else {
-              Text(this.jobTitle(job).length > 0 ? this.jobTitle(job).substring(0, 1) : I18n.t('应'))
-                .fontSize(19).fontColor(this.colors().accent).textAlign(TextAlign.Center)
-                .width(46).height(46).backgroundColor(this.colors().accentSoft).borderRadius(13)
-            }
+IconViewport({ active: this.currentTab === Index.TAB_MANAGE && this.pageVisible && this.homeVisibility.visible, changed: (visible: boolean) => { this.observeJobIcon(job, visible); }, content: (): void => { this.installedIconPixels(job); } })
             Column({ space: 4 }) {
               HomeAppTitle({ title: this.jobTitle(job), version: this.managementVersion(job),
                 color: this.colors().text, versionColor: this.colors().surface,
@@ -4814,8 +6161,8 @@ struct Index {
               .onClick(() => this.performInstalledAction(job))
           }.width('100%')
         }.alignItems(HorizontalAlign.Start).width('100%')
-          .padding(15).backgroundColor(this.renewalDueSoon(job) ? this.colors().renewalWarning :
-            this.colors().surface).borderRadius(StoreLayout.cardRadius)
+          .padding(15).backgroundColor(this.cardPaint(this.renewalDueSoon(job) ?
+            this.colors().renewalWarning : this.colors().surface)).borderRadius(StoreLayout.cardRadius)
           .background(this.installedUpdatePausedBackground(job), { align: Alignment.Center })
           .id('installed-card-' + job.bundleName)
           .accessibilityDescription(UpdatePolicy.disabled(job.bundleName) ? I18n.t('已停更，左滑卡片可选择续更') : '')
@@ -4889,13 +6236,7 @@ struct Index {
           }
           LazyForEach(this.queueRows, (job: InstallJob) => {
             ListItem() {
-              QueueTaskCard({ jobId: job.id, fallback: job, active: this.currentTab === Index.TAB_MANAGE,
-                title: this.jobTitle(job), version: this.managementVersion(job), icon: this.jobIcon(job),
-                hasIcon: this.jobIcon(job) !== undefined, iconRevision: this.catalogForJob(job)?.iconRev ?? '',
-                resolveTitle: (live: InstallJob): string => this.jobTitle(live),
-                resolveVersion: (live: InstallJob): string => this.managementVersion(live),
-                resolveIcon: (live: InstallJob): image.PixelMap | undefined => this.jobIcon(live),
-                onGroupAction:(live:InstallJob)=>{this.showQueueActions(live,'',true);} })
+IconViewport({ active: this.currentTab === Index.TAB_MANAGE && this.pageVisible && this.homeVisibility.visible, changed: (visible: boolean) => { this.observeJobIcon(job, visible); }, content: (): void => { this.queueIconPixels(job); } })
             }.swipeAction({ end: { builder: () => {
               this.cardSwipeActions(this.queueActions(job), job.id, (key: string): void => { this.showQueueActions(job, key); });
             }, actionAreaDistance: this.queueActions(job).length * 72 }, edgeEffect: SwipeEdgeEffect.Spring })
@@ -4945,7 +6286,7 @@ struct Index {
                 }.alignItems(HorizontalAlign.Start).layoutWeight(1)
                 Text('›').fontSize(20).fontColor(this.colors().textTertiary)
               }.width('100%').padding({ left: 12, right: 12, top: 11, bottom: 11 })
-                .backgroundColor(this.colors().surface).borderRadius(15)
+                .backgroundColor(this.cardSurface()).borderRadius(15)
                 .onClick(() => this.openSubmitSheet())
             }
             if (this.myAppsMessage.length > 0) {
@@ -4963,13 +6304,7 @@ struct Index {
             LazyForEach(this.publishedRows, (app: CatalogApp) => {
               ListItem() {
                 Row({ space: 12 }) {
-                  if (this.managedIconFor(app)) {
-                    Image(this.managedIconFor(app)).width(42).height(42).borderRadius(11)
-                  } else {
-                    Text(app.displayName.length > 0 ? app.displayName.substring(0, 1) : I18n.t('应'))
-                      .fontSize(18).fontColor(this.colors().accent).textAlign(TextAlign.Center)
-                      .width(42).height(42).backgroundColor(this.colors().accentSoft).borderRadius(11)
-                  }
+IconViewport({ active: this.currentTab === Index.TAB_MANAGE && this.pageVisible && this.homeVisibility.visible, changed: (visible: boolean) => { this.observeCatalogIcon(app, visible, true); }, content: (): void => { this.publishedIconPixels(app); } })
                   Column({ space: 4 }) {
                     Text(app.displayName).fontSize(14).fontWeight(FontWeight.Medium)
                       .fontColor(this.colors().text).maxLines(1)
@@ -4980,9 +6315,8 @@ struct Index {
                   Button(I18n.t('配置'))
                     .height(44).fontSize(12).fontColor(this.colors().accent)
                     .backgroundColor(this.colors().accentSoft).borderRadius(10)
-                    .enabled(this.removingId === 0 && !this.configBusy)
                     .onClick(() => this.openAppConfig(app))
-                }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+                }.width('100%').padding(16).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
               }
             }, (app: CatalogApp) => this.publishedRows.key(app))
             }.transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -10 })))
@@ -5046,7 +6380,7 @@ struct Index {
         .cachedCount(2)
         .onDidScroll(() => { ForegroundIdle.interaction(); })
         .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
-    }.width('100%').height('100%').backgroundColor(this.colors().bg)
+    }.width('100%').height('100%').backgroundColor(this.navigationBackground())
   }
 
   @Builder
@@ -5099,84 +6433,6 @@ struct Index {
   }
 
   @Builder
-  private appConfigSheet() {
-    Column({ space: 16 }) {
-      Row() {
-        Text(I18n.t('应用配置')).fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
-          .layoutWeight(1)
-        StoreIconButton({ active: (!this.configBusy || this.configSourceChecking) && this.removingId === 0,
-          action: () => {
-            this.configSourceGeneration++; this.configBusy = false; this.configSourceChecking = false;
-            this.animateOverlay(() => { this.showAppConfig = false; });
-          } })
-      }.width('100%')
-      Text(this.configApp.displayName).fontSize(17).fontWeight(FontWeight.Medium)
-        .fontColor(this.colors().text).maxLines(2).width('100%')
-      Text(I18n.t('软件分类')).fontSize(13).fontColor(this.colors().textSecondary)
-      if (this.configCategories.length > 0) {
-        StoreSelect({ options: this.configCategories.map((category: string) => ({ value: category } as SelectOption)),
-          selectedIndex: this.configCategories.indexOf(this.configCategory), selectedValue: this.configCategory,
-          controlId: 'app-config-category-select', active: !this.configBusy && this.removingId === 0,
-          action: (index: number) => { this.configCategory = this.configCategories[index] ?? ''; } })
-      }
-      Column({ space: 10 }) {
-        Row() {
-          Text(I18n.t('关联子仓')).fontSize(13).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
-            .layoutWeight(1)
-          if (this.configApp.secondaryRepo.length > 0 && !this.configSourceRemove) {
-            Text(I18n.t('解除关联')).fontSize(12).fontColor(this.colors().danger)
-              .enabled(!this.configBusy).onClick(() => {
-                this.configSourceUrl = ''; this.configSourceDraft = new SubmitDraft();
-                this.configSourceRemove = true; this.configSourceMessage = I18n.t('保存后解除关联');
-              })
-          }
-        }.width('100%')
-        if (!this.configSourceExpanded) {
-          Button(I18n.t('新增子仓'), { type: ButtonType.Normal })
-            .height(38).width('100%').fontSize(12).fontColor(this.colors().accent)
-            .backgroundColor(this.colors().accentSoft).borderRadius(12)
-            .enabled(!this.configBusy).id('app-config-source-add')
-            .onClick(() => { this.configSourceExpanded = true; })
-        } else {
-        Text(I18n.t('用于同步其他渠道搬运的版本，仅接收与主仓包名一致的安装包。'))
-          .fontSize(11).fontColor(this.colors().textTertiary).width('100%')
-        TextInput({ text: this.configSourceUrl, placeholder: I18n.t('GitHub / Gitee 仓库地址') })
-          .height(44).fontSize(13).fontColor(this.colors().text).backgroundColor(this.colors().fill)
-          .borderRadius(12).enabled(!this.configBusy).id('app-config-source-url')
-          .onChange((value: string) => {
-            this.configSourceUrl = value; this.configSourceDraft = new SubmitDraft();
-            this.configSourceRemove = false; this.configSourceMessage = '';
-          })
-        Button(this.configSourceChecking ? I18n.t('正在核验包名…') : I18n.t('检查子仓'))
-          .height(38).width('100%').fontSize(12).fontColor(this.colors().accent)
-          .backgroundColor(this.colors().accentSoft).borderRadius(12)
-          .enabled(!this.configBusy && this.configSourceUrl.trim().length > 0)
-          .id('app-config-source-check').onClick(() => this.checkAppSource())
-        if (this.configSourceMessage.length > 0) {
-          Text(this.configSourceMessage).fontSize(11).fontColor(this.colors().textSecondary).width('100%')
-        }
-        }
-      }.width('100%').alignItems(HorizontalAlign.Start)
-      if (this.configMessage.length > 0) {
-        Text(this.configMessage).fontSize(12).fontColor(this.colors().danger).maxLines(3)
-      }
-      Button(this.configBusy ? I18n.t('处理中…') : I18n.t('保存配置')).width('100%').height(48).fontSize(14)
-        .fontColor(this.colors().onAccent).backgroundColor(this.colors().accent).borderRadius(14)
-        .enabled(!this.configBusy && this.removingId === 0 &&
-          this.configCategories.includes(this.configCategory) && (!this.configSourceChanged() ||
-            this.configSourceDraft.token.length > 0 || this.configSourceRemove))
-        .onClick(() => this.saveAppConfig())
-      Button(this.removingId === this.configApp.id ? I18n.t('下架中…') : I18n.t('下架应用'))
-        .width('100%').height(44).fontSize(14).fontColor(this.colors().danger)
-        .backgroundColor(this.colors().dangerSoft).borderRadius(14)
-        .enabled(!this.configBusy && this.removingId === 0)
-        .onClick(() => this.removeMyApp(this.configApp))
-    }.alignItems(HorizontalAlign.Start).width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth }).padding(24)
-      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius)
-      .transition(TransitionEffect.translate({ y: 16 }))
-  }
-
-  @Builder
   private submitSheet() {
     Column({ space: 15 }) {
       Row() {
@@ -5198,8 +6454,8 @@ struct Index {
         .enabled(!this.submitBusy && this.submitUrl.trim().length > 0)
         .onClick(() => this.prepareSubmit())
       if (this.submitDraft.token.length > 0 && this.submitDraft.inspectionStatus === 'ready') {
-        Text(this.submitDraft.displayName).fontSize(17).fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().text).width('100%')
+        ListingPresentationEditor({ draft: this.submitPresentation, appId: this.submitDraft.existingAppId,
+          darkMode: this.darkMode, editable: !this.submitBusy && this.submitExisting !== Index.SUBMIT_STATE_OTHER })
         Text(this.submitDraft.supportsMultiSelect ? I18n.t('选择安装包（可多选）') : I18n.t('选择安装包')).fontSize(13).fontColor(this.colors().textSecondary).width('100%')
         Scroll() {
           Column({ space: 8 }) {
@@ -5249,7 +6505,8 @@ struct Index {
           (this.submitExisting === Index.SUBMIT_STATE_MINE ? I18n.t('确认更新已上架应用') : I18n.t('确认上架')))
           .width('100%').height(48).fontSize(14).fontWeight(FontWeight.Medium)
           .backgroundColor(this.colors().accent).fontColor(this.colors().onAccent).borderRadius(16)
-          .enabled(!this.submitBusy && this.submitAssets.length > 0 &&
+          .enabled(!this.submitBusy && this.submitAssets.length > 0 && !this.submitPresentation.processing &&
+            this.submitPresentation.name.trim().length > 0 &&
             this.submitCategory.length > 0 &&
             this.submitExisting !== Index.SUBMIT_STATE_OTHER)
           .onClick(() => this.confirmSubmit())
@@ -5274,6 +6531,101 @@ struct Index {
     }.width('100%').padding({ left: 4, right: 4 })
   }
 
+  private async refreshMineGitHub(): Promise<void> {
+    if (!this.signedIn || !PrivacyConsent.isBusinessAllowed() || this.mineGitHubChecking) return;
+    this.mineGitHubChecking = true;
+    const account = this.account;
+    const revision = this.mineGitHubRevision;
+    try {
+      const status = await new StoreClient(getContext(this) as common.UIAbilityContext).githubAssociationStatus(account);
+      if (this.signedIn && this.account.userId === account.userId && this.account.teamId === account.teamId &&
+        PrivacyConsent.isBusinessAllowed() && revision === this.mineGitHubRevision) {
+        this.mineGitHubLogin = status.login;
+        this.mineGitHubStatus = status.login ? 'linked' : (status.enabled ? 'unlinked' : '');
+      }
+    } catch (_) { /* Keep the last visible status when the store is unavailable. */ }
+    finally {
+      this.mineGitHubChecking = false;
+      if (revision !== this.mineGitHubRevision || this.account.userId !== account.userId ||
+        this.account.teamId !== account.teamId) {
+        if (this.currentTab === Index.TAB_MINE) this.refreshMineGitHub();
+      }
+    }
+  }
+
+  private async manageMineGitHub(): Promise<void> {
+    if (!this.signedIn || this.mineGitHubBusy || this.mineGitHubPhase === 'confirming') return;
+    const account = this.account;
+    this.mineGitHubBusy = true;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const client = new StoreClient(context);
+      const current = await client.githubAssociationStatus(account);
+      if (!this.signedIn || this.account !== account) return;
+      if (current.login) {
+        const result = await promptAction.showDialog({ title: I18n.t('已关联 GitHub'), message: '@' + current.login,
+          buttons: [{ text: I18n.t('关闭'), color: this.colors().text },
+            { text: I18n.t('解除关联'), color: this.colors().danger }] }).catch(() => undefined);
+        if (result?.index !== 1 || !this.signedIn || this.account !== account) return;
+        await client.unlinkGitHubAssociation(account);
+        if (this.account === account) {
+          this.mineGitHubLogin = '';
+          this.mineGitHubStatus = 'unlinked';
+          GitHubAssociationReturn.setPhase('');
+        }
+      } else if (current.enabled) {
+        await GitHubAssociationReturn.start(context, client, account);
+      } else {
+        promptAction.showToast({ message: I18n.t('GitHub 网页授权尚未配置') });
+      }
+    } catch (error) { promptAction.showToast({ message: errorText(error) }); }
+    finally { this.mineGitHubBusy = false; }
+  }
+
+  private async openRealNameVerification(): Promise<void> {
+    if (!this.signedIn) return;
+    this.pendingRealNameAccount = this.account.userId;
+    try {
+      await (getContext(this) as common.UIAbilityContext).startAbility({
+        action: 'ohos.want.action.viewData', entities: ['entity.system.browsable'],
+        uri: 'https://developer.huawei.com/consumer/cn/personalcenter/myInfo/personalInfo?uid=1d6bb8a9ba03400fa68445fd47e66a73'
+      });
+    } catch (_) {
+      this.pendingRealNameAccount = '';
+      promptAction.showToast({ message: I18n.t('无法打开链接') });
+    }
+  }
+
+  private onReturnFromVerification(): void {
+    if (!this.mineAccountForeground || !this.pendingRealNameAccount) return;
+    const account = this.account;
+    const requested = this.pendingRealNameAccount;
+    this.pendingRealNameAccount = '';
+    if (this.signedIn && account.userId === requested) {
+      ForegroundIdle.defer('index-realname-refresh', () => {
+        if (this.signedIn && this.account === account) {
+          this.refreshRestoredAccount(account, getContext(this) as common.UIAbilityContext, true);
+        }
+      });
+    }
+  }
+
+  @Builder
+  private mineAccountTag(icon: Resource, title: string, complete: boolean, huawei: boolean, action: () => void) {
+    Button({ type: ButtonType.Normal }) {
+      Row({ space: 5 }) {
+        Image(icon).width(13).height(13).fillColor(huawei ?
+          (this.darkMode ? '#FF899C' : '#B3213B') : this.colors().text)
+        Text(I18n.t(title)).fontSize(11).fontWeight(FontWeight.Medium).maxLines(1)
+          .fontColor(complete ? this.colors().success : this.colors().accent)
+      }.padding({ left: 8, right: 8 })
+    }.height(26).borderRadius(8).backgroundColor(complete ? this.colors().successSoft : this.colors().surface)
+      .border({ width: complete ? 0 : 0.5, color: this.colors().accentSoft, radius: 8 })
+      .responseRegion({ x: 0, y: -6, width: '100%', height: 38 })
+      .margin({ right: 6, bottom: 2 }).id(huawei ? 'developer-realname-action' : 'developer-github-tag')
+      .accessibilityText(I18n.t(title)).onClick(action)
+  }
+
   @Builder
   private mineAccountCard() {
     Column({ space: 14 }) {
@@ -5288,49 +6640,56 @@ struct Index {
         }.width(64).height(64).borderRadius(32)
           .backgroundColor('#B3' + this.colors().surface.substring(1))
           .border({ width: 1, color: '#99' + this.colors().surface.substring(1) })
+          .id('developer-profile-avatar')
         Column({ space: 7 }) {
-          Text(this.signedIn ? this.account.label : I18n.t('华为开发者账号'))
-            .fontSize(18).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
-            .maxLines(2).wordBreak(WordBreak.BREAK_ALL).width('100%')
-          Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
-            Text(this.accountReauthRequired ? I18n.t('登录状态需要重新核验') : this.sessionNotice.length > 0 ? this.sessionNotice :
-              (this.signedIn ? I18n.t('开发者身份已连接') : I18n.t('登录后即可上架和评价')))
-              .fontSize(12).fontColor(this.colors().textSecondary).margin({ right: 6 })
-            if (this.signedIn && this.account.realNameVerified !== undefined) {
-              Text(this.account.realNameVerified ? I18n.t('已实名') : I18n.t('未实名'))
-                .fontSize(11).fontWeight(FontWeight.Medium).maxLines(1)
-                .fontColor(this.account.realNameVerified ? this.colors().success : this.colors().textSecondary)
-                .backgroundColor(this.account.realNameVerified ? this.colors().successSoft : this.colors().surface)
-                .padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(5)
+          Row({ space: 6 }) {
+            Text(this.signedIn ? this.account.label : I18n.t('华为开发者账号'))
+              .fontSize(18).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+              .maxLines(2).wordBreak(WordBreak.BREAK_ALL).layoutWeight(1)
+            if (this.signedIn) {
+              Button({ type: ButtonType.Capsule }) {
+                Row({ space: 4 }) {
+                  SymbolGlyph($r('sys.symbol.arrow_right')).fontSize(13).fontColor([this.colors().textSecondary])
+                  Text(I18n.t('退出')).fontSize(12).fontWeight(FontWeight.Medium).fontColor(this.colors().textSecondary)
+                }
+              }.height(31).padding({ left: 10, right: 10 })
+                .backgroundColor('#D9' + this.colors().surface.substring(1))
+                .responseRegion({ x: 0, y: -6, width: '100%', height: 38 })
+                .accessibilityText(I18n.t('退出华为开发者账号')).onClick(() => this.confirmSignOut())
             }
           }.width('100%')
+          if (this.signedIn) {
+            Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+              this.mineAccountTag($r('app.media.huawei_mark'), this.account.realNameVerified === true ? '已实名' :
+                (this.account.realNameVerified === false ? '去实名' : '实名状态'),
+                this.account.realNameVerified === true, true, () => this.openRealNameVerification())
+              this.mineAccountTag($r('app.media.github_mark'), this.mineGitHubStatus === 'linked' ? '已关联' :
+                (this.mineGitHubStatus === 'unlinked' ? '关联 GitHub' : 'GitHub'),
+                this.mineGitHubStatus === 'linked', false, () => this.manageMineGitHub())
+            }.width('100%')
+          } else {
+            Text(I18n.t('登录后即可上架和评价')).fontSize(12).fontColor(this.colors().textSecondary)
+          }
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-        if (this.signedIn) {
-          Button({ type: ButtonType.Capsule }) {
-            Row({ space: 5 }) {
-              SymbolGlyph($r('sys.symbol.arrow_right')).fontSize(14).fontColor([this.colors().textSecondary])
-              Text(I18n.t('退出')).fontSize(12).fontWeight(FontWeight.Medium).fontColor(this.colors().textSecondary)
-            }.justifyContent(FlexAlign.Center)
-          }.height(40).padding({ left: 12, right: 12 })
-            .backgroundColor('#D9' + this.colors().surface.substring(1))
-            .border({ width: 0.5, color: '#99' + this.colors().surface.substring(1), radius: 20 })
-            .responseRegion({ x: 0, y: -2, width: '100%', height: 44 })
-            .accessibilityText(I18n.t('退出华为开发者账号')).onClick(() => this.confirmSignOut())
-        }
       }.width('100%')
+      if (this.signedIn && (this.accountReauthRequired || this.sessionNotice.length > 0)) {
+        Text(this.accountReauthRequired ? I18n.t('登录状态需要重新核验') : this.sessionNotice)
+          .fontSize(12).fontColor(this.colors().textSecondary).width('100%')
+      }
       if (this.loginMessage.length > 0) {
         Text(this.loginMessage).fontSize(12).fontColor(this.colors().textSecondary)
           .maxLines(3).width('100%')
       }
       if (!this.signedIn) {
+        HuaweiLoginSitePicker({ active: this.accountChecked && !this.loginBusy })
         Button(this.loginBusy ? I18n.t('等待浏览器授权…') : I18n.t('登录华为开发者账号'))
           .height(44).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
-          .borderRadius(14).enabled(!this.loginBusy).width('100%').onClick(() => this.login())
+          .borderRadius(14).enabled(this.accountChecked && !this.loginBusy).width('100%').onClick(() => this.login())
       }
     }.alignItems(HorizontalAlign.Start).padding({ left: 18, right: 18, top: 20, bottom: 20 })
       .width('100%').borderRadius(StoreLayout.heroRadius)
-      .linearGradient({ angle: 125, colors: [[this.colors().accentSoft, 0],
-        [this.colors().hero, 0.5], [this.colors().surface, 1]] })
+      .linearGradient({ angle: 125, colors: [[this.cardPaint(this.colors().accentSoft), 0],
+        [this.cardPaint(this.colors().hero), 0.5], [this.cardSurface(), 1]] })
       .border({ width: 1, color: '#99' + this.colors().surface.substring(1), radius: 24 })
   }
 
@@ -5420,7 +6779,31 @@ struct Index {
         Text(this.certMessage).fontSize(11).fontColor(this.colors().danger).maxLines(2).width('100%')
       }
     }.alignItems(HorizontalAlign.Start).padding(16).width('100%')
-      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+      .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
+  }
+
+  @Builder
+  private mineGitHubCard() {
+    Row({ space: 13 }) {
+      Stack({ alignContent: Alignment.Center }) {
+        Image($r('app.media.github_mark')).width(24).height(24).fillColor(this.colors().accent)
+      }.width(44).height(44).backgroundColor(this.colors().accentSoft).borderRadius(22)
+      Column({ space: 5 }) {
+        Text('GitHub').fontSize(16).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
+        Text(this.mineGitHubLogin ? '@' + this.mineGitHubLogin :
+          I18n.t(this.mineGitHubPhase === 'browser' ? '在 GitHub 完成授权后，点浏览器提示中的「打开」返回。' :
+            (this.mineGitHubPhase === 'failed' ? this.mineGitHubFailure : '绑定 GitHub，认领应用')))
+          .fontSize(12).fontColor(this.colors().textSecondary).maxLines(2)
+      }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+      if (this.mineGitHubBusy || this.mineGitHubPhase === 'confirming') {
+        LoadingProgress().width(20).height(20).color(this.colors().accent)
+      } else {
+        Button(I18n.t(this.mineGitHubLogin ? '已关联' : '关联 GitHub'), { type: ButtonType.Capsule })
+          .height(34).fontSize(12).fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft)
+          .onClick(() => this.manageMineGitHub())
+      }
+    }.padding(16).width('100%').backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
+      .id('mine-github-card')
   }
 
   @Builder
@@ -5436,7 +6819,7 @@ struct Index {
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
         SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(14).fontColor([this.colors().textTertiary])
       }.width('100%')
-    }.padding(16).width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+    }.padding(16).width('100%').backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
       .accessibilityText(I18n.t('本地 Profile，查看与管理保存的签名授权'))
       .onClick(() => this.animateOverlay(() => { this.showLocalProfiles = true; }))
   }
@@ -5485,7 +6868,7 @@ struct Index {
           Text(this.deviceMessage).fontSize(11).fontColor(this.colors().accent).width('100%')
         }
     }.alignItems(HorizontalAlign.Start).padding(16).width('100%')
-      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+      .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
   }
 
   @Builder
@@ -5532,7 +6915,7 @@ struct Index {
             else this.enableFixedPort();
           })
       }
-    }.padding(16).width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+    }.padding(16).width('100%').backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
       .id('mine-fixed-port-card')
   }
 
@@ -5664,6 +7047,7 @@ struct Index {
       Scroll(this.mineScroller) {
         Column({ space: 14 }) {
           this.mineAccountCard()
+          if (this.signedIn) this.mineGitHubCard()
           Column({ space: 10 }) {
             this.mineSectionHeading($r('sys.symbol.key'), I18n.t('签名材料'))
             this.mineCertificateCard()
@@ -5696,13 +7080,10 @@ struct Index {
       .bindToScrollable([this.mineScroller])
       .expandSafeArea([SafeAreaType.SYSTEM],[SafeAreaEdge.TOP,SafeAreaEdge.BOTTOM])
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM],[LayoutSafeAreaEdge.BOTTOM])
-      .width('100%').height('100%').backgroundColor(this.colors().bg).id('navigation-content-3')
+      .width('100%').height('100%').backgroundColor(this.navigationBackground()).id('navigation-content-3')
   }
 
-  /**
-   * 启动加载页：检查登录态期间显示，替代原来的「先闪一下登录页」。
-   * 只有确认需要登录时才切到 loginGate。
-   */
+  /** 在导航组件初始化前先绘制启动画面。 */
   @Builder
   private startupSplash() {
     Column({ space: 22 }) {
@@ -5711,7 +7092,6 @@ struct Index {
         Text(I18n.t('安装器')).fontSize(13).fontColor(this.colors().textTertiary).letterSpacing(4)
       }.alignItems(HorizontalAlign.Center)
       LoadingProgress().width(28).height(28).color(this.colors().accent)
-      Text(I18n.t('正在检查登录状态…')).fontSize(12).fontColor(this.colors().textTertiary)
     }.width('100%').height('100%').justifyContent(FlexAlign.Center)
       .backgroundColor(this.colors().bg)
   }
@@ -5756,50 +7136,6 @@ struct Index {
       Button(I18n.t('隐私声明'), { type: ButtonType.Normal })
         .fontSize(13).fontColor(this.colors().accent).backgroundColor(Color.Transparent)
         .id('privacy-consent-link').onClick(() => this.viewPrivacyStatement())
-    }.width('100%').height('100%').padding({ left: 28, right: 28 })
-      .justifyContent(FlexAlign.Center).backgroundColor(this.colors().bg)
-  }
-
-  /**
-   * 登录闸门：未登录时盖住整个应用。
-   *
-   * 安装链路必须用用户自己的 AGC 调试证书在本机重签，证书与设备授权
-   * 都挂在华为开发者账号下 —— 没登录进来的话，商店能看但一个也装不了，
-   * 不如直接挡在门口说清楚。
-   */
-  @Builder
-  private loginGate() {
-    Column({ space: 20 }) {
-      Column({ space: 8 }) {
-        Text(I18n.t('轻启·安装器')).fontSize(30).fontWeight(FontWeight.Bold)
-          .fontColor(this.colors().text)
-        Text(I18n.t('用你自己的证书，把 HarmonyOS 应用装到本机'))
-          .fontSize(13).fontColor(this.colors().textSecondary).textAlign(TextAlign.Center)
-      }.alignItems(HorizontalAlign.Center)
-
-      Column({ space: 10 }) {
-        Text(I18n.t('为什么必须先登录')).fontSize(15).fontWeight(FontWeight.Medium)
-          .fontColor(this.colors().text).width('100%')
-        Text(I18n.t('HarmonyOS 的安装包必须包含本机设备标识。安装时轻启会用你账号下的 ') +
-          I18n.t('AGC 调试证书与设备授权，在本机重新签名后再装到这台设备。') +
-          I18n.t('证书、设备授权与上架记录都绑定在华为开发者账号上。'))
-          .fontSize(12).fontColor(this.colors().textSecondary).lineHeight(19).width('100%')
-      }.alignItems(HorizontalAlign.Start).padding(18).width('100%')
-        .backgroundColor(this.colors().surface).borderRadius(18)
-
-      Column({ space: 10 }) {
-          Button(this.loginBusy ? I18n.t('等待浏览器授权…') : I18n.t('登录华为开发者账号'))
-            .height(48).width('100%').fontSize(15)
-            .backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
-            .borderRadius(14).enabled(!this.loginBusy)
-            .onClick(() => this.login())
-          if (this.loginMessage.length > 0) {
-            Text(this.loginMessage).fontSize(12).fontColor(this.colors().danger)
-              .textAlign(TextAlign.Center).maxLines(3).width('100%')
-          }
-        Text(I18n.t('登录会打开浏览器，完成后自动回到轻启'))
-          .fontSize(11).fontColor(this.colors().textTertiary)
-      }.width('100%')
     }.width('100%').height('100%').padding({ left: 28, right: 28 })
       .justifyContent(FlexAlign.Center).backgroundColor(this.colors().bg)
   }
@@ -5907,137 +7243,217 @@ struct Index {
   }
 
   @Builder
-  homeTabContents() {
+  private navigationItems() {
     // 每个 Tab 一对「线性 + 实心」系统符号：选中态既换形也换色。
     // 之前「发现」和「管理」共用 square_grid_2x2，且只给了 normal。
-    TabContent() { Stack() { if (this.discoveryReady) { this.discoverPage(); } if (!StoreMaterial.supported(this.materialMode)) { StoreTabBarBackdrop({ barWidth: this.fallbackBarWidth() }); } }.width('100%').height('100%') }
+    TabContent() {}
       .tabBar(BottomTabBarStyle.of({
         normal: new SymbolGlyphModifier($r('sys.symbol.compass_circle'))
-          .fontColor([this.navigationColor(0, false, true)]).fontSize(23).renderingStrategy(SymbolRenderingStrategy.SINGLE),
+          .fontColor([this.navigationColor(0, false, true)]).fontSize(24).renderingStrategy(SymbolRenderingStrategy.SINGLE),
         selected: new SymbolGlyphModifier($r('sys.symbol.compass_circle_fill'))
-          .fontColor([this.navigationColor(0, true, true)]).fontSize(23).renderingStrategy(SymbolRenderingStrategy.SINGLE)
-      }, I18n.t('发现')).iconStyle({ selectedColor: this.navigationColor(0, true, true), unselectedColor: this.navigationColor(0, false, true) })
+          .fontColor([this.navigationColor(0, true, true)]).fontSize(24).renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      }, I18n.t('首页')).iconStyle({ selectedColor: this.navigationColor(0, true, true), unselectedColor: this.navigationColor(0, false, true) })
         .id('bottom-tab-0').labelStyle({ selectedColor: this.navigationColor(0, true), unselectedColor: this.navigationColor(0, false) }))
-    TabContent() { Stack() { this.localPage(); if (!StoreMaterial.supported(this.materialMode)) { StoreTabBarBackdrop({ barWidth: this.fallbackBarWidth() }); } }.width('100%').height('100%') }
+    TabContent() {}
       .tabBar(BottomTabBarStyle.of({
         normal: new SymbolGlyphModifier($r('sys.symbol.folder'))
-          .fontColor([this.navigationColor(1, false, true)]).fontSize(23).renderingStrategy(SymbolRenderingStrategy.SINGLE),
+          .fontColor([this.navigationColor(1, false, true)]).fontSize(24).renderingStrategy(SymbolRenderingStrategy.SINGLE),
         selected: new SymbolGlyphModifier($r('sys.symbol.folder_fill'))
-          .fontColor([this.navigationColor(1, true, true)]).fontSize(23).renderingStrategy(SymbolRenderingStrategy.SINGLE)
+          .fontColor([this.navigationColor(1, true, true)]).fontSize(24).renderingStrategy(SymbolRenderingStrategy.SINGLE)
       }, I18n.t('本地')).iconStyle({ selectedColor: this.navigationColor(1, true, true), unselectedColor: this.navigationColor(1, false, true) })
         .id('bottom-tab-1').labelStyle({ selectedColor: this.navigationColor(1, true), unselectedColor: this.navigationColor(1, false) }))
-    TabContent() { Stack() { this.managePage(); if (!StoreMaterial.supported(this.materialMode)) { StoreTabBarBackdrop({ barWidth: this.fallbackBarWidth() }); } }.width('100%').height('100%') }
+    TabContent() {}
       .tabBar(BottomTabBarStyle.of({
         normal: new SymbolGlyphModifier($r('sys.symbol.square_stack_3d'))
-          .fontColor([this.navigationColor(2, false, true)]).fontSize(23).renderingStrategy(SymbolRenderingStrategy.SINGLE),
+          .fontColor([this.navigationColor(2, false, true)]).fontSize(24).renderingStrategy(SymbolRenderingStrategy.SINGLE),
         selected: new SymbolGlyphModifier($r('sys.symbol.square_stack_3d_fill'))
-          .fontColor([this.navigationColor(2, true, true)]).fontSize(23).renderingStrategy(SymbolRenderingStrategy.SINGLE)
+          .fontColor([this.navigationColor(2, true, true)]).fontSize(24).renderingStrategy(SymbolRenderingStrategy.SINGLE)
       }, I18n.t('管理')).iconStyle({ selectedColor: this.navigationColor(2, true, true), unselectedColor: this.navigationColor(2, false, true) })
         .id('bottom-tab-2').labelStyle({ selectedColor: this.navigationColor(2, true), unselectedColor: this.navigationColor(2, false) }))
-    TabContent() { Stack() { this.minePage(); if (!StoreMaterial.supported(this.materialMode)) { StoreTabBarBackdrop({ barWidth: this.fallbackBarWidth() }); } }.width('100%').height('100%') }
+    TabContent() {}
       .tabBar(BottomTabBarStyle.of({
         normal: new SymbolGlyphModifier($r('sys.symbol.person'))
-          .fontColor([this.navigationColor(3, false, true)]).fontSize(23).renderingStrategy(SymbolRenderingStrategy.SINGLE),
+          .fontColor([this.navigationColor(3, false, true)]).fontSize(24).renderingStrategy(SymbolRenderingStrategy.SINGLE),
         selected: new SymbolGlyphModifier($r('sys.symbol.person_fill'))
-          .fontColor([this.navigationColor(3, true, true)]).fontSize(23).renderingStrategy(SymbolRenderingStrategy.SINGLE)
+          .fontColor([this.navigationColor(3, true, true)]).fontSize(24).renderingStrategy(SymbolRenderingStrategy.SINGLE)
       }, I18n.t('我的')).iconStyle({ selectedColor: this.navigationColor(3, true, true), unselectedColor: this.navigationColor(3, false, true) })
         .id('bottom-tab-3').labelStyle({ selectedColor: this.navigationColor(3, true), unselectedColor: this.navigationColor(3, false) }))
   }
 
+  private navigationWidthTarget(): number {
+    return this.currentTab === Index.TAB_DISCOVER && this.homeChannel === 'apps' && this.discoverLayout === 'sidebar' ? 1 : 0;
+  }
+
+  private cancelNavigationWidthAnimation(): void {
+    const animation = this.navigationAnimator;
+    this.navigationAnimator = undefined;
+    animation?.cancel();
+  }
+
+  private syncNavigationWidth(): void {
+    this.showHomeNavigation();
+    this.cancelNavigationWidthAnimation();
+    const target = this.navigationWidthTarget();
+    if (target === 1 && this.pageVisible && this.discoverChromeReady) this.navigationHolding?.start();
+    else {
+      this.navigationHolding?.stop();
+      if (this.sidebarSwapAnimator !== undefined) this.settleSidebarSwap();
+    }
+    const begin = this.navigationCompactness;
+    if (!this.pageVisible || !this.discoverChromeReady || begin === target) {
+      this.navigationCompactness = target;
+      return;
+    }
+    // Interpolate the native width itself so icons and glass follow the same layout.
+    const animation = this.getUIContext().createAnimator({
+      begin: begin, end: target, duration: Math.max(100, 280 * Math.abs(target - begin)),
+      easing: 'cubic-bezier(0.25, 0.1, 0.25, 1)', delay: 0, fill: 'forwards', direction: 'normal', iterations: 1
+    });
+    this.navigationAnimator = animation;
+    animation.onFrame = (progress: number): void => {
+      if (this.navigationAnimator === animation) this.navigationCompactness = Math.min(1, Math.max(0, progress));
+    };
+    animation.onFinish = (): void => {
+      if (this.navigationAnimator !== animation) return;
+      this.navigationCompactness = target;
+      this.navigationAnimator = undefined;
+    };
+    animation.play();
+  }
+
   private fallbackBarWidth(): number {
-    return StoreLayout.navigationBarWidth(this.navigationFrameWidth || this.viewportWidth,
-      this.navigationFrameHeight || this.viewportHeight);
+    const width = this.navigationFrameWidth || this.viewportWidth;
+    const height = this.navigationFrameHeight || this.viewportHeight;
+    const full = StoreLayout.navigationBarWidth(width, height, false);
+    const compact = StoreLayout.navigationBarWidth(width, height, true);
+    return full + (compact - full) * this.navigationCompactness;
+  }
+
+  private setSidebarDock(view: SidebarInstallView, action?: () => void): void {
+    if (view.appId !== this.sidebarSelectedId) return;
+    this.sidebarDockAction = action;
+    this.sidebarDockView = action ? view : new SidebarInstallView();
+  }
+
+  private activeSidebarDockView(): SidebarInstallView {
+    return this.sidebarDockView.appId === this.sidebarSelectedId ? this.sidebarDockView : new SidebarInstallView();
+  }
+
+  private dockWidth(): number {
+    return this.fallbackBarWidth() + StoreLayout.dockExtraWidth(this.navigationCompactness);
+  }
+
+  private dockStart(): number {
+    const width = this.navigationFrameWidth || this.viewportWidth || 360;
+    return (width - this.dockWidth()) / 2;
   }
 
   @Builder
-  navigationTabs() {
-    if (deviceInfo.sdkApiVersion >= 26 && StoreMaterial.supported(this.materialMode)) {
-      Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
-        this.homeTabContents();
-      }
-      .id('bottom-navigation-root')
-      // Let the window compositor retain the page; forced list/card render groups
-      // rebuild together on foreground return and stall the opening animation.
-      // The moving embedded toolbar material must never enter the Tabs composition cache.
-      .onAppear(() => {
-        afterPaint(this.getUIContext(), () => { this.discoveryReady = true; });
-      })
-      .barMode(BarMode.Fixed)
-      .vertical(false)
-      .scrollable(false)
-      .animationDuration(0)
-      .barOverlap(true)
-      .barFloatingStyle({
-        // Transparent mask retains the system luminance sampling area without painting a bottom backdrop.
-        maskColor: '#00000000',
-        barWidth: { smallBarWidth: this.fallbackBarWidth(),
-          mediumBarWidth: this.fallbackBarWidth(), largeBarWidth: this.fallbackBarWidth() },
-        barSideMargin: 12,
-        barBottomMargin: StoreLayout.navigationBottomMargin,
-        systemMaterial: StoreMaterial.dock(this.materialMode, this.darkMode)
-      })
-      .onChange((index: number) => this.onTabChanged(index))
+  private navigationPages() {
+    Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
+      TabContent() { if (this.discoveryReady) { this.discoverPage() } }
+      TabContent() { this.localPage() }
+        .onWillShow(() => { LocalDeveloperMode.restore(getContext(this) as common.UIAbilityContext); })
+      TabContent() { this.managePage() }
+      TabContent() { this.minePage() }
+    }.barHeight(0, true).barMode(BarMode.Fixed)
+      .vertical(false).scrollable(false).animationDuration(0)
       .width('100%').height('100%')
+      .onAppear(() => { afterPaint(this.getUIContext(), () => { this.discoveryReady = true; }); })
       .onAreaChange((_previous: Area, current: Area) => {
         this.navigationFrameWidth = Number(current.width);
         this.navigationFrameHeight = Number(current.height);
       })
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
       .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
-    } else {
-      HdsTabs({ barPosition: BarPosition.End, index: this.currentTab }) {
-        this.homeTabContents();
+  }
+
+  @Builder
+  private navigationTabs() {
+    Stack() {
+      if (deviceInfo.sdkApiVersion >= 26 && StoreMaterial.supported(this.materialMode)) {
+        Tabs({ barPosition: BarPosition.End, index: this.currentTab }) {
+          this.navigationItems()
+        }.width('100%').height('100%').barHeight(StoreLayout.navigationHeight)
+          .borderRadius(StoreLayout.navigationHeight / 2).clip(true)
+          .barMode(BarMode.Fixed).vertical(false).scrollable(false).animationDuration(0).barOverlap(true)
+          .barFloatingStyle({
+            maskColor: '#00000000',
+            barWidth: { smallBarWidth: this.fallbackBarWidth(), mediumBarWidth: this.fallbackBarWidth(),
+              largeBarWidth: this.fallbackBarWidth() },
+            barSideMargin: 0, barBottomMargin: 0,
+            systemMaterial: StoreMaterial.dock(this.materialMode, this.darkMode)
+          })
+          .onChange((index: number) => this.onTabChanged(index))
+      } else {
+        StoreNavigationSurface({ darkMode: this.darkMode }).width('100%').height('100%')
+          .id('bottom-navigation-backdrop')
+        HdsTabs({ barPosition: BarPosition.End, index: this.currentTab }) {
+          this.navigationItems()
+        }.width('100%').height('100%').barHeight(StoreLayout.navigationHeight)
+          .borderRadius(StoreLayout.navigationHeight / 2).clip(true)
+          .barMode(BarMode.Fixed).vertical(false).scrollable(false).animationDuration(0).barOverlap(true)
+          .barFloatingStyle({
+            gradientMask: { maskColor: '#00000000' },
+            barWidth: { smallWidth: this.fallbackBarWidth(), mediumWidth: this.fallbackBarWidth(),
+              largeWidth: this.fallbackBarWidth() },
+            barSideMargin: 0, barBottomMargin: 0, barOpacity: 1,
+            systemMaterialEffect: {
+              materialType: MaterialPreferences.type(this.materialMode),
+              materialLevel: MaterialPreferences.level(this.materialMode)
+            }
+          })
+          .onChange((index: number) => this.onTabChanged(index))
       }
+    }.width(this.fallbackBarWidth()).height(StoreLayout.navigationHeight)
+      .borderRadius(StoreLayout.navigationHeight / 2)
+      .shadow({ radius: 12, color: this.darkMode ? '#70000000' : '#38344769', offsetX: 0, offsetY: 4 })
+      .position({ left: StoreLayout.dockNavigationX(this.navigationCompactness, this.discoverHoldingSide === 'left'), top: 0 })
+      .opacity(1 - this.homeNavigationProgress)
+      .visibility(this.homeNavigationCollapsed ? Visibility.Hidden : Visibility.Visible)
+      .accessibilityLevel(this.homeNavigationHidden ? 'no-hide-descendants' : 'auto')
       .id('bottom-navigation-root')
-      // Let the window compositor retain the page; forced list/card render groups
-      // rebuild together on foreground return and stall the opening animation.
-      // The moving embedded toolbar material must never enter the Tabs composition cache.
-      .onAppear(() => {
-        afterPaint(this.getUIContext(), () => { this.discoveryReady = true; });
-      })
-      .barMode(BarMode.Fixed)
-      .vertical(false)
-      .scrollable(false)
-      .animationDuration(0)
-      .barOverlap(true)
-      .barFloatingStyle({
-        // Older systems retain HDS material and a transparent bottom mask.
-        gradientMask: { maskColor: '#00000000' },
-        barWidth: { smallWidth: this.fallbackBarWidth(),
-          mediumWidth: this.fallbackBarWidth(), largeWidth: this.fallbackBarWidth() },
-        barSideMargin: 12,
-        // 与透明系统手势条保持距离，内容仍可绘制在其下方。
-        barBottomMargin: StoreLayout.navigationBottomMargin,
-        barOpacity: 1,
-        systemMaterialEffect: {
-          materialType: MaterialPreferences.type(this.materialMode),
-          materialLevel: MaterialPreferences.level(this.materialMode)
-        }
-      })
-      .onChange((index: number) => this.onTabChanged(index))
-      .width('100%').height('100%')
-      .onAreaChange((_previous: Area, current: Area) => {
-        this.navigationFrameWidth = Number(current.width);
-        this.navigationFrameHeight = Number(current.height);
-      })
-      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
-    }
+  }
+
+  @Builder
+  private bottomDock() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      // Under the bar while overlapping it, then visible as the extra slot opens.
+      if (this.navigationCompactness > 0 || this.navigationWidthTarget() === 1) {
+        SidebarInstallDock({ view: this.activeSidebarDockView(),
+          active: !this.showStartupNotice && this.navigationCompactness === 1 && this.navigationWidthTarget() === 1,
+          action: () => {
+            if (this.sidebarDockView.appId === this.sidebarSelectedId && this.navigationWidthTarget() === 1) {
+              this.sidebarDockAction?.();
+            }
+          } })
+          .position({ left: StoreLayout.dockInstallX(this.fallbackBarWidth(), this.navigationCompactness,
+            this.discoverHoldingSide === 'left', this.homeNavigationProgress), top: 0 })
+          .zIndex(this.navigationCompactness === 1 ? 1 : 0)
+          .opacity(this.navigationCompactness)
+          .scale({ x: 0.75 + 0.25 * this.navigationCompactness, y: 0.75 + 0.25 * this.navigationCompactness })
+      }
+      this.navigationTabs()
+    }.width(this.dockWidth()).height(StoreLayout.navigationHeight)
+      .position({ left: this.dockStart(), bottom: StoreLayout.navigationBottomMargin })
+      .hitTestBehavior(HitTestMode.None).id('bottom-dock-group')
+  }
+
+  private startupNoticeActive(): boolean {
+    return this.privacyAllowed && this.pageVisible && this.homeVisibility.visible && this.shellReady &&
+      this.accountChecked && !this.loginBusy && !this.showAccountPrompt && !this.showCertificatePrompt &&
+      !this.showReconnect && !this.showRenewal && !this.showSubmit &&
+      !this.showCertSheet && !this.showLocalProfiles && !this.showFixedPort && !this.showMultiDevice &&
+      !this.showCardActions && !this.taskDetailId && this.followingInformation === undefined;
   }
 
   build() {
     Stack({ alignContent: Alignment.Center }) {
     if (this.privacyAllowed) {
-    if (this.shellReady && this.accountChecked && this.signedIn) {
-    this.navigationTabs();
-    }
-    if (this.showAppConfig) {
-      Column() {
-        Scroll() { this.appConfigSheet() }
-          .width('100%').constraintSize({ maxHeight: this.sheetMaxHeight() })
-      }.width('100%').height('100%').justifyContent(FlexAlign.Center)
-        .backgroundColor(this.colors().scrim)
-        .transition(TransitionEffect.opacity(0))
+    if (this.shellReady) {
+    AppThemeBackground()
+    this.navigationPages();
+    this.bottomDock();
     }
     if (this.showCardActions) {
       Stack({ alignContent: Alignment.Center }) {
@@ -6117,18 +7533,15 @@ struct Index {
         onClose: () => this.animateOverlay(() => { this.showLocalProfiles = false; }) })
         .transition(TransitionEffect.opacity(0))
     }
-    // 最上层三态互斥：检查登录态时显示加载页，确认未登录才显示登录页。
-    // 之前把两者混在一个页面里，检查期间会先把登录页的标题和说明卡
-    // 画出来再跳走，看着就是「闪一下登录页」。
-    if (!this.shellReady || !this.accountChecked) {
+    if (!this.shellReady) {
       this.startupSplash()
-    } else if (!this.signedIn) {
-      this.loginGate()
     }
     HomeCertificatePrompt({ homeVisibility: this.homeVisibility, showing: this.showCertificatePrompt,
       dismissRequest: this.certificatePromptDismiss })
     HomeAccountPrompt({ homeVisibility: this.homeVisibility, showing: this.showAccountPrompt,
       dismissRequest: this.accountPromptDismiss })
+    StartupReleasePrompt({ active: this.startupNoticeActive(), dismissRequest: this.startupNoticeDismiss,
+      onShowing: (showing: boolean): void => { this.showStartupNotice = showing; } })
     } else {
       this.privacyGate()
     }

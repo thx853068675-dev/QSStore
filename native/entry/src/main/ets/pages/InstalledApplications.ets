@@ -1,3 +1,5 @@
+import { AppBackground } from '../data/AppBackgroundPreferences';
+import { AppThemeBackground } from '../components/AppThemeBackground';
 import { bundleManager, common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
 import { pasteboard } from '@kit.BasicServicesKit';
@@ -74,6 +76,7 @@ struct InstalledApplicationIcon {
 @Entry
 @Component
 struct InstalledApplicationsPage {
+  @StorageProp('appBackground') private themeState: AppBackground = new AppBackground();
   @StorageProp('darkMode') private darkMode: boolean = false;
   @StorageProp('windowWidth') private windowWidth: number = 0;
   @StorageProp('statusBarInset') private statusInset: number = 0;
@@ -92,6 +95,7 @@ struct InstalledApplicationsPage {
     (row: InstalledDeviceApp): string => row.bundleName,
     (row: InstalledDeviceApp): string => JSON.stringify(row));
   private colors(): Palette { return Palette.forMode(this.darkMode); }
+  private cardSurface(): string { return Palette.containerPaint(this.colors().surface, this.themeState.containerOpacity); }
   aboutToAppear(): void {
     InstalledApplications.cached(getContext(this) as common.UIAbilityContext).then((rows: InstalledDeviceApp[]) => {
       if (this.disposed) return; this.rows = rows; this.filter(); this.refresh();
@@ -143,6 +147,7 @@ struct InstalledApplicationsPage {
   }
   build() {
     Stack({ alignContent: Alignment.Top }) {
+      AppThemeBackground()
       List({ space: 10, scroller: this.list }) {
         ListItem() { Search({ placeholder: I18n.t('搜索应用名或包名') }).height(44)
           .backgroundColor(this.colors().surface).borderRadius(16).enablePreviewText(true)
@@ -159,7 +164,7 @@ struct InstalledApplicationsPage {
                 Text(row.bundleName).fontSize(11).fontColor(this.colors().textSecondary).maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
               }.layoutWeight(1).alignItems(HorizontalAlign.Start)
-            }.width('100%').padding(14).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+            }.width('100%').padding(14).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
               .onClick(() => this.copy(row.bundleName)).accessibilityText(row.displayName + I18n.t('，点按复制包名'))
           }.swipeAction({ end: { builder: () => { this.infoAction(row); }, actionAreaDistance: 76 }, edgeEffect: SwipeEdgeEffect.Spring })
         }, (row: InstalledDeviceApp) => this.source.key(row))

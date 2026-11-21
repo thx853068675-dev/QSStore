@@ -109,6 +109,16 @@ export class HdcDeviceBridge implements NativeDeviceBridge {
   static hasSessions():boolean{return HdcDeviceBridge.linked||HdcDeviceBridge.sessions.size>0;}
 
   /** Independent discovery lanes still notify background release when a native call finishes. */
+  /** Fixed, non-parameterized hilog operations used by AppGallery extraction. */
+  async grabCommand(mode:string):Promise<string>{
+    if(!await this.connected()) throw new Error(I18n.t('无线调试已断开，请先连接'));
+    return this.command(27,mode);
+  }
+
+  static async grabLog(context:common.UIAbilityContext,mode:string):Promise<string>{
+    return new HdcDeviceBridge(context).grabCommand(mode);
+  }
+
   static async discoveryCommand(context:common.UIAbilityContext,operation:number,parameter:string=''):Promise<string>{
     // Revoking consent must still be able to stop already-running native work.
     if(operation!==25&&!(operation===21&&parameter.startsWith('stop:')))PrivacyConsent.assertBusinessAllowed();

@@ -8,6 +8,8 @@ import { JobStore } from './JobStore';
 import { JobCancellation } from './JobCancellation';
 import { BackgroundInstallTask } from './BackgroundInstallTask';
 import { I18n } from '../data/I18n';
+import { InstallScheduling } from './InstallScheduling';
+import { InstallResourceQueue } from './InstallResourceQueue';
 
 /**
  * 同一安装任务的唯一互斥点。
@@ -20,6 +22,8 @@ import { I18n } from '../data/I18n';
  * 页面只负责调用，不再自己充当锁。
  */
 export class JobScheduler {
+  private static resources: InstallResourceQueue = new InstallResourceQueue();
+  private static resourceWaiting: Set<string> = new Set();
   private static lanes: Map<string, Promise<void>> = new Map();
   private static slots: number = 0;
   private static waiters: Array<() => void> = [];
@@ -61,6 +65,7 @@ export class JobScheduler {
     };
     if (running) JobScheduler.cleanup.set(job.id, clean);
     await marking;
+    JobScheduler.resources.cancel(job.id);
     JobScheduler.cancelWaiters.get(job.id)?.();
     await store.stopTransfer(context, job);
     if (!running) {
@@ -110,7 +115,7 @@ export class JobScheduler {
 
   /** 超时结束界面等待；互斥一直保留到实际执行退出。 */
   static async runExclusive<T>(jobId: string, body: () => Promise<T>,
-    timeoutMs: number = JobScheduler.DEFAULT_TIMEOUT_MS, lane: string = 'local'): Promise<T> {
+    timeoutMs: number = JobScheduler.DEFAULT_TIMEOUT_MS, lane: string = 'local', legacySlot: boolean = true): Promise<T> {
     JobStore.setExecutionGuard?.((id:string)=>JobScheduler.isRunning(id));
     if (JobScheduler.reserved.has(jobId) || JobScheduler.inFlight.has(jobId)) {
       throw new Error(JobScheduler.stillFinishing(jobId) ?
@@ -118,11 +123,11 @@ export class JobScheduler {
     }
     const previous = JobScheduler.lanes.get(lane);
     JobScheduler.reserved.add(jobId);
-        let release: () => void = () => {};
+    let release: () => void = () => {};
     const tail = new Promise<void>((resolve: () => void) => { release = resolve; });
     JobScheduler.lanes.set(lane, tail);
     if (previous) await previous;
-    const permit=JobScheduler.acquireSlot();
+    const permit=legacySlot ? JobScheduler.acquireSlot() : undefined;
     if (permit) await permit;
     JobScheduler.reserved.delete(jobId);
     JobScheduler.inFlight.add(jobId);
@@ -144,12 +149,15 @@ export class JobScheduler {
       JobScheduler.inFlight.delete(jobId);
       JobScheduler.timedOut.delete(jobId);
       JobScheduler.cancelWaiters.delete(jobId);
+      JobScheduler.resourceWaiting.delete(jobId);
+      InstallTaskState.setWaiting?.(jobId, '');
       JobCancellation.clear(jobId);
       InstallTaskState.setRunning(jobId, false);
       // 超时或取消只结束界面等待，保活一直保留到真实执行和残留清理退出。
       try { await BackgroundInstallTask.release(jobId); }
       finally {
-        JobScheduler.releaseSlot(); release();
+        if (legacySlot) JobScheduler.releaseSlot();
+        release();
         if (JobScheduler.lanes.get(lane) === tail) JobScheduler.lanes.delete(lane);
         JobScheduler.requestQueue();
       }
@@ -163,7 +171,7 @@ export class JobScheduler {
         const elapsed = Math.max(0, now - lastTick);
         lastTick = now;
         // 挂起后所有定时器会在回前台时集中触发；不能先超时再去读取已完成的下载。
-        if (elapsed < 5000) remaining -= elapsed;
+        if (elapsed < 5000 && !JobScheduler.resourceWaiting.has(jobId)) remaining -= elapsed;
         if (remaining > 0) {
           timer = setTimeout(tick, Math.min(1000, remaining));
           return;
@@ -196,5 +204,34 @@ export class JobScheduler {
    */
   static runInstall<T>(jobId: string, body: () => Promise<T>, lane: string = 'local'): Promise<T> {
     return JobScheduler.runExclusive(jobId, body, JobScheduler.INSTALL_TIMEOUT_MS, lane);
+  }
+
+  /** Job ownership survives every phase; downloads consume no device or signing permit. */
+  static runPipeline<T>(job: InstallJob, body: () => Promise<T>): Promise<T> {
+    return JobScheduler.runExclusive(job.id, () => JobScheduler.resource(job,
+      'flow:' + InstallScheduling.lane(job), 1, () => JobScheduler.resource(job,
+        'flows:' + InstallScheduling.source(job), 3, body, I18n.t('等待执行资源')),
+      I18n.t('等待前一任务')), JobScheduler.DOWNLOAD_TIMEOUT_MS + JobScheduler.INSTALL_TIMEOUT_MS,
+    'pipeline:' + job.id, false);
+  }
+
+  static async resource<T>(job: InstallJob, key: string, capacity: number,
+    body: () => Promise<T>, label: string): Promise<T> {
+    JobCancellation.assertActive(job.id);
+    let release: (() => void) | undefined;
+    try {
+      release = await JobScheduler.resources.acquire(key, job.id, InstallScheduling.local(job), capacity, () => {
+        JobScheduler.resourceWaiting.add(job.id);
+        InstallTaskState.setWaiting?.(job.id, label);
+      });
+      JobScheduler.resourceWaiting.delete(job.id);
+      InstallTaskState.setWaiting?.(job.id, '');
+      JobCancellation.assertActive(job.id);
+      return await body();
+    } finally {
+      JobScheduler.resourceWaiting.delete(job.id);
+      InstallTaskState.setWaiting?.(job.id, '');
+      release?.();
+    }
   }
 }

@@ -4,6 +4,7 @@ import { motion } from '@kit.MultimodalAwarenessKit';
 import { Palette } from '../theme/Palette';
 import { DiscoverMotion } from './DiscoverHeader';
 import { StoreMaterial } from '../theme/StoreMaterial';
+import { StoreImmersiveAction } from '../theme/StoreDesign';
 import { I18n } from '../data/I18n';
 
 /** Scroll thresholds update only this overlay, not the catalog's card tree. */
@@ -34,6 +35,7 @@ export struct DiscoverTopOverlay {
 /** 系统握持事件驱动布局；放桌上或双手握持时保留位置，避免按钮来回跳动。 */
 export class HoldingSide {
   left: boolean = false;
+  private hasSide: boolean = false;
   private subscribed: boolean = false;
   private changed: (left: boolean) => void;
   private callback: (status: motion.HoldingHandStatus) => void;
@@ -48,8 +50,9 @@ export class HoldingSide {
   }
 
   private setSide(left: boolean): void {
-    if (left === this.left) return;
+    if (this.hasSide && left === this.left) return;
     this.left = left;
+    this.hasSide = true;
     this.changed(left);
   }
 
@@ -119,48 +122,24 @@ export struct DiscoverTopAction {
   }
 
   @Builder
-  private immersiveAction() {
+  private floatingAction(immersive: boolean) {
     Button({ type: ButtonType.Circle }) { this.arrow() }
       .width(48).height(48).id('discover-back-to-top').accessibilityText(I18n.t('回到顶部'))
-      .backgroundColor(Color.Transparent)
+      .backgroundBlurStyle(immersive ? BlurStyle.NONE : StoreMaterial.blurStyle(this.materialMode), {
+        colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT })
+      .backgroundColor(immersive ? Color.Transparent : StoreMaterial.fallbackFill(this.darkMode))
+      .border({ width: immersive ? 0 : 0.5, color: Palette.forMode(this.darkMode).border, radius: 24 })
+      .shadow(immersive ? undefined : ShadowStyle.OUTER_DEFAULT_SM)
       .onClick(() => this.action())
   }
 
   build() {
     Row() {
-      if (StoreMaterial.supported(this.materialMode)) {
-        // Ordinary Button material only works in navigation/tab bars on API 26.
-        // Popup supports system material throughout the page. A nonmodal,
-        // arrowless circular popup supplies the native floating backplate.
-        Stack() {
-        Column() {}.width(48).height(48)
-          .bindPopup(this.popupReady&&this.active&&!this.routeTransitioning, { builder: this.immersiveAction, width: 48, radius: 24,
-            placement: Placement.Top, targetSpace: 0, offset: { x: 0, y: 48 },
-            enableArrow: false, autoCancel: false, focusable: false, mask: false,
-            transition: TransitionEffect.IDENTITY,
-            onWillDismiss: (action: DismissPopupAction) => {
-              if (action.reason === DismissReason.PRESS_BACK && this.active && !this.routeTransitioning) this.backAction();
-            },
-            systemMaterial: StoreMaterial.glass(this.materialMode, this.darkMode) })
-        if (this.active && !this.routeTransitioning && !this.popupReady) {
-          Button({ type: ButtonType.Circle }) { this.arrow() }
-            .width(48).height(48).id('discover-back-to-top-preview').accessibilityText(I18n.t('回到顶部'))
-            .backgroundColor(Palette.forMode(this.darkMode).fill)
-            .onClick(() => this.action())
-        }
-        }.width(48).height(48)
-      } else {
-        // 旧系统尚无组件级 ImmersiveMaterial，使用系统毛玻璃保持形态与可读性。
-        Button({ type: ButtonType.Circle }) { this.arrow() }
-          .width(48).height(48).id('discover-back-to-top').accessibilityText(I18n.t('回到顶部'))
-          .backgroundColor(Color.Transparent)
-          .backgroundBlurStyle(StoreMaterial.blurStyle(this.materialMode), {
-            colorMode: this.darkMode ? ThemeColorMode.DARK : ThemeColorMode.LIGHT })
-          .backgroundColor(StoreMaterial.fallbackFill(this.darkMode))
-          .border({ width: 0.5, color: Palette.forMode(this.darkMode).border, radius: 24 })
-          .shadow(ShadowStyle.OUTER_DEFAULT_SM)
-          .onClick(() => this.action())
-      }
+      StoreImmersiveAction({ visible: this.active && !this.routeTransitioning,
+        suspendPopup: !this.popupReady, colored: false, contentDrawsFallback: true,
+        controlWidth: 48, controlHeight: 48, controlRadius: 24, followsTarget: true,
+        backAction: this.backAction, content: (immersive: boolean): void => this.floatingAction(immersive) })
+        .width(48).height(48)
     }.width('100%').height(48).padding({ left: this.inset, right: this.inset })
       .visibility(this.active && !this.routeTransitioning ? Visibility.Visible : Visibility.Hidden)
       .justifyContent(this.leftHand ? FlexAlign.Start : FlexAlign.End)

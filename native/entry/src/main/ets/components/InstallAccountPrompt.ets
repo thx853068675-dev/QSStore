@@ -23,6 +23,7 @@ export struct InstallAccountPrompt {
   private jobId: string = '';
   private displayedJob: string = '';
   private disposed: boolean = false;
+  private sessionRequest(): boolean { return InstallAccountRecovery.isSession(this.jobId); }
   private colors(): Palette { return Palette.forMode(this.darkMode); }
   aboutToAppear(): void {
     this.disposed = false;
@@ -48,8 +49,10 @@ export struct InstallAccountPrompt {
     this.busy = true; this.message = I18n.t('请在浏览器中完成华为开发者账号登录');
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      const account = await DevEcoLogin.login(context);
+      const original = scope ? await AccountSession.load(context) : undefined;
+      const account = await DevEcoLogin.login(context, original?.site);
       PrivacyConsent.assertBusinessAllowed();
+      if (!InstallAccountRecovery.isRequested(id)) return;
       if (scope && scope !== JSON.stringify([account.userId, account.teamId])) {
         throw new Error(I18n.t('请登录原华为开发者账号，再继续此安装任务'));
       }
@@ -59,16 +62,22 @@ export struct InstallAccountPrompt {
           throw new Error(I18n.t('当前账号已改变，请从安装队列重新发起'));
         }
       }
-      const store = await JobStore.open(context);
-      const job = await store.get(id);
-      if (!job || job.stage !== InstallStage.WAITING_ACCOUNT) throw new Error(I18n.t('原安装任务已取消或状态已改变'));
-      PrivacyConsent.assertBusinessAllowed();
-      await AccountSession.save(context, account);
-      AppStorage.setOrCreate('accountReauthRequired', false);
-      job.stage = InstallStage.QUEUED; job.lastError = '';
-      await store.save(job);
-      InstallAccountRecovery.clear(id);
-      InstallCoordinator.run(context, id).catch(() => {});
+      if (InstallAccountRecovery.isSession(id)) {
+        PrivacyConsent.assertBusinessAllowed();
+        await AccountSession.save(context, account);
+        InstallAccountRecovery.resolved();
+        InstallCoordinator.conditionReady(context, InstallStage.WAITING_ACCOUNT).catch(() => {});
+      } else {
+        const store = await JobStore.open(context);
+        const job = await store.get(id);
+        if (!job || job.stage !== InstallStage.WAITING_ACCOUNT) throw new Error(I18n.t('原安装任务已取消或状态已改变'));
+        PrivacyConsent.assertBusinessAllowed();
+        await AccountSession.save(context, account);
+        job.stage = InstallStage.QUEUED; job.lastError = '';
+        await store.save(job);
+        InstallAccountRecovery.resolved();
+        InstallCoordinator.run(context, id).catch(() => {});
+      }
     } catch (error) { if (!this.disposed && InstallAccountRecovery.isRequested(id)) this.message = errorText(error); }
     finally { if (!this.disposed) this.busy = false; }
   }
@@ -81,10 +90,12 @@ export struct InstallAccountPrompt {
             Text(I18n.t('重新登录开发者账号')).fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1)
             StoreIconButton({ label: I18n.t('关闭'), active: !this.busy, action: () => this.close() })
           }.width('100%')
-          Text(I18n.t('华为登录状态需要重新核验。安装进度已保留，登录原账号后继续安装。'))
+          Text(this.sessionRequest() ? I18n.t('华为账号信息不完整或登录已失效，请重新登录当前开发者账号。本机证书和 Profile 已保留。') :
+            I18n.t('华为登录状态需要重新核验。安装进度已保留，登录原账号后继续安装。'))
             .fontSize(13).fontColor(this.colors().textSecondary).width('100%')
           if (this.message) { Text(this.message).fontSize(12).fontColor(this.colors().textSecondary).width('100%') }
-          Button(this.busy ? I18n.t('等待浏览器授权…') : I18n.t('登录并继续'))
+          Button(this.busy ? I18n.t('等待浏览器授权…') : this.sessionRequest() ? I18n.t('重新登录') : I18n.t('登录并继续'))
+            .id('account-reauth-login')
             .width('100%').height(46).fontColor(this.colors().onAccent).backgroundColor(this.colors().accent)
             .enabled(!this.busy).onClick(() => this.login())
         }.width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth }).padding(22)

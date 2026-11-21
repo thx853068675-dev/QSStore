@@ -17,8 +17,9 @@ import { JobScheduler } from './JobScheduler';
 import { LocalBundles } from './LocalBundles';
 import { PrivacyConsent } from '../data/PrivacyConsent';
 import { I18n } from '../data/I18n';
+import { InstallScheduling } from './InstallScheduling';
 
-/** Process-owned FIFO per device. Different devices execute concurrently. */
+/** Separate per-device local/store FIFOs; scarce resources are acquired per phase. */
 export class InstallCoordinator {
   private static context: common.UIAbilityContext | undefined;
 
@@ -127,15 +128,21 @@ export class InstallCoordinator {
       const store=await JobStore.open(context),account=await AccountService.current(context);
       const rows=await store.listAll(true);
       if(!PrivacyConsent.isBusinessAllowed()||InstallCoordinator.submissions>0)return;
-      const key=(job:InstallJob):string=>job.installTarget?DeviceInstallTarget.parse(job.installTarget).key:'local';
-      const busy=new Set(rows.filter((job)=>InstallCoordinator.requests.has(job.id)||JobScheduler.isRunning(job.id)).map(key));
+      const active=rows.filter((job)=>InstallCoordinator.requests.has(job.id)||JobScheduler.isRunning(job.id));
+      const busy=new Set(active.map((job:InstallJob)=>InstallScheduling.lane(job)));
       const queued=rows.filter((job)=>job.stage===InstallStage.QUEUED&&!InstallCoordinator.requests.has(job.id)&&
         !JobScheduler.isRunning(job.id)&&(job.appId>0||job.sourceUrl==='local')&&
         (account!==undefined||LocalBundles.isSelfBundle(job.catalogBundleName||job.bundleName)))
-        .sort((a,b)=>(a.stageHistory[0]?.at??a.updatedAt)-(b.stageHistory[0]?.at??b.updatedAt));
+        .sort((a,b)=>Number(InstallScheduling.local(b))-Number(InstallScheduling.local(a))||
+          InstallScheduling.enqueuedAt(a)-InstallScheduling.enqueuedAt(b));
       const selected=new Set<string>();
-      const heads=queued.filter((job)=>{const device=key(job);if(busy.has(device)||selected.has(device))return false;selected.add(device);return true;})
-        .slice(0,Math.max(0,3-busy.size));
+      let local=active.filter((job:InstallJob)=>InstallScheduling.local(job)).length;
+      let storeCount=active.length-local;
+      const heads=queued.filter((job)=>{
+        const lane=InstallScheduling.lane(job),interactive=InstallScheduling.local(job);
+        if(busy.has(lane)||selected.has(lane)||(interactive?local:storeCount)>=3)return false;
+        selected.add(lane);if(interactive)local++;else storeCount++;return true;
+      });
       // Every settling lane wakes the pump. A slow peer never holds the other lanes.
       for(const job of heads)InstallCoordinator.run(context,job.id).catch(()=>{});
     }finally{

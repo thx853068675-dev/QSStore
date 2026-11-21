@@ -103,7 +103,7 @@ test('ZIP rewrite rejects traversal and leaves no partial output',async()=>{
 test('a failed re-edit cannot export the previous output; the original stays intact',async()=>{
   const p=fixture('retry','.hap'),row=new editor.EditablePackage();row.path=p;row.filename='retry.hap';row.identity=await archive.PackageArchive.inspect(p);
   const original=fs.readFileSync(p),previous=await editor.PackageEditor.edit(row,'第一次修改','');assert.equal(fs.existsSync(previous),true);
-  await assert.rejects(editor.PackageEditor.edit(row,'x'.repeat(65),''));
+  await assert.rejects(editor.PackageEditor.edit(row,'x'.repeat(81),''));
   assert.equal(row.editedPath,'');assert.equal(fs.existsSync(previous),false);assert.deepEqual(fs.readFileSync(p),original);
   await assert.rejects(editor.PackageEditor.saveMany({},[row]));archive.PackageArchive.release(p);
 });

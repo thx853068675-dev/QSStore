@@ -29,7 +29,7 @@ const code = ts.transpileModule(`class Index {
   static STARRED_MIN_STARS = 100;
   ${['catalogHasMore', 'loadMoreApps', 'prefetchCatalog', 'loadApps', 'pullRefreshCatalog', 'loadAppIcon', 'loadCatalogIcons', 'isCurrentCatalogIcon', 'iconFor',
     'latestAssets', 'installedAssets', 'assetForBundle', 'refreshCatalogInstallState', 'runCatalogStateRefreshes', 'readCatalogInstallState', 'cancelResumeMaintenance', 'reconcileCatalogInstallState', 'confirmCatalogVersionsViaDevice', 'runCatalogVersionProbes', 'waitForRefreshConnection', 'completeRefreshConnection', 'openReconnectSettings', 'onPageHide', 'animateOverlay', 'reconnect', 'applyDetectedCatalogVersion', 'commitCatalogVersions',
-    'displayApps', 'featuredTier', 'featuredColors', 'openDiscoverySearch', 'selectDiscoveryCategory', 'resetCatalogFilter', 'selectDiscoverySort', 'applySearch']
+    'displayApps', 'featuredTier', 'featuredColors', 'selectDiscoveryCategory', 'resetCatalogFilter', 'selectDiscoverySort', 'applySearch']
     .map(method).join('\n')}
 }; globalThis.Page = Index;`, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
 function deferred() {
@@ -146,11 +146,13 @@ function fixture(clock) {
   f2.deviceVersions = {};
   f2.knownBundles = [];
   const sortDirections = new Map();
-  const sandbox = { PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent, ...sortLogic, DiscoverSortPreferences: { directionFor: key => sortDirections.get(key) || 'desc',
+  const sandbox = { I18n:{t:s=>s}, UpdatePushSync:{observeCatalog(){},schedule(){}}, PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent, ...sortLogic, DiscoverSortPreferences: { directionFor: key => sortDirections.get(key) || 'desc',
     save: async (_, key, direction) => { sortDirections.set(key, direction); } }, AppStorage: { setOrCreate() {} }, ...paging, ReleaseChannelRegistry: { apply: app => app, restore: async () => {}, refreshTargets: async () => {} }, ForegroundIdle: { wait: async () => {}, promote() {}, cancel() {}, defer: (key, fn) => f.defer ? f.defer(key, fn) : setTimeout(fn, 0) }, VersionCacheEntry: class {}, InstalledBundleState: class { versionCode = -1; versionName = ''; }, setTimeout: clock?.setTimeout ?? setTimeout, clearTimeout: clock?.clearTimeout ?? clearTimeout, console, Curve: { EaseOut: 'ease-out' },
     InstallReconnect: { clear() {}, deactivate() {} }, InstallConfirmation: { deactivate() {} }, InstallCoordinator: { conditionReady() {} }, InstallStage: { WAITING_DEVICE: 'waiting-device' },
     FixedDebugPort: { wake() { f.fixedPortWakes++; } },
     StoreClient: class {
+      static currentScope(){return 'ordinary';}
+      static beginRefresh(){}
       listApps(number, size, sort, query, category, forceRefresh, direction, snapshot, stablePages) {
         const d = deferred(); requests.push({ ...d, number, query, sort, category, forceRefresh, direction, snapshot, stablePages }); return d.promise;
       }
@@ -183,13 +185,13 @@ function fixture(clock) {
   vm.runInNewContext(code, sandbox);
   sandbox.Page.REFRESH_MIN_VISIBLE_MS = 20;
   const ui = new sandbox.Page();
-  Object.assign(ui, { homeVisibility: { visible: true }, managementRowsTimer: -1, resumeMaintenancePending: false, catalogStatePending: false, catalogStateRescan: false, discoverSort: 'stars', discoverDirection: 'desc', catalogSnapshot: '', catalogToken: 0, catalogFilterTimer: -1, activeQuery: '', activeCategory: '', apps: [], appIcons: [], catalogIconFlights: new Map(),
+  Object.assign(ui, { catalogScope:'ordinary',collectionsScope:'ordinary',updateCatalogScope:'ordinary',homeVisibility: { visible: true }, managementRowsTimer: -1, resumeMaintenancePending: false, catalogStatePending: false, catalogStateRescan: false, discoverSort: 'stars', discoverDirection: 'desc', catalogSnapshot: '', catalogToken: 0, catalogFilterTimer: -1, activeQuery: '', activeCategory: '', apps: [], appIcons: [], collections:{apps:()=>[]}, collectionEntries:[], catalogIconFlights: new Map(),
     catalogLoading: false, catalogPage: 0, catalogTotal: 0, catalogMoreBusy: false, catalogMoreError: '',
     catalogRefreshing: false, catalogRefreshBusy: false, catalogError: '',
     getUIContext: () => ({ animateTo: (_options, change) => change() }),
-    installedDisplay: new Map(), installedVersions: new Map(), installedJobs: [], catalogProbeBusy: false, catalogProbeNames: [], catalogProbePending: [], updateCatalogReady: false, updateInstallScanPrompt() {}, backToDiscoverTop() {}, refreshCatalogInstallState() {},
+    installedDisplay: new Map(), installedVersions: new Map(), installedJobs: [], catalogProbeBusy: false, catalogProbeNames: [], catalogProbePending: [], updateCatalogReady: false, updateInstallScanPrompt() {}, backToDiscoverTop() {}, refreshCatalogInstallState: async () => {},
     updateApps() { return this.apps; }, syncDetectedInstalled() {}, reconcileDetectedJobs: async () => {}, loadUpdateCatalog() {}, checkInstalledUpdates() {},
-    refreshCatalogInstallState() {} });
+    refreshCatalogInstallState: async () => {} });
   Object.assign(f, f2);
   // sandbox 是在合并之前建的，这里把设备/存储适配器补进去
   sandbox.LocalBundles = f.localBundles;
@@ -255,19 +257,6 @@ test('older network rejection cannot replace a successful search with an error',
   f.requests[1].resolve(page([2])); await latest;
   f.requests[0].reject(Error('old timeout')); await old;
   assert.equal(ui.catalogError, ''); assert.equal(ui.apps[0].id, 2); assert.equal(ui.catalogTotal, 1);
-});
-test('opening search clears the category and preserves the current query without duplicate requests', async () => {
-  const clock=filterClock(),f=fixture(clock),ui=f.ui;
-  ui.activeQuery='Kazumi';ui.searchText='Kazumi';ui.activeCategory='影音';ui.categoriesExpanded=true;
-  let returnedToTop=0;ui.backToDiscoverTop=()=>returnedToTop++;
-  ui.openDiscoverySearch();
-  clock.flush();
-  assert.equal(ui.categoriesExpanded,false);assert.equal(ui.activeCategory,'');
-  assert.equal(ui.activeQuery,'Kazumi');assert.equal(ui.searchText,'Kazumi');
-  assert.equal(returnedToTop,1);assert.equal(f.requests.length,1);
-  assert.equal(f.requests[0].category,'');assert.equal(f.requests[0].query,'Kazumi');
-  f.requests[0].resolve(page([1]));await tick();
-  ui.openDiscoverySearch();assert.equal(f.requests.length,1);
 });
 test('late icon download cannot overwrite search metadata, icons or first-page cache', async () => {
   const f = fixture(), ui = f.ui, icon = deferred();
@@ -538,32 +527,6 @@ test('featured card thresholds cover hundreds, thousands, and ten thousands', ()
   assert.notEqual(ui.featuredColors(1000)[0][0], ui.featuredColors(10000)[0][0]);
 });
 
-test('pull refresh waits for device recognition but leaves icon downloads in the background', async () => {
-  const f = fixture(), ui = f.ui, icon = deferred(), device = deferred();
-  f.localVersion = -1;
-  f.icon = () => icon.promise;
-  f.bridgeClass.prototype.installedBundleVersions = () => device.promise;
-  delete ui.refreshCatalogInstallState; // execute the production dispatcher
-  ui.updateInstallScanPrompt = () => {};
-  const run = ui.pullRefreshCatalog();
-  f.requests[0].resolve(page([{ id: 1, latestAsset: { bundleName: 'app.one' } }]));
-  await tick();
-  assert.equal(ui.catalogRefreshing, true);
-  assert.equal(ui.catalogPage, 1);
-  assert.equal(ui.catalogTotal, 1);
-  assert.equal(ui.catalogProbeBusy, true);
-  assert.equal(ui.appIcons.length, 0);
-  device.resolve(new Map([['app.one', 123]]));
-  await run;
-  assert.equal(ui.catalogRefreshing, false);
-  assert.equal(ui.catalogProbeBusy, false);
-  assert.equal(ui.appIcons.length, 0);
-  icon.resolve(new ArrayBuffer(4)); await tick();
-  assert.equal(ui.appIcons.length, 1);
-  assert.equal(ui.installedVersions.get(1), 123);
-  assert.equal(f.savedIcons[0][0].id, '1');
-});
-
 test('complete management metadata sync is deferred until after refresh, and does not hold its spinner', async () => {
   const f = fixture(), ui = f.ui, background = deferred(), work = [];
   ui.pageVisible = true; f.defer = (key, run) => work.push({ key, run });
@@ -649,100 +612,22 @@ test('old icon revisions cannot replace a new icon after a background download f
   assert.ok(f.savedIcons.flat().every(icon => icon.rev === 'rev-2'));
 });
 
-test('pull refresh joins an existing scan and remains visible until new packages are checked', async () => {
-  const f = fixture(), ui = f.ui, batches = [];
-  f.localVersion = -1;
-  delete ui.refreshCatalogInstallState;
-  f.bridgeClass.prototype.installedBundleVersions = names => {
-    const work = deferred(); batches.push({ names: [...names], ...work }); return work.promise;
-  };
-  const existing = ui.confirmCatalogVersionsViaDevice(['app.one']);
-  const pull = ui.pullRefreshCatalog();
-  f.requests[0].resolve(page([
-    { id: 1, latestAsset: { bundleName: 'app.one' } },
-    { id: 2, latestAsset: { bundleName: 'app.two' } }
-  ]));
-  await tick();
-  assert.equal(ui.catalogRefreshing, true);
-  assert.equal(batches.length, 1);
-  batches[0].resolve(new Map([['app.one', 123]])); await tick();
-  assert.equal(ui.catalogRefreshing, true);
-  assert.deepEqual(batches[1].names, ['app.two']);
-  batches[1].resolve(new Map([['app.two', 456]]));
-  await Promise.all([existing, pull]);
-  assert.equal(ui.catalogRefreshing, false);
-  assert.equal(ui.installedVersions.get(1), 123);
-  assert.equal(ui.installedVersions.get(2), 456);
+test('pull refresh publishes fresh rows and ends without waiting for device, preview or icon work', async () => {
+  const f=fixture(),ui=f.ui;ui.pageVisible=true;
+  const jobs=[];f.defer=(key,fn)=>jobs.push({key,fn});
+  let scans=0,previews=0;const never=new Promise(()=>{});
+  ui.refreshCatalogInstallState=async()=>{scans++;return never;};
+  ui.loadUpdateCatalog=async()=>never;
+  f.icon=async()=>never;
+  const pull=ui.pullRefreshCatalog();f.requests[0].resolve(page([1]));await pull;
+  assert.equal(ui.catalogRefreshing,false);assert.equal(ui.apps[0].id,1);assert.equal(scans,0);
+  assert.equal(jobs.length,1);assert.equal(jobs[0].key,'index-refresh-catalog');
+  jobs[0].fn();assert.equal(scans,1);
 });
-
-test('a failed device scan releases pull refresh without erasing confirmed versions', async () => {
-  const f = fixture(), ui = f.ui, device = deferred();
-  f.localVersion = -1;
-  ui.installedVersions.set(1, 123);
-  delete ui.refreshCatalogInstallState;
-  f.bridgeClass.prototype.installedBundleVersions = () => device.promise;
-  const pull = ui.pullRefreshCatalog();
-  f.requests[0].resolve(page([{ id: 1, latestAsset: { bundleName: 'app.one' } }]));
-  await tick(); assert.equal(ui.catalogRefreshing, true);
-  device.reject(Error('wireless port closed')); await pull;
-  assert.equal(ui.catalogRefreshing, false);
-  assert.equal(ui.catalogProbeBusy, false);
-  assert.equal(ui.installedVersions.get(1), 123);
-});
-
-test('failed automatic reconnect opens a sheet and successful manual connection resumes the same refresh', { timeout: 3000 }, async () => {
-  const f = fixture(), ui = f.ui;
-  f.localVersion = -1; f.deviceConnected = false;
-  ui.pageVisible = true; ui.showReconnect = false; ui.resumeJobId = ''; ui.reconnectPort = '45678';
-  delete ui.refreshCatalogInstallState;
-  let probes = 0, connects = 0;
-  f.bridgeClass.prototype.installedBundleVersions = async () => {
-    probes++;
-    if (!f.deviceConnected) throw Error('saved port could not reconnect');
-    return new Map([['app.one', 123]]);
-  };
-  f.bridgeClass.prototype.connect = async () => {
-    connects++;
-    if (connects === 1) return false;
-    f.deviceConnected = true; return true;
-  };
-  f.bridgeClass.prototype.connectionFailureMessage = () => '端口未开启';
-  const pull = ui.pullRefreshCatalog();
-  f.requests[0].resolve(page([{ id: 1, latestAsset: { bundleName: 'app.one' } }]));
-  await tick();
-  assert.equal(probes, 1, 'the inventory already tried automatic reconnect');
-  assert.equal(ui.showReconnect, true);
-  assert.equal(ui.catalogRefreshing, true);
-  await ui.reconnect();
-  assert.equal(ui.showReconnect, true, 'bad manual port leaves the sheet available for retry');
-  assert.equal(ui.catalogRefreshing, true);
-  assert.equal(ui.reconnectBusy, false);
-  assert.equal(f.fixedPortWakes, 0, 'a failed port must not restart fixed-port recovery');
-  await ui.reconnect();
-  assert.equal(f.fixedPortWakes, 1, 'a successful manual connection resets fixed-port recovery before resuming refresh');
-  assert.equal(ui.refreshConnectionWaiter, undefined, 'success must wake the pending refresh before the test awaits it');
-  await pull;
-  assert.equal(probes, 2, 'resume the existing batch, without an extra parallel scan');
-  assert.equal(ui.showReconnect, false);
-  assert.equal(ui.catalogRefreshing, false);
-  assert.equal(ui.installedVersions.get(1), 123);
-});
-
-test('cancelling the connection sheet ends refresh and does not ask again for later batches', async () => {
-  const f = fixture(), ui = f.ui;
-  f.localVersion = -1; f.deviceConnected = false;
-  ui.pageVisible = true; ui.showReconnect = false;
-  delete ui.refreshCatalogInstallState;
-  f.bridgeClass.prototype.installedBundleVersions = async () => { throw Error('offline'); };
-  const pull = ui.pullRefreshCatalog();
-  f.requests[0].resolve(page([{ id: 1, latestAsset: { bundleName: 'app.one' } }]));
-  await tick(); assert.equal(ui.showReconnect, true);
-  const joined = ui.confirmCatalogVersionsViaDevice(['app.two']);
-  ui.completeRefreshConnection(false); ui.showReconnect = false;
-  await Promise.all([pull, joined]);
-  assert.equal(ui.catalogRefreshing, false);
-  assert.equal(ui.showReconnect, false);
-  assert.equal(ui.installedVersions.get(1), -1);
+test('failed refresh keeps previous rows, ends promptly and does not schedule device work', async()=>{
+  const f=fixture(),ui=f.ui;ui.pageVisible=true;ui.apps=[{id:9}];const jobs=[];f.defer=(key,fn)=>jobs.push(fn);
+  const pull=ui.pullRefreshCatalog();f.requests[0].reject(Error('offline'));await pull;
+  assert.equal(ui.catalogRefreshing,false);assert.equal(ui.apps[0].id,9);assert.equal(jobs.length,0);
 });
 
 test('opening wireless settings preserves the pending refresh while ordinary navigation cancels it', async () => {

@@ -26,7 +26,7 @@ test('ordinary detail uses the unchanged unscaled viewport',()=>{
  assert.equal(result.width,360);assert.equal(measured.minWidth,360);assert.equal(measured.minHeight,800);
 });
 function action(){
- const methods=componentMethods('pages/Detail.ets','  private performInstallAction(): void {','\n  private sidebarActionSize');
+ const methods=componentMethods('pages/Detail.ets','  private performInstallAction(): void {','\n  private showSidebarDock');
  const box={isPending:stage=>stage==='paused'};
  vm.runInNewContext(ts.transpileModule('class Detail {'+methods+'};globalThis.Detail=Detail;',{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
  const calls=[];const page=Object.assign(new box.Detail(),{disposed:false,embedded:true,embeddedVisible:true,
@@ -46,4 +46,27 @@ test('pending work resumes once and a disabled or busy action never starts a new
  assert.deepEqual(calls,[['resume','one']]);page.currentInstallTask=()=>undefined;page.installButtonEnabled=()=>false;
  page.performInstallAction();assert.equal(calls.length,1);page.installButtonEnabled=()=>true;page.downloadBusy=true;
  page.performInstallAction();assert.equal(calls.length,1);
+});
+
+test('dock commands ignore publications from details that are no longer selected',()=>{
+ const methods=componentMethods('pages/Index.ets','  private setSidebarDock(','\n  private dockWidth(');
+ class SidebarInstallView { constructor(appId=0){this.appId=appId;} }
+ const box={SidebarInstallView};
+ vm.runInNewContext(ts.transpileModule('class Index {'+methods+'};globalThis.Index=Index;',
+  {compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,box);
+ const page=Object.assign(new box.Index(),{sidebarSelectedId:1,sidebarDockView:new SidebarInstallView()});
+ const first=new SidebarInstallView(1),second=new SidebarInstallView(2);
+ const firstAction=()=>{},secondAction=()=>{};
+ page.setSidebarDock(first,firstAction);
+ assert.equal(page.activeSidebarDockView().appId,1);
+ page.sidebarSelectedId=2;
+ assert.equal(page.activeSidebarDockView().appId,0);
+ page.setSidebarDock(second,secondAction);
+ page.setSidebarDock(first,firstAction);
+ page.setSidebarDock(first);
+ assert.equal(page.activeSidebarDockView().appId,2);
+ assert.equal(page.sidebarDockAction,secondAction);
+ page.setSidebarDock(second);
+ assert.equal(page.activeSidebarDockView().appId,0);
+ assert.equal(page.sidebarDockAction,undefined);
 });

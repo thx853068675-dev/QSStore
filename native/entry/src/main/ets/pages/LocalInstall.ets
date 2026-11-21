@@ -1,3 +1,5 @@
+import { AppBackground } from '../data/AppBackgroundPreferences';
+import { AppThemeBackground } from '../components/AppThemeBackground';
 import { DeviceInstallGroup } from '../jobs/DeviceInstallGroup';
 import { DeviceInstallProgress } from '../components/DeviceInstallProgress';
 import { MultiDeviceInstall } from '../jobs/MultiDeviceInstall';
@@ -36,6 +38,7 @@ interface LocalInstallParams { preview?:InstallJob; direct?:boolean; external?:b
 @Entry
 @Component
 struct LocalInstall {
+  @StorageProp('appBackground') private themeState: AppBackground = new AppBackground();
   @StorageProp('installTargetCount') private installTargetCount:number=1;
   @StorageProp('installTargetName') private installTargetName:string='';
   pageTransition() {
@@ -75,6 +78,7 @@ struct LocalInstall {
   private disposed:boolean=false; private reading:number=0;
   private returning:boolean=false; private backTimer:number=-1;
   private colors():Palette{return Palette.forMode(this.darkMode);}
+  private cardSurface(): string { return Palette.containerPaint(this.colors().surface, this.themeState.containerOpacity); }
   aboutToAppear():void{
     this.observeTasks();
     const params=router.getParams() as LocalInstallParams;
@@ -217,7 +221,7 @@ struct LocalInstall {
       Column({space:16}){
         Row(){Text(I18n.t('安装进度')).fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1);Text(this.deviceRows().filter((row)=>row.job.stage===InstallStage.INSTALLED||row.job.stage===InstallStage.SKIPPED).length+'/'+this.deviceRows().length).fontSize(12).fontColor(this.colors().accent);}
         DeviceInstallProgress({rows:this.deviceRows(),onAction:(job:InstallJob)=>this.resume(job.id)})
-      }.width('100%').padding(20).backgroundColor(this.colors().surface).borderRadius(22)
+      }.width('100%').padding(20).backgroundColor(this.cardSurface()).borderRadius(22)
     }else{Column({space:14}){
       Row(){Text(this.renewal?I18n.t('续签流程'):I18n.t('安装流程')).fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1);Text(this.renewal&&this.task()?.job.stage===InstallStage.INSTALLED?I18n.t('续签完成'):this.timeline.status).fontSize(12).fontColor(this.timeline.tone==='success'?this.colors().success:this.colors().accent).maxLines(2);}.width('100%')
       if(this.renewalExpiry()){Text(I18n.t('新授权有效至 ')+this.renewalExpiry()).fontSize(12).fontColor(this.colors().success).width('100%');}
@@ -225,10 +229,11 @@ struct LocalInstall {
       if(this.timeline.message){Text(this.timeline.message).fontSize(12).fontColor(this.task()?.job.stage===InstallStage.WAITING_CONFIRMATION?this.colors().accent:this.colors().danger).width('100%');}
       if(this.selected.stage===InstallStage.WAITING_ACCOUNT||this.task()?.job.stage===InstallStage.WAITING_ACCOUNT){Text(this.renewal?I18n.t('请前往「我的」登录开发者账号后继续续签。'):I18n.t('请前往「我的」登录开发者账号后继续安装。')).fontSize(12).fontColor(this.colors().textSecondary).width('100%');}
       if(!this.task()?.running&&this.task()?.job.stage!==InstallStage.INSTALLED&&this.task()?.job.stage!==InstallStage.SKIPPED&&this.task()?.job.stage!==InstallStage.QUEUED){Button(this.task()?.job.stage===InstallStage.TERMINAL_ERROR?I18n.t('重新选包'):this.renewal?I18n.t('继续续签'):I18n.t('继续安装')).width('100%').height(44).fontColor(this.colors().accent).backgroundColor(this.colors().accentSoft).onClick(()=>this.retry());}
-    }.width('100%').alignItems(HorizontalAlign.Start).padding(20).backgroundColor(this.colors().surface).borderRadius(22)}
+    }.width('100%').alignItems(HorizontalAlign.Start).padding(20).backgroundColor(this.cardSurface()).borderRadius(22)}
   }
   build(){
     Stack({alignContent:Alignment.Top}){
+      AppThemeBackground()
         Scroll(){Column({space:18}){
           Column({space:14}){
             if(this.pixels){Image(this.pixels).width(72).height(72).borderRadius(20);}else{SymbolGlyph($r('sys.symbol.square_and_arrow_down')).fontSize(34).fontColor([this.colors().accent]);}
@@ -247,7 +252,7 @@ struct LocalInstall {
             if(this.preview||(!this.selected.id&&!this.busy)){Row({space:12}){
               Button(this.preview?(this.renewal?I18n.t('续签'):this.installTargetCount>1?I18n.t('安装到 ')+this.installTargetCount+I18n.t(' 台设备'):this.installTargetName?I18n.t('安装到 ')+this.installTargetName:I18n.t('安装')):I18n.t('选择安装文件')).layoutWeight(1).height(48).fontSize(15).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent).enabled(!this.busy).id('local-install-primary').onClick(()=>{if(this.preview)this.install();else this.pick();});
             }.width('100%');}
-          }.width('100%').padding(20).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+          }.width('100%').padding(20).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
           if(this.message){Text(this.message).width('100%').fontSize(12).fontColor(this.colors().danger);}
           if(this.timeline.visible){this.timelineCard();}
         }.width('100%').constraintSize({maxWidth:StoreLayout.frameMaxWidth(this.windowWidth)}).padding({left:StoreLayout.inset(this.windowWidth),right:StoreLayout.inset(this.windowWidth),top:this.statusBarInset+78,bottom:Math.max(36,this.navigationBottomInset+16)})}.width('100%').height('100%').align(Alignment.Top).scrollBar(BarState.Off)

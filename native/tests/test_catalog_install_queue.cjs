@@ -91,7 +91,7 @@ test('multiple Discover clicks enqueue immediately; execution belongs to process
   assert.deepEqual(starts, [1, 2, 3]);
 });
 
-test('local and online packages share FIFO, while manual duplicate requests coalesce', async () => {
+test('local and online packages share the dispatcher, while manual duplicate requests coalesce', async () => {
   const jobs = [{ id: 'local:test', appId: 0, sourceUrl: 'local', stage: 'QUEUED', stageHistory: [{ at: 1 }] },
     { id: 'online', appId: 1, sourceUrl: 'https://repo/app.hap', stage: 'QUEUED', stageHistory: [{ at: 2 }] }];
   const starts = [], store = { listAll: async () => jobs, get: async id => jobs.find(j => j.id === id) };
@@ -101,6 +101,28 @@ test('local and online packages share FIFO, while manual duplicate requests coal
   assert.equal(first, duplicate); await first; await owner.recovered({});
   await eventually(()=>starts.length===2);
   assert.deepEqual(starts, ['local:test', 'online']);
+});
+
+test('dispatcher starts a local job while same-device store download is active and preserves the later store head', async () => {
+  const jobs = [
+    { id: 'store1', appId: 1, sourceUrl: 'https://repo/1.hap', stage: 'QUEUED', stageHistory: [{ at: 1 }] },
+    { id: 'store2', appId: 2, sourceUrl: 'https://repo/2.hap', stage: 'QUEUED', stageHistory: [{ at: 2 }] }
+  ];
+  const starts = []; let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const store = { listAll: async () => jobs.slice().reverse(), get: async id => jobs.find(j => j.id === id), pruneCompleted: async () => {} };
+  const owner = coordinator(store, async job => {
+    starts.push(job.id); if (job.id === 'store1') await gate;
+    job.stage = 'INSTALLED'; return job;
+  });
+  try {
+    await owner.recovered({}); await eventually(() => starts.length === 1);
+    jobs.push({ id: 'local', appId: 19, sourceUrl: 'local', stage: 'QUEUED', stageHistory: [{ at: 3 }] });
+    await owner.wake(); await eventually(() => starts.includes('local'));
+    assert.deepEqual(starts, ['store1', 'local']);
+    release(); await eventually(() => jobs.every(j => j.stage === 'INSTALLED'));
+    assert.deepEqual(starts, ['store1', 'local', 'store2']);
+  } finally { release(); }
 });
 
 // A repository can publish independent bundles; Management must retain its selected target.

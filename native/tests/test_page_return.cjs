@@ -31,6 +31,7 @@ function fixture() {
   box.InstallConfirmation = { deactivate() {} }; box.InstallReconnect = { deactivate() {} };
   const ui = new box.Page(); Object.assign(ui, { privacyAllowed: true, observePrivacy() {}, initializeBusiness() {}, homeVisibility: { visible: false }, pageVisible: false, topActionEpoch: 3,
     headerRouteRevision: 0, headerRestoreGeneration: 0, getUIContext: () => ({}), resumeMaintenancePending: false,
+    restoreHomeScroll() {},
     currentTab: 0, signedIn: true, account: {}, myApps: [{ id: 1, category: '工具' }], syncManagementIcons() {},
     myAppsLoaded: true, myAppsBusy: false, myAppsRefreshing: false, myAppsMessage: '',
     apps: [{ id: 1, iconRev: 'old', updatedAt: '100' }, { id: 2, iconRev: 'same', updatedAt: '100' }],

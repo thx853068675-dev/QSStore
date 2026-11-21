@@ -7,7 +7,7 @@ function deferred() { let resolve, reject; const promise = new Promise((a, b) =>
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function fixture() {
   const f = { app: deferred(), icon: deferred(), versions: deferred(), reviews: deferred(), calls: [], saved: [], released: 0 };
-  const box = { Promise,AccountSession:{load:async()=>undefined},DeveloperAccount:class{},CatalogApp:{copy:app=>({...app})}, getContext: () => ({}), router: { getParams: () => ({ id: 42 }) }, errorText: e => e.message,
+  const box = { Promise,I18n:{t:text=>text},AccountSession:{load:async()=>undefined},DeveloperAccount:class{},CatalogApp:{copy:app=>({...app})}, getContext: () => ({}), router: { getParams: () => ({ id: 42 }) }, errorText: e => e.message,
     UpdatePolicy:{restore:async()=>{if(f.policyWait)await f.policyWait;if(f.policyFail)throw Error('preferences unavailable');},disabled:()=>false},
     ReleaseChannelRegistry: { staleReleases: () => false, restore: async () => {}, preview: () => true, select: async (...args) => f.saved.push(args) },
     StoreClient: class {

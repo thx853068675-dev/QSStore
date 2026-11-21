@@ -5,7 +5,8 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const root = path.join(__dirname, '../entry/src/main/ets');
 function load(file, mocks = {}, values = {}, transform = source => source) {
-  mocks = {'../data/DownloadProxyPreferences':{DownloadProxyPreferences:{load:async()=>({enabled:false})}},...mocks};
+  mocks = {'./I18n':{I18n:{t:value=>value}},'../data/I18n':{I18n:{t:value=>value}},
+    '../data/DownloadProxyPreferences':{DownloadProxyPreferences:{load:async()=>({enabled:false})}},...mocks};
   const exports = {};
   const source = transform(fs.readFileSync(path.join(root, file + '.ets'), 'utf8'));
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: {

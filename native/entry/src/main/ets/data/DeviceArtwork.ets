@@ -6,6 +6,7 @@ import { DeviceArtworkCatalog, DeviceArtworkEntry } from './DeviceArtworkCatalog
 import { PrivacyConsent } from './PrivacyConsent';
 import { ForegroundIdle } from '../jobs/ForegroundIdle';
 import { DeviceArtworkFrame } from './DeviceArtworkFrame';
+import { DeviceArtworkThumbnail } from './DeviceArtworkThumbnail';
 import { I18n } from './I18n';
 
 interface ArtworkFile { name:string; size:number; mtime:number; }
@@ -21,8 +22,10 @@ export class DeviceArtwork {
   private static misses:Map<string,number>=new Map();
   private static generation:number=0;
   private static writes:Promise<void>=Promise.resolve();
+  private static activeReads:number=0;
+  private static readWaiters:Array<()=>void>=[];
   private static portraits:Map<string,DeviceArtworkPortrait>=new Map();
-  private static readonly LIMIT:number=8*1024*1024;
+  private static readonly LIMIT:number=5*1024*1024;
   private static directory(context:common.UIAbilityContext):string{return context.cacheDir+'/device-art';}
   private static async checked(context:common.UIAbilityContext,create:boolean=false):Promise<string>{
     const dir=DeviceArtwork.directory(context);
@@ -63,11 +66,11 @@ export class DeviceArtwork {
     try{
       const entry=DeviceArtworkCatalog.match(await DeviceArtwork.index(context),kind,model,name);
       if(!entry)return '';
-      const rows=await DeviceArtwork.index(context),nameOnDisk=String(rows.indexOf(entry))+'-'+DeviceArtwork.hash(entry.image)+'.png';
+      const rows=await DeviceArtwork.index(context),nameOnDisk=String(rows.indexOf(entry))+'-'+DeviceArtwork.hash(entry.image+'|png-512')+'.png';
       const key=context.cacheDir+':'+entry.image;
       const pending=DeviceArtwork.flights.get(key);if(pending)return pending;
       const generation=DeviceArtwork.generation;
-      const flight=DeviceArtwork.read(context,entry,nameOnDisk,generation).catch(()=>{
+      const flight=DeviceArtwork.queuedRead(context,entry,nameOnDisk,generation).catch(()=>{
         if(generation===DeviceArtwork.generation)DeviceArtwork.misses.set(key,Date.now());return '';
       }).finally(()=>{if(DeviceArtwork.flights.get(key)===flight)DeviceArtwork.flights.delete(key);});
       DeviceArtwork.flights.set(key,flight);return await flight;
@@ -76,15 +79,27 @@ export class DeviceArtwork {
   private static hash(value:string):string{
     let code=2166136261;for(let i=0;i<value.length;i++)code=Math.imul(code^value.charCodeAt(i),16777619);return(code>>>0).toString(16);
   }
+  private static async queuedRead(context:common.UIAbilityContext,entry:DeviceArtworkEntry,name:string,generation:number):Promise<string>{
+    // A larger download allowance must not multiply into dozens of full-size
+    // buffers waiting for the serial thumbnail encoder.
+    if(DeviceArtwork.activeReads>=2)await new Promise<void>((resolve)=>DeviceArtwork.readWaiters.push(resolve));
+    else DeviceArtwork.activeReads++;
+    try{
+      if(generation!==DeviceArtwork.generation)return '';
+      return await DeviceArtwork.read(context,entry,name,generation);
+    }finally{
+      const next=DeviceArtwork.readWaiters.shift();if(next)next();else DeviceArtwork.activeReads--;
+    }
+  }
   private static async validFile(path:string):Promise<boolean>{
     try{
-      const stat=await fileIo.lstat(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.size<33||stat.size>512*1024)return false;
+      const stat=await fileIo.lstat(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.size<33||stat.size>DeviceArtworkCatalog.MAX_IMAGE_BYTES)return false;
       const file=await fileIo.open(path,fileIo.OpenMode.READ_ONLY|fileIo.OpenMode.NOFOLLOW);
       try{
         const bytes=new ArrayBuffer(stat.size);let at=0;
         while(at<stat.size){const part=new ArrayBuffer(stat.size-at),count=await fileIo.read(file.fd,part);if(count<=0)return false;
           new Uint8Array(bytes).set(new Uint8Array(part,0,count),at);at+=count;}
-        return DeviceArtworkCatalog.validPng(bytes);
+        return DeviceArtworkCatalog.validPng(bytes,DeviceArtworkThumbnail.EDGE);
       }finally{await fileIo.close(file);}
     }catch(_){return false;}
   }
@@ -99,17 +114,22 @@ export class DeviceArtwork {
     const request=http.createHttp();let bytes:ArrayBuffer;
     try{
       const response=await request.request(entry.image,{method:http.RequestMethod.GET,expectDataType:http.HttpDataType.ARRAY_BUFFER,
-        connectTimeout:5000,readTimeout:6000,maxLimit:512*1024,maxRedirects:0,usingCache:false});
+        connectTimeout:5000,readTimeout:6000,maxLimit:DeviceArtworkCatalog.MAX_IMAGE_BYTES,maxRedirects:0,usingCache:false});
       if(response.responseCode!==200||!(response.result instanceof ArrayBuffer)||!DeviceArtworkCatalog.validPng(response.result))throw new Error(I18n.t('设备图片暂不可用'));
       bytes=response.result;
     }finally{request.destroy();}
     let result='';
     const write=DeviceArtwork.writes.catch(()=>{}).then(async()=>{
       if(generation!==DeviceArtwork.generation||!PrivacyConsent.isBusinessAllowed())return;
+      // Serialize native decoders and wait for opening/scrolling to settle.
+      await ForegroundIdle.wait();
+      if(generation!==DeviceArtwork.generation||!PrivacyConsent.isBusinessAllowed())return;
+      const thumbnail=await DeviceArtworkThumbnail.encode(bytes);
+      if(generation!==DeviceArtwork.generation||!PrivacyConsent.isBusinessAllowed())return;
       await DeviceArtwork.checked(context,true);const temporary=path+'.part';
       try{
         const file=await fileIo.open(temporary,fileIo.OpenMode.CREATE|fileIo.OpenMode.TRUNC|fileIo.OpenMode.WRITE_ONLY|fileIo.OpenMode.NOFOLLOW);
-        try{let at=0;while(at<bytes.byteLength){const count=await fileIo.write(file.fd,bytes.slice(at));if(count<=0)throw new Error('设备图片写入失败');at+=count;}}
+        try{let at=0;while(at<thumbnail.byteLength){const count=await fileIo.write(file.fd,thumbnail.slice(at));if(count<=0)throw new Error('设备图片写入失败');at+=count;}}
         finally{await fileIo.close(file);}
         if(generation!==DeviceArtwork.generation||!PrivacyConsent.isBusinessAllowed())return;
         fileIo.renameSync(temporary,path);await DeviceArtwork.trim(context,name);result='file://'+path;

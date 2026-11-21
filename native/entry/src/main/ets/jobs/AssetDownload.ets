@@ -10,7 +10,7 @@ import { DownloadLibrary } from './DownloadLibrary';
 import { PrivacyConsent } from '../data/PrivacyConsent';
 import { GitHubMirrorPreferences } from '../data/GitHubMirrorPreferences';
 import { DownloadProxyPreferences } from '../data/DownloadProxyPreferences';
-import { SocksDownload } from './SocksDownload';
+import { ProxyDownload } from './ProxyDownload';
 import { I18n } from '../data/I18n';
 
 // A stalled source is abandoned and the next mirror takes over. New transfers
@@ -226,18 +226,6 @@ export class AssetDownload {
     PrivacyConsent.assertBusinessAllowed();
     const partPath = job.cachePath + '.part';
     const startedAt = Date.now();
-    const proxy = await DownloadProxyPreferences.load(this.context);
-    if (job.transferTaskId.length === 0) {
-      if (proxy.enabled && /^socks5:\/\//i.test(proxy.address)) {
-        await SocksDownload.run(job.sourceUrl, partPath, proxy.address, job.id, onProgress);
-        const actual = (await hash.hash(partPath, 'sha256')).toLowerCase();
-        if (fileIo.accessSync(job.cachePath)) fileIo.unlinkSync(job.cachePath);
-        fileIo.renameSync(partPath, job.cachePath);
-        job.expectedSha256 = actual;
-        await this.store.save(job);
-        return;
-      }
-    }
     let task: request.agent.Task | undefined;
     let resumed = false;
     let privacySubscription: number = -1;
@@ -270,7 +258,18 @@ export class AssetDownload {
         }
         fileIo.unlinkSync(partPath);
       }
+      const proxy = await DownloadProxyPreferences.load(this.context);
       PrivacyConsent.assertBusinessAllowed();
+      JobCancellation.assertActive(job.id);
+      if (proxy.enabled && (proxy.address.startsWith('socks5://') || proxy.username.length > 0)) {
+        await ProxyDownload.run(job.sourceUrl, partPath, proxy, job.id, onProgress);
+        const actual = (await hash.hash(partPath, 'sha256')).toLowerCase();
+        if (fileIo.accessSync(job.cachePath)) fileIo.unlinkSync(job.cachePath);
+        fileIo.renameSync(partPath, job.cachePath);
+        job.expectedSha256 = actual;
+        await this.store.save(job);
+        return;
+      }
       task = await request.agent.create(this.context, {
         action: request.agent.Action.DOWNLOAD,
         url: job.sourceUrl,

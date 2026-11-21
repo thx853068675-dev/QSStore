@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { publicConsentModule } = require('./load_ets.cjs');
 const ts = require(process.env.QINGQI_TYPESCRIPT || '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const root = path.resolve(__dirname, '../entry/src/main/ets/jobs');
 
@@ -10,7 +11,7 @@ function load(name, mocks = {}, globals = {}) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, name + '.ets'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
-  }).outputText, { exports, require: key => mocks[key] || {},
+  }).outputText, { exports, require: key => mocks[key] || publicConsentModule(key),
     console: { info() {}, warn() {} }, setTimeout, clearTimeout, ...globals });
   return exports;
 }

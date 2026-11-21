@@ -15,6 +15,8 @@ from server.hapstore import app, collector, db, submissions
 
 class BackgroundSubmitTest(unittest.TestCase):
     def setUp(self):
+        from server.tests.repository_fixtures import mock_repository_identity
+        mock_repository_identity(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.old_db = db.DB_PATH
         db.DB_PATH = os.path.join(self.tmp.name, "store.db")

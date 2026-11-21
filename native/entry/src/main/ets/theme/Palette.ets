@@ -25,6 +25,13 @@ export class Palette {
     return Palette.light;
   }
 
+  /** Apply opacity to a container's paint without fading the content drawn on it. */
+  static containerPaint(color: string, percent: number): string {
+    if (percent >= 100 || !Number.isFinite(percent) || !/^#[A-Fa-f0-9]{6}([A-Fa-f0-9]{2})?$/.test(color)) return color;
+    const alpha = color.length === 9 ? parseInt(color.slice(1, 3), 16) : 255;
+    return '#' + Math.round(alpha * percent / 100).toString(16).padStart(2, '0') + color.slice(-6);
+  }
+
   private pick(light: string, dark: string): string { return this.dark ? dark : light; }
 
   /** 页面底色 */

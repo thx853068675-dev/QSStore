@@ -41,7 +41,7 @@ const code = ts.transpileModule(`class StoreClient {
 { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
 
 /** 抓取每次 request() 的 (url, options)，并返回一个成功信封。 */
-function harness(payload = { ok: true, data: {} }) {
+function harness(payload = { ok: true, data: {} }, status = 200) {
   const calls = [];
   const sandbox = { PrivacyConsent: publicConsentModule('../data/PrivacyConsent').PrivacyConsent,
     ServiceFailure: class extends Error { constructor(kind, message) { super(message); this.failureKind = kind; } },
@@ -54,13 +54,15 @@ function harness(payload = { ok: true, data: {} }) {
     Promise,
     Object,
     Array,
+    StoreRoute: { prepare:async()=>{},request: (request, path, options) => request.request('https://example.invalid' + path, options) },
+    I18n: { t: value => value },
     ListPage: class {}, CatalogApp: { fromJson: row => row },
     numberField: (data, key, fallback) => Number(data[key] ?? fallback),
     http: {
       createHttp: () => ({
         request: (url, options) => {
           calls.push({ url, options });
-          return Promise.resolve({ result: JSON.stringify(payload), responseCode: 200 });
+          return Promise.resolve({ result: JSON.stringify(payload), responseCode: status });
         },
         destroy: () => {}
       }),
@@ -128,6 +130,14 @@ test('a signed-out account is rejected before any request goes out', async () =>
 test('a server error envelope surfaces its message', async () => {
   const { client } = harness({ ok: false, error: { code: 'X', message: '下架失败', hint: '稍后再试' } });
   await assert.rejects(() => client.getData('/api/v1/apps'), /下架失败 · 稍后再试/);
+});
+
+test('rate limits and server outages retain service guidance rather than suggesting a node change',async()=>{
+ for(const status of [429,500,503,504]){
+  const {client,calls}=harness('gateway HTML',status);
+  await assert.rejects(client.getData('/api/v1/apps'),status===429?/过于频繁/:/商店服务响应异常/);
+  assert.equal(calls.length,1,'do not replay failed business operations');
+ }
 });
 
 

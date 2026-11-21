@@ -58,8 +58,13 @@ function fixture(installedVersion = 0, selfUpdate = false,
       },current:()=>undefined
     } },
     './StorageBudget': { StorageBudget: { require: async () => {} } },
-    './PackageArchive': { PackageArchive: { installablePath: async path => path,
+    './PackageArchive': { PackageArchive: { installablePath: async path => path, extension: () => '.hap',
       permissions: async () => [], workingBytes: () => 123, release: () => {} } },
+    './PackageEditor': { EditablePackage: class {}, PackageEditor: { edit: async (draft, name, icon) => {
+      calls.labelEdit = { path: draft.path, name, icon, identity: draft.identity };
+      if (calls.rejectLabel) throw Error('Package does not support a label edit');
+      return '/scratch/source-edited.hap';
+    } } },
     './JobCancellation': { JobCancellation: { assertActive: () => {
       if (calls.cancelled) throw new Error('安装任务已取消');
     } } },
@@ -94,15 +99,18 @@ function fixture(installedVersion = 0, selfUpdate = false,
       }
     } },
     '@kit.CoreFileKit': {
-      fileIo: { statSync: () => ({ size: 123 }), accessSync: () => true, readTextSync: () => 'private key' },
+      fileIo: { statSync: () => ({ size: 123 }), accessSync: () => true, readTextSync: () => 'private key',
+        mkdtemp: async () => '/scratch', copyFile: async (from, to) => { calls.copy = [from, to]; },
+        rmdir: async directory => { calls.removedScratch = directory; } },
       hash: { hash: async file => {
         if (file === job.cachePath) { calls.hapHashes++; return 'a'.repeat(64); }
+        if (file === '/scratch/source.hap') return (calls.badCopy ? 'b' : 'a').repeat(64);
         calls.profileHashes++; return 'profile';
       } }
     },
     'libhap_core.so': {
       hasSigningBlock: () => !job.assetName.includes('unsigned'),
-      signHap: async () => { calls.nativeSigns++; },
+      signHap: async input => { calls.nativeSigns++; calls.signedInput = input; },
       verifyHap: async () => {
         calls.nativeVerifies++;
         if (calls.invalidWorker) throw new Error('QuietStart worker device profile differs from main HAP');
@@ -410,6 +418,29 @@ test('installer self-update keeps the official signed HAP and lets the platform 
   assert.equal(calls.nativeSigns, 0);
   assert.equal(calls.installedPath, job.cachePath);
   assert.equal(calls.nativeVerifies, 0, 'the custom verifier cannot parse official SDK signing blocks');
+});
+
+test('publisher label uses a verified private signing copy and falls back only on unsupported editing', async () => {
+  for (const outcome of ['edited', 'unsupported', 'stale-copy']) {
+    const { job, calls, runtime } = fixture();
+    job.appId = 3;
+    job.sourceUrl = 'https://example.com/app.hap';
+    job.catalogDisplayName = '上架者的名称';
+    calls.rejectLabel = outcome === 'unsupported';
+    calls.badCopy = outcome === 'stale-copy';
+    if (calls.badCopy) {
+      await assert.rejects(runtime.sign(job), /SHA-256/);
+      assert.equal(calls.nativeSigns, 0);
+    } else {
+      await runtime.sign(job);
+      assert.equal(calls.labelEdit.name, job.catalogDisplayName);
+      assert.equal(calls.labelEdit.identity.bundleName, job.bundleName);
+      assert.equal(calls.signedInput, calls.rejectLabel ? job.cachePath : '/scratch/source-edited.hap');
+    }
+    assert.deepEqual(calls.copy, [job.cachePath, '/scratch/source.hap']);
+    assert.equal(job.packageSourceSha256, 'a'.repeat(64));
+    assert.equal(calls.removedScratch, '/scratch');
+  }
 });
 test('a stored matching certificate is selected before creating the update profile', async () => {
   const installed = { versionCode: 1, fingerprint: 'A'.repeat(64),

@@ -148,3 +148,28 @@ test('storage preflight fails before work with a recoverable storage message', a
   await assert.rejects(StorageBudget.require('/sandbox', 1024),
     error => error.failureKind === FailureKind.TRANSIENT && error.message.includes('存储不足'));
 });
+
+test('explicit refresh bypasses fresh domestic categories and discards late results from the old exit', async () => {
+  let finish;
+  const response = (scope,id) => ({responseCode:200,header:{ETag:'"'+id+'"'},result:JSON.stringify({ok:true,data:{network_scope:scope,items:[{id}],total:1}})});
+  const old = new Promise(resolve=>finish=resolve);
+  const f = storeFixture([old,response('overseas',2),response('overseas',2)]);
+  const pending=f.client.listApps(1,30,'stars');await new Promise(setImmediate);assert.equal(f.calls.length,1);
+  f.client.constructor.beginRefresh();const fresh=await f.client.listApps(1,30,'stars');assert.equal(fresh.items[0].id,2);
+  finish(response('ordinary',1));const result=await pending;
+  assert.equal(result.items[0].id,2);assert.equal(f.client.constructor.currentScope(),'overseas');assert.equal(f.calls.length,3);
+});
+test('a newly observed region clears other public scope caches instead of serving an old category', async()=>{
+  const response=(scope,id)=>({responseCode:200,header:{ETag:'"old"'},result:JSON.stringify({ok:true,data:{network_scope:scope,items:[{id}]}})});
+  const f=storeFixture([response('ordinary',1),response('overseas',2),response('overseas',3)]);
+  await f.client.getData('/category',undefined,30000);await f.client.getData('/collections');
+  const result=await f.client.getData('/category',undefined,30000);
+  assert.equal(result.items[0].id,3);assert.equal(f.calls[2].options.header['If-None-Match'],undefined);
+});
+test('README views always request fresh content and do not retain body or ETag in the public cache',async()=>{
+  const response=html=>({responseCode:200,header:{ETag:'"readme"'},result:JSON.stringify({ok:true,data:{found:true,html,source_url:'https://github.com/example/app/'}})});
+  const f=storeFixture([response('first'),response('updated')]);
+  const a=await f.client.getData('/api/v1/apps/3/readme?lang=zh');const b=await f.client.getData('/api/v1/apps/3/readme?lang=zh');
+  assert.equal(a.html,'first');assert.equal(b.html,'updated');assert.equal(f.calls[1].options.header['If-None-Match'],undefined);
+  assert.equal(f.client.constructor.responses.size,0);
+});

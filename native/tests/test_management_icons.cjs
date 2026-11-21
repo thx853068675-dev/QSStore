@@ -7,7 +7,7 @@ const ts = require(process.env.QINGQI_TYPESCRIPT ||
   '/Applications/DevEco-Studio.app/Contents/tools/hvigor/hvigor/node_modules/typescript/lib/typescript.js');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/pages/Index.ets'), 'utf8');
 const names = ['managementIconApps', 'managedIconFor', 'isCurrentManagementIcon', 'loadManagementIcon',
-  'loadManagementIcons', 'runManagementIconBatches', 'jobIcon'];
+  'loadManagementIcons', 'runManagementIconBatches', 'jobIcon', 'replaceCatalogIcon'];
 const methods = names.map(name => {
   const start = source.search(new RegExp(`^  private (?:async )?${name}\\(`, 'm'));
   assert.ok(start >= 0, name); return source.slice(start, source.indexOf('\n  }', start) + 4);
@@ -47,7 +47,7 @@ function fixture(count = 1) {
   };
   vm.runInNewContext(code, box);
   f.ui = Object.assign(new box.Page(), { apps: [], appIcons: [], managementIcons: [], localIcons: [],
-    myApps: [], followingSnapshot: [], pendingJobs: [], managementIconFlights: new Map(), activeQuery: 'unrelated-search',
+    iconResidency: { wanted: key => !f.unwanted?.has(key) }, releaseUnusedIcons() {}, scheduleIconTrim() {}, myApps: [], followingSnapshot: [], pendingJobs: [], managementIconFlights: new Map(), activeQuery: 'unrelated-search',
     catalogLookup: () => { const key = JSON.stringify(f.catalog); if (f.lookupKey !== key) { f.lookupKey = key; f.lookup = {}; } return f.lookup; },
     allInstalledJobs: () => f.catalog.map(a => ({ id: 'job-' + a.id, appId: a.id, bundleName: 'com.example.app' + a.id })),
     catalogForJob: job => f.catalog.find(a => a.id === job.appId), catalogApp: id => f.catalog.find(a => a.id === id) });
@@ -143,4 +143,17 @@ test('new installed apps join the current batch without exceeding the four-reque
   release(); await joined;
   assert.equal(f.requests.length, 6); assert.equal(f.peak, 4);
   assert.equal(f.ui.managementIcons.length, 6);
+});
+
+test('offscreen inventory is not decoded and late invisible results are released', async () => {
+  const f = fixture(80); f.unwanted = new Set(f.catalog.slice(4).map(a => 'catalog:' + a.id));
+  await f.ui.loadManagementIcons(); assert.equal(f.requests.length,4); assert.equal(f.ui.managementIcons.length,4);
+});
+test('a late invisible or disposed decode cannot repopulate the native cache',async()=>{
+  for(const disposed of [false,true]){
+    const f=fixture();let done;f.fetch=()=>new Promise(resolve=>done=resolve);
+    const work=f.ui.loadManagementIcons();await tick();
+    if(disposed)f.ui.iconDisposed=true;else f.unwanted=new Set(['catalog:1']);
+    done(bytes(1));await work;assert.equal(f.ui.managementIcons.length,0);assert(f.released.includes('pixels'));
+  }
 });

@@ -27,6 +27,12 @@ test('system hand status changes sides, retains the side for two hands or a desk
   f.callback(2); assert.equal(f.side.left, false); f.callback(1); assert.equal(f.side.left, true);
   assert.deepEqual(f.changes, [true, false, true]);
 });
+test('the first right-hand reading also reaches layouts that default to the left rail', () => {
+  const f = fixture({ recent: 2 }); f.side.start();
+  assert.deepEqual(f.changes, [false]);
+  f.callback(2); f.callback(0);
+  assert.deepEqual(f.changes, [false]);
+});
 test('hiding unsubscribes the exact callback once and ignores late events; reappearing can resume', () => {
   const f = fixture(); f.side.start(); f.side.stop(); f.side.stop();
   assert.equal(f.off, 1); f.callback(1); assert.equal(f.side.left, false);

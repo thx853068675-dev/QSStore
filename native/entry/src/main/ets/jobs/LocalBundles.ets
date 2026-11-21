@@ -113,12 +113,21 @@ export class LocalBundles {
       try {
         const drawable = context.resourceManager.getDrawableDescriptor(resource);
         const pixels = drawable?.getPixelMap();
-        if (pixels !== undefined) return pixels;
+        if (pixels !== undefined) return await LocalBundles.thumbnail(pixels);
       } catch (_) {}
     }
-    try { return await bundle.getAbilityIcon(bundleName, abilityName); }
+    try { return await LocalBundles.thumbnail(await bundle.getAbilityIcon(bundleName, abilityName)); }
     catch (_) { return undefined; }
   }
+  private static async thumbnail(pixels: image.PixelMap): Promise<image.PixelMap | undefined> {
+    try {
+      const size = (await pixels.getImageInfo()).size;
+      const ratio = Math.min(1, 192 / Math.max(size.width, size.height));
+      if (ratio < 1) await pixels.scale(ratio, ratio);
+      return pixels;
+    } catch (_) { await pixels.release(); return undefined; }
+  }
+
   /// 无法核实时的返回值。调用方必须与 0（确认未装）区别对待。
   static readonly UNKNOWN: number = -1;
 

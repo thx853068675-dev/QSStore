@@ -67,6 +67,7 @@ dist/
 
 # Deployment-specific endpoint and generated TLS configuration stay local.
 /native/store.local.json
+/native/store-fallback-ca.local.crt
 /native/entry/src/main/ets/data/StoreBuildConfig.ets
 /native/entry/src/main/resources/rawfile/store-ca.crt
 /native/config/*.local.*

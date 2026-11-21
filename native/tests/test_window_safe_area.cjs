@@ -75,6 +75,9 @@ function fixture() {
     } : name === '../theme/ResumeFramePacing' ? { ResumeFramePacing: { start() {}, stop() {} } }
       : name === '../theme/Palette' ? { Palette }
       : name === '../data/AppearancePreferences' ? { AppearancePreferences: { async load() {} } }
+      : name === '../data/AppBackgroundPreferences' ? { AppBackgroundPreferences: { async load() {} } }
+      : name === '../data/HomeNavigationPreferences' ? { HomeNavigationPreferences: { async load() {} } }
+      : name === '../data/GitHubAssociationReturn' ? { GitHubAssociationReturn: { receive: () => false, openPending() {} } }
       : name === '../data/MaterialPreferences' ? { MaterialPreferences: { async load() {} } }
       : name === '../data/DiscoverSortPreferences' ? { DiscoverSortPreferences: { async load() {} } }
       : name === '../data/ManagementPreferences' ? { ManagementPreferences: { load: () => state.managementLoad() } }
@@ -136,7 +139,7 @@ test('window bounds and navigation insets are converted from native pixels befor
   assert.equal(f.state.storageAtLoad.get('windowHeight'), 800);
   assert.equal(f.state.storageAtLoad.get('navigationBottomInset'), 20);
   assert.equal(f.state.storageAtLoad.get('statusBarInset'), 48);
-  assert.equal(f.state.uiReads, 1, 'native viewport reads must not request an early UIContext');
+  assert.equal(f.state.uiReads, 2, 'native viewport reads add no UIContext requests');
 });
 
 test('resize events override stale window properties for landscape, rotation and split-screen widths', async () => {
@@ -219,7 +222,7 @@ test('edge-to-edge startup reads real insets before UI content without obtaining
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.state.loaded, true);
   assert.equal(f.state.fullscreen, true);
-  assert.equal(f.state.uiReads, 1);
+  assert.equal(f.state.uiReads, 2, 'file-open configuration and GitHub return both read the loaded UI context');
   assert.ok(f.state.events.indexOf('file-open-context') > f.state.events.indexOf('load'));
   assert.equal(f.storage.get('statusBarInset'), 48);
   assert.equal(f.state.bars.statusBarColor, '#00000000');

@@ -1,9 +1,12 @@
 import { common, bundleManager } from '@kit.AbilityKit';
 import { router, promptAction } from '@kit.ArkUI';
-import { AppearanceMode, AppearancePreferences } from '../data/AppearancePreferences';
+import { deviceInfo } from '@kit.BasicServicesKit';
+import { AppBackground, AppBackgroundPreferences } from '../data/AppBackgroundPreferences';
+import { HomeNavigationPreferences } from '../data/HomeNavigationPreferences';
 import { AppLanguage, AppLanguagePreferences } from '../data/AppLanguagePreferences';
 import { MaterialMode, MaterialPreferences } from '../data/MaterialPreferences';
 import { SettingsCache } from '../data/SettingsCache';
+import { LocalDeveloperMode } from '../data/LocalTools';
 import { errorText } from '../jobs/ErrorText';
 import { ForegroundIdle } from '../jobs/ForegroundIdle';
 import { Palette } from '../theme/Palette';
@@ -14,16 +17,21 @@ import { CloudBackupConsent } from '../data/CloudBackupConsent';
 import { SigningIdentityRecovery } from '../data/SigningIdentity';
 import { PrivacyConsent } from '../data/PrivacyConsent';
 import { GitHubMirrorEditor, GitHubMirrorView } from '../data/GitHubMirrorEditor';
-import { DownloadProxyPreferences, DownloadProxySetting } from '../data/DownloadProxyPreferences';
+import { DownloadProxyPreferences, DownloadProxyProfiles } from '../data/DownloadProxyPreferences';
 import { DownloadProxyProbe } from '../data/DownloadProxyProbe';
 import { UpdatePushDialog } from '../components/UpdatePushDialog';
+import { AppBackgroundDialog } from '../components/AppBackgroundDialog';
+import { AppThemeBackground } from '../components/AppThemeBackground';
 import { I18n } from '../data/I18n';
 
 @Entry
 @Component
 struct Settings {
   @StorageProp('darkMode') private darkMode: boolean = false;
-  @StorageProp('appearanceMode') private mode: string = 'system';
+  @StorageProp('appBackground') private themeState: AppBackground = new AppBackground();
+  @StorageProp('homeNavigationAutoHide') private homeNavigationAutoHide: boolean = true;
+  @State private navigationBusy: boolean = false;
+  private backgroundDialog?: CustomDialogController;
   @StorageProp('materialMode') private materialMode: string = 'adaptive';
   @StorageProp('appLanguage') private appLanguage: string = 'zh';
   @State private materialMenuOpen: boolean = false;
@@ -35,27 +43,33 @@ struct Settings {
   @StorageProp('windowHeight') private windowHeight: number = 0;
   @StorageProp('navigationBottomInset') private navigationBottomInset: number = 0;
   @State private visible: boolean = true;
-  @State private appearanceBusy: boolean = false;
-  @State private appearanceMenuOpen: boolean = false;
   @State private cacheBusy: boolean = false;
   @State private cacheReading: boolean = true;
   @State private cacheSize: number = 0;
   @State private version: string = '';
   @State private versionCode: string = '';
+  private versionTapCount: number = 0;
+  private lastVersionTapAt: number = 0;
+  private enablingDeveloperMode: boolean = false;
   @State private backupEnabled: boolean = false;
   @State private backupBusy: boolean = false;
   @State private backupAccountLabel: string = '';
   @State private privacyAllowed: boolean = false;
   @State private privacyBusy: boolean = false;
   @State private mirror: GitHubMirrorView = new GitHubMirrorView();
-  @State private proxyEnabled: boolean = false;
+  @State private proxyProfiles: DownloadProxyProfiles = new DownloadProxyProfiles();
+  @State private proxyEditing: boolean = false;
+  @State private proxyOriginalAddress: string = '';
   @State private proxyOpen: boolean = false;
   @State private proxyProtocol: string = 'http';
   @State private proxyHost: string = '127.0.0.1';
   @State private proxyPort: string = '7890';
+  @State private proxyUsername: string = '';
+  @State private proxyPassword: string = '';
   @State private proxyStatus: string = '';
   @State private proxyLatency: number = 0;
-  private proxyTestedAddress: string = '';
+  @State private proxyTesting: boolean = false;
+  private proxyProbeGeneration: number = 0;
   @State private proxyBusy: boolean = false;
   @State private mirrorChoicesOpen: boolean = false;
   @State private pushDialogOpen: boolean = false;
@@ -70,16 +84,10 @@ struct Settings {
   private backTimer: number = -1;
 
   private colors(): Palette { return Palette.forMode(this.darkMode); }
+  private cardSurface(): string { return Palette.containerPaint(this.colors().surface, this.themeState.containerOpacity); }
   aboutToAppear(): void {
     this.disposed = false;
     this.readCache();
-    DownloadProxyPreferences.load(getContext(this) as common.UIAbilityContext).then((value: DownloadProxySetting) => {
-      if (!this.disposed) {
-        this.proxyEnabled = value.enabled;
-        const parsed = /^(http|socks5):\/\/(\[[^\]]+\]|[^:]+):(\d+)$/.exec(value.address);
-        if (parsed) { this.proxyProtocol = parsed[1]; this.proxyHost = parsed[2]; this.proxyPort = parsed[3]; }
-      }
-    }).catch(() => {});
     this.mirrorEditor = new GitHubMirrorEditor(getContext(this) as common.UIAbilityContext,
       (view: GitHubMirrorView) => {
         if (this.disposed) return;
@@ -104,7 +112,9 @@ struct Settings {
       }).catch(() => { if (!this.disposed) this.version = I18n.t('暂时无法读取'); });
   }
   aboutToDisappear(): void {
+    this.backgroundDialog?.close();
     this.proxyOpen = false;
+    this.clearProxyCredentialDraft();
     this.pushDialogOpen = false;
     this.mirrorChoicesOpen = false;
     this.mirrorEditor?.dispose();
@@ -113,18 +123,19 @@ struct Settings {
     this.languageMenuOpen = false;
     if (this.privacySubscription !== -1) PrivacyConsent.unsubscribe(this.privacySubscription);
     this.privacySubscription = -1;
-    this.disposed = true; this.visible = false; this.appearanceMenuOpen = false;
+    this.disposed = true; this.visible = false;
     if (this.backTimer !== -1) clearTimeout(this.backTimer);
   }
   onPageShow(): void { if (!this.disposed && !this.returning) this.visible = true; }
   onPageHide(): void {
-    this.visible = false; this.appearanceMenuOpen = false; this.materialMenuOpen = false;
+    this.visible = false; this.materialMenuOpen = false;
+    this.versionTapCount = 0;
     this.languageMenuOpen = false;
     this.mirrorChoicesOpen = false;
     this.mirrorEditor?.pause();
   }
   onBackPress(): boolean {
-    if (this.proxyOpen) { this.proxyOpen = false; return true; }
+    if (this.proxyOpen) { this.closeDownloadProxy(); return true; }
     if (this.pushDialogOpen) { this.pushDialogOpen = false; return true; }
     if (this.languageMenuOpen) { this.languageMenuOpen = false; return true; }
     if(StorePageMotion.dismissDevicePanel?.())return true; this.back(); return true; }
@@ -133,7 +144,6 @@ struct Settings {
     if (this.languageMenuOpen) { this.languageMenuOpen = false; return; }
     if (this.mirrorChoicesOpen) { this.mirrorChoicesOpen = false; return; }
     if (this.materialMenuOpen) { this.materialMenuOpen = false; return; }
-    if (this.appearanceMenuOpen) { this.appearanceMenuOpen = false; return; }
     if (this.disposed || this.returning) return;
     this.returning = true;
     this.visible = false;
@@ -148,17 +158,21 @@ struct Settings {
     this.backTimer = setTimeout(() => { if (!this.disposed) router.back({ url: 'pages/Index' }); }, 32);
   }
 
-  private async changeAppearance(mode: AppearanceMode): Promise<void> {
-    if (this.appearanceBusy || mode === this.mode) return;
-    this.appearanceBusy = true;
-    try { await AppearancePreferences.save(getContext(this) as common.UIAbilityContext, mode); }
-    catch (error) { if (!this.disposed) promptAction.showToast({ message: errorText(error) }); }
-    finally { if (!this.disposed) this.appearanceBusy = false; }
+  private chooseBackground(): void {
+    if (this.backgroundDialog) return;
+    this.backgroundDialog = new CustomDialogController({
+      builder: AppBackgroundDialog({}), alignment: DialogAlignment.Center, customStyle: true, autoCancel: true,
+      onDidDisappear: () => { this.backgroundDialog = undefined; }
+    });
+    this.backgroundDialog.open();
   }
 
-  private selectAppearance(mode: AppearanceMode): void {
-    this.appearanceMenuOpen = false;
-    this.changeAppearance(mode);
+  private async changeNavigationAutoHide(enabled: boolean): Promise<void> {
+    if (this.navigationBusy || enabled === this.homeNavigationAutoHide) return;
+    this.navigationBusy = true;
+    try { await HomeNavigationPreferences.save(getContext(this) as common.UIAbilityContext, enabled); }
+    catch (error) { if (!this.disposed) promptAction.showToast({ message: errorText(error) }); }
+    finally { if (!this.disposed) this.navigationBusy = false; }
   }
 
   private async selectMaterial(mode: MaterialMode): Promise<void> {
@@ -311,45 +325,126 @@ struct Settings {
     this.mirrorChoicesOpen = true;
   }
 
-  private async saveDownloadProxy(enabled: boolean): Promise<void> {
+  private closeDownloadProxy(): void {
     if (this.proxyBusy) return;
+    this.clearProxyCredentialDraft();
+    if (this.proxyEditing) {
+      this.proxyEditing = false;
+      this.proxyStatus = '';
+    } else {
+      this.proxyOpen = false;
+      this.proxyProbeGeneration++;
+      this.proxyTesting = false;
+    }
+  }
+
+  private clearProxyCredentialDraft(): void {
+    this.proxyUsername = '';
+    this.proxyPassword = '';
+  }
+
+  private async editDownloadProxy(address: string = ''): Promise<void> {
+    if (this.proxyBusy) return;
+    const parsed = /^(http|socks5):\/\/(\[[^\]]+\]|[^:]+):(\d+)$/.exec(address);
+    this.proxyOriginalAddress = address;
+    this.proxyProtocol = parsed?.[1] ?? 'http';
+    this.proxyHost = parsed?.[2] ?? '127.0.0.1';
+    this.proxyPort = parsed?.[3] ?? '7890';
+    this.proxyProbeGeneration++;
+    this.proxyTesting = false;
+    this.proxyStatus = '';
+    this.clearProxyCredentialDraft();
+    this.proxyEditing = true;
+    if (!this.proxyProfiles.authRefs[address]) return;
     this.proxyBusy = true;
     try {
-      if (!enabled) {
-        const context = getContext(this) as common.UIAbilityContext;
-        const previous = await DownloadProxyPreferences.load(context);
-        await DownloadProxyPreferences.save(context, false, previous.address);
-        if (!this.disposed) { this.proxyEnabled = false; this.proxyLatency = 0; this.proxyTestedAddress = ''; this.proxyStatus = I18n.t('代理已关闭'); }
-        return;
+      const credentials = await DownloadProxyPreferences.credentialsFor(getContext(this) as common.UIAbilityContext, address);
+      if (this.disposed) return;
+      this.proxyUsername = credentials.username;
+      this.proxyPassword = credentials.password;
+    } catch (error) { if (!this.disposed) this.proxyStatus = errorText(error); }
+    finally { if (!this.disposed) this.proxyBusy = false; }
+  }
+
+  private canActivateProxy(address: string): boolean {
+    if (!address.startsWith('socks5://') || deviceInfo.sdkApiVersion >= 26) return true;
+    this.proxyStatus = I18n.t('当前系统暂不支持 SOCKS5 下载，请使用 HTTP 代理');
+    return false;
+  }
+
+  private async measureProxy(address: string): Promise<void> {
+    const parsed = /^(http|socks5):\/\/(\[[^\]]+\]|[^:]+):(\d+)$/.exec(address);
+    if (!parsed || this.disposed) return;
+    const generation = ++this.proxyProbeGeneration;
+    this.proxyTesting = true;
+    this.proxyLatency = 0;
+    this.proxyStatus = '';
+    try {
+      const credentials = await DownloadProxyPreferences.credentialsFor(getContext(this) as common.UIAbilityContext, address);
+      if (this.disposed || generation !== this.proxyProbeGeneration) return;
+      const latency = await DownloadProxyProbe.latency(parsed[1], parsed[2], Number(parsed[3]),
+        credentials.username, credentials.password);
+      if (!this.disposed && generation === this.proxyProbeGeneration) this.proxyLatency = latency;
+    } catch (error) {
+      if (!this.disposed && generation === this.proxyProbeGeneration) this.proxyStatus = errorText(error);
+    } finally {
+      if (!this.disposed && generation === this.proxyProbeGeneration) this.proxyTesting = false;
+    }
+  }
+
+  private async chooseDownloadProxy(address: string): Promise<void> {
+    if (this.proxyBusy || !this.canActivateProxy(address)) return;
+    this.proxyBusy = true;
+    this.proxyProbeGeneration++;
+    this.proxyTesting = false;
+    this.proxyStatus = '';
+    try {
+      if (address !== this.proxyProfiles.activeAddress) {
+        const profiles = await DownloadProxyPreferences.activate(getContext(this) as common.UIAbilityContext, address);
+        if (this.disposed) return;
+        this.proxyProfiles = profiles;
+        this.proxyLatency = 0;
       }
-      const address = DownloadProxyPreferences.compose(this.proxyProtocol, this.proxyHost, this.proxyPort);
-      if (this.proxyProtocol === 'socks5') {
-        this.proxyStatus = I18n.t('测速中…');
-        const latency = await DownloadProxyProbe.latency(this.proxyProtocol, this.proxyHost.trim(), Number(this.proxyPort));
-        await DownloadProxyPreferences.save(getContext(this) as common.UIAbilityContext, true, address);
-        if (!this.disposed) { this.proxyEnabled = true; this.proxyTestedAddress = address; this.proxyLatency = latency; this.proxyStatus = ''; }
-        return;
+      if (address) this.measureProxy(address);
+    } catch (error) { if (!this.disposed) this.proxyStatus = errorText(error); }
+    finally { if (!this.disposed) this.proxyBusy = false; }
+  }
+
+  private async saveDownloadProxy(remove: boolean = false): Promise<void> {
+    if (this.proxyBusy) return;
+    this.proxyBusy = true;
+    this.proxyStatus = '';
+    const previousActive = this.proxyProfiles.activeAddress;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const address = remove ? '' : DownloadProxyPreferences.compose(this.proxyProtocol, this.proxyHost, this.proxyPort);
+      if (previousActive && previousActive === this.proxyOriginalAddress && !this.canActivateProxy(address)) return;
+      const profiles = remove ? await DownloadProxyPreferences.remove(context, this.proxyOriginalAddress) :
+        await DownloadProxyPreferences.saveProfile(context, address, this.proxyOriginalAddress,
+          this.proxyUsername, this.proxyPassword);
+      if (this.disposed) return;
+      this.proxyProfiles = profiles;
+      this.proxyEditing = false;
+      this.clearProxyCredentialDraft();
+      if (previousActive !== profiles.activeAddress || (address && address === profiles.activeAddress)) {
+        this.proxyLatency = 0;
+        if (profiles.activeAddress) this.measureProxy(profiles.activeAddress);
       }
-      await DownloadProxyPreferences.save(getContext(this) as common.UIAbilityContext, true, address);
-      if (!this.disposed) {
-        this.proxyEnabled = true; this.proxyLatency = 0; this.proxyStatus = '';
-      }
-      const latency = await DownloadProxyProbe.latency(this.proxyProtocol, this.proxyHost.trim(), Number(this.proxyPort));
-      if (!this.disposed) { this.proxyTestedAddress = address; this.proxyLatency = latency; this.proxyStatus = ''; }
-    } catch (error) { if (!this.disposed) { this.proxyLatency = 0; this.proxyStatus = errorText(error); } }
+    } catch (error) { if (!this.disposed) this.proxyStatus = errorText(error); }
     finally { if (!this.disposed) this.proxyBusy = false; }
   }
 
   private async openDownloadProxy(): Promise<void> {
     if (this.proxyBusy) return;
-    this.proxyOpen = true; this.proxyBusy = true; this.proxyStatus = '';
+    this.proxyOpen = true;
+    this.proxyEditing = false;
+    this.proxyBusy = true;
+    this.proxyStatus = '';
     try {
-      const saved = await DownloadProxyPreferences.load(getContext(this) as common.UIAbilityContext);
-      if (this.disposed || !this.proxyOpen) return;
-      this.proxyEnabled = saved.enabled;
-      if (!saved.enabled || saved.address !== this.proxyTestedAddress) this.proxyLatency = 0;
-      const parsed = /^(http|socks5):\/\/(\[[^\]]+\]|[^:]+):(\d+)$/.exec(saved.address);
-      if (parsed) { this.proxyProtocol = parsed[1]; this.proxyHost = parsed[2]; this.proxyPort = parsed[3]; }
+      const profiles = await DownloadProxyPreferences.loadProfiles(getContext(this) as common.UIAbilityContext);
+      if (this.disposed) return;
+      if (profiles.activeAddress !== this.proxyProfiles.activeAddress) this.proxyLatency = 0;
+      this.proxyProfiles = profiles;
     } catch (error) { if (!this.disposed && this.proxyOpen) this.proxyStatus = errorText(error); }
     finally { if (!this.disposed) this.proxyBusy = false; }
   }
@@ -456,28 +551,26 @@ struct Settings {
     Column() {
       Row({ space: 12 }) {
         this.settingIcon($r('sys.symbol.paintpalette'))
-        Text(I18n.t('外观')).fontSize(16).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
+        Text(I18n.t('主题背景')).fontSize(16).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
           .layoutWeight(1).maxLines(1)
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 6 }) {
-            Text(this.mode === 'light' ? I18n.t('浅色') : this.mode === 'dark' ? I18n.t('深色') : I18n.t('跟随系统'))
-              .fontSize(14).fontColor(this.colors().text)
-            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(14).fontColor([this.colors().textSecondary])
-              .rotate({ angle: this.appearanceMenuOpen ? 180 : 0 })
-              .animation({ duration: 180, curve: Curve.EaseOut })
-          }.justifyContent(FlexAlign.Center)
-        }.width(99).height(44).padding({left:8,right:8}).borderRadius(12).backgroundColor(this.colors().fill).clip(true)
+        Button(AppBackgroundPreferences.themeLabel(this.themeState.theme), { type: ButtonType.Normal })
+          .fontSize(14).fontColor(this.colors().text).width(99).height(44).padding({ left: 8, right: 8 })
+          .borderRadius(12).backgroundColor(this.colors().fill)
           .border({ width: 1, color: this.colors().border, radius: 12 })
-          .enabled(!this.appearanceBusy).id('settings-appearance-select')
-          .accessibilityText(I18n.t('外观，') + (this.mode === 'light' ? I18n.t('浅色') : this.mode === 'dark' ? I18n.t('深色') : I18n.t('跟随系统')))
-          .onClick(() => { this.appearanceMenuOpen = !this.appearanceMenuOpen; })
-          .bindMenu(this.appearanceMenuOpen, [
-            { value: I18n.t('跟随系统'), action: () => this.selectAppearance('system') },
-            { value: I18n.t('浅色'), action: () => this.selectAppearance('light') },
-            { value: I18n.t('深色'), action: () => this.selectAppearance('dark') }
-          ], { placement: Placement.BottomRight, backgroundColor: this.colors().surface,
-            backgroundBlurStyle: BlurStyle.NONE, borderRadius: 12,
-            onDisappear: () => { this.appearanceMenuOpen = false; } })
+          .id('settings-app-background').onClick(() => this.chooseBackground())
+      }.width('100%').padding({ left: 16, right: 12, top: 12, bottom: 12 })
+      Divider().strokeWidth(0.5).color(this.colors().border).margin({ left: 16, right: 16 })
+      Row({ space: 12 }) {
+        this.settingIcon($r('sys.symbol.arrow_down'))
+        Text(I18n.t('自动隐藏底栏')).fontSize(16).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
+          .layoutWeight(1).maxLines(2)
+        Button(I18n.t(this.homeNavigationAutoHide ? '开启' : '关闭'), { type: ButtonType.Normal })
+          .fontSize(14).fontColor(this.colors().text).width(99).height(44).padding({ left: 8, right: 8 })
+          .borderRadius(12).backgroundColor(this.colors().fill)
+          .border({ width: 1, color: this.colors().border, radius: 12 })
+          .enabled(!this.navigationBusy).id('settings-home-navigation-auto-hide')
+          .accessibilityText(I18n.t('自动隐藏底栏') + ' ' + I18n.t(this.homeNavigationAutoHide ? '开启' : '关闭'))
+          .onClick(() => this.changeNavigationAutoHide(!this.homeNavigationAutoHide))
       }.width('100%').padding({ left: 16, right: 12, top: 12, bottom: 12 })
       Divider().strokeWidth(0.5).color(this.colors().border).margin({ left: 16, right: 16 })
       Row({ space: 12 }) {
@@ -549,7 +642,7 @@ struct Settings {
           .accessibilityText(this.cacheBusy ? I18n.t('正在清理缓存') : I18n.t('清理图标、目录及闲置安装文件'))
           .accessibilityDescription(I18n.t('保留未完成任务和签名材料')).onClick(() => this.cleanCache())
       }.width('100%').padding({ left: 16, right: 12, top: 12, bottom: 12 })
-    }.width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius).clip(true)
+    }.width('100%').backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius).clip(true)
   }
 
   @Builder private githubMirrorRow() {
@@ -592,6 +685,25 @@ struct Settings {
     }.width('100%')
   }
 
+  private async tapVersion(): Promise<void> {
+    if (!this.visible || this.disposed || !this.versionCode ||
+      this.enablingDeveloperMode || LocalDeveloperMode.enabled()) return;
+    const now = Date.now();
+    if (now - this.lastVersionTapAt > 2000) this.versionTapCount = 0;
+    this.lastVersionTapAt = now;
+    if (++this.versionTapCount < 6) return;
+    this.versionTapCount = 0;
+    this.enablingDeveloperMode = true;
+    try {
+      await LocalDeveloperMode.enable(getContext(this) as common.UIAbilityContext);
+      if (!this.disposed && this.visible) promptAction.showToast({ message: I18n.t('已开启开发者模式') });
+    } catch (error) {
+      if (!this.disposed && this.visible) promptAction.showToast({ message: errorText(error) });
+    } finally {
+      this.enablingDeveloperMode = false;
+    }
+  }
+
   @Builder private information(label: string, value: () => string) {
     Row({ space: 16 }) {
       Text(label).fontSize(14).fontColor(this.colors().textSecondary)
@@ -624,7 +736,7 @@ struct Settings {
       this.downloadProxyRow()
       Divider().strokeWidth(.5).color(this.colors().border).margin({left:16,right:16})
       this.updatePushCard()
-    }.width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius).clip(true)
+    }.width('100%').backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius).clip(true)
   }
 
   @Builder private downloadProxyRow() {
@@ -638,51 +750,112 @@ struct Settings {
     }.width('100%').padding({ left: 16, right: 12, top: 12, bottom: 12 })
   }
 
+  @Builder private downloadProxyChoice(address: string) {
+    Row({ space: 8 }) {
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 8 }) {
+          Column({ space: 3 }) {
+            Text(address ? (address.startsWith('socks5://') ? 'SOCKS5' : 'HTTP') : I18n.t('直连'))
+              .fontSize(14).fontWeight(FontWeight.Medium).fontColor(this.colors().text).maxLines(1)
+            if (address) {
+              Text(address.substring(address.indexOf('://') + 3)).fontSize(12).fontColor(this.colors().textSecondary)
+                .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+          }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+          if (this.proxyProfiles.activeAddress === address) {
+            if (address && this.proxyTesting) {
+              LoadingProgress().width(16).height(16).color(this.colors().accent)
+            } else if (address && this.proxyLatency > 0) {
+              Text(this.proxyLatency + ' ms').fontSize(12).fontColor(this.colors().accent)
+            }
+            SymbolGlyph($r('sys.symbol.checkmark')).fontSize(15).fontColor([this.colors().accent])
+          }
+        }.width('100%')
+      }.layoutWeight(1).height(address ? 56 : 44).padding({ left: 12, right: 12 }).borderRadius(12)
+        .backgroundColor(this.proxyProfiles.activeAddress === address ? this.colors().accentSoft : this.colors().fill)
+        .accessibilitySelected(this.proxyProfiles.activeAddress === address).enabled(!this.proxyBusy)
+        .onClick(() => this.chooseDownloadProxy(address))
+      if (address) {
+        StoreIconButton({ symbol: $r('sys.symbol.square_and_pencil'), label: I18n.t('编辑代理配置'),
+          active: !this.proxyBusy, action: () => this.editDownloadProxy(address) })
+      }
+    }.width('100%')
+  }
+
+  @Builder private downloadProxyEditor() {
+    Column({ space: 12 }) {
+      Row({ space: 8 }) {
+        ForEach(['http', 'socks5'], (protocol: string) => {
+          Button(protocol === 'http' ? 'HTTP' : 'SOCKS5', { type: ButtonType.Normal })
+            .layoutWeight(1).height(40).borderRadius(12).fontSize(14)
+            .backgroundColor(this.proxyProtocol === protocol ? this.colors().accent : this.colors().fill)
+            .fontColor(this.proxyProtocol === protocol ? this.colors().onAccent : this.colors().text)
+            .accessibilitySelected(this.proxyProtocol === protocol).enabled(!this.proxyBusy)
+            .onClick(() => { this.proxyProtocol = protocol; this.proxyStatus = ''; })
+        })
+      }.width('100%')
+      Row({ space: 8 }) {
+        TextInput({ text: this.proxyHost, placeholder: '127.0.0.1' })
+          .layoutWeight(1).height(44).fontSize(14).backgroundColor(this.colors().fill).fontColor(this.colors().text)
+          .borderRadius(12).padding({ left: 12, right: 12 }).enabled(!this.proxyBusy)
+          .onChange((value: string) => { this.proxyHost = value; this.proxyStatus = ''; })
+        TextInput({ text: this.proxyPort, placeholder: I18n.t('端口') }).width(80).height(44).fontSize(14)
+          .type(InputType.Number).maxLength(5).backgroundColor(this.colors().fill).fontColor(this.colors().text)
+          .borderRadius(12).padding({ left: 8, right: 8 }).enabled(!this.proxyBusy)
+          .onChange((value: string) => { this.proxyPort = value; this.proxyStatus = ''; })
+      }.width('100%')
+      TextInput({ text: this.proxyUsername, placeholder: I18n.t('用户名（可选）') })
+        .width('100%').height(44).fontSize(14).backgroundColor(this.colors().fill).fontColor(this.colors().text)
+        .borderRadius(12).padding({ left: 12, right: 12 }).enableAutoFill(false).enabled(!this.proxyBusy)
+        .onChange((value: string) => { this.proxyUsername = value; this.proxyStatus = ''; })
+      TextInput({ text: this.proxyPassword, placeholder: I18n.t('密码（可选）') })
+        .type(InputType.Password).width('100%').height(44).fontSize(14).backgroundColor(this.colors().fill)
+        .fontColor(this.colors().text).borderRadius(12).padding({ left: 12, right: 12 })
+        .enableAutoFill(false).enabled(!this.proxyBusy)
+        .onChange((value: string) => { this.proxyPassword = value; this.proxyStatus = ''; })
+      Row({ space: 10 }) {
+        if (this.proxyOriginalAddress) {
+          Button(I18n.t('删除'), { type: ButtonType.Normal }).layoutWeight(1).height(44).borderRadius(12)
+            .backgroundColor(this.colors().fill).fontColor(this.colors().danger).enabled(!this.proxyBusy)
+            .onClick(() => this.saveDownloadProxy(true))
+        }
+        Button(I18n.t('保存'), { type: ButtonType.Normal })
+          .layoutWeight(1).height(44).borderRadius(12).backgroundColor(this.colors().accent)
+          .fontColor(this.colors().onAccent).enabled(!this.proxyBusy).onClick(() => this.saveDownloadProxy())
+      }.width('100%')
+    }.width('100%')
+  }
+
   @Builder private downloadProxyDialog() {
     Stack({ alignContent: Alignment.Center }) {
       Column().width('100%').height('100%').backgroundColor(this.colors().scrim)
-        .onClick(() => { this.proxyOpen = false; })
-      Column({ space: 16 }) {
-        Row({ space: 12 }) {
-          Text(I18n.t('下载代理')).fontSize(20).fontWeight(FontWeight.Bold)
-            .fontColor(this.colors().text).layoutWeight(1)
-          StoreIconButton({ label: I18n.t('关闭'), action: () => { this.proxyOpen = false; } })
-        }.width('100%')
-        Row({ space: 8 }) {
-          ForEach(['http', 'socks5'], (protocol: string) => {
-            Button(protocol === 'http' ? 'HTTP' : 'SOCKS5', { type: ButtonType.Normal })
-              .layoutWeight(1).height(40).borderRadius(12).fontSize(14)
-              .backgroundColor(this.proxyProtocol === protocol ? this.colors().accent : this.colors().fill)
-              .fontColor(this.proxyProtocol === protocol ? this.colors().onAccent : this.colors().text)
-              .enabled(!this.proxyBusy)
-            .onClick(() => { this.proxyProtocol = protocol; this.proxyLatency = 0; this.proxyStatus = ''; })
-          })
-        }.width('100%')
-        Row({ space: 8 }) {
-          TextInput({ text: this.proxyHost, placeholder: '127.0.0.1' })
-            .layoutWeight(1).height(44).fontSize(14).backgroundColor(this.colors().fill).fontColor(this.colors().text)
-            .borderRadius(12).padding({ left: 12, right: 12 }).enabled(!this.proxyBusy)
-            .onChange((value: string) => { this.proxyHost = value; this.proxyLatency = 0; this.proxyStatus = ''; })
-          TextInput({ text: this.proxyPort, placeholder: I18n.t('端口') }).width(80).height(44).fontSize(14)
-            .type(InputType.Number).maxLength(5).backgroundColor(this.colors().fill).fontColor(this.colors().text)
-            .borderRadius(12).padding({ left: 8, right: 8 }).enabled(!this.proxyBusy)
-            .onChange((value: string) => { this.proxyPort = value; this.proxyLatency = 0; this.proxyStatus = ''; })
-        }.width('100%')
-        if (this.proxyStatus) {
-          Text(this.proxyStatus).width('100%').fontSize(12).fontColor(this.colors().textSecondary)
-        }
+        .onClick(() => this.closeDownloadProxy())
+      Column({ space: 12 }) {
         Row({ space: 10 }) {
-          if (this.proxyEnabled) {
-            Button(I18n.t('停用'), { type: ButtonType.Normal }).layoutWeight(1).height(44).borderRadius(12)
-              .backgroundColor(this.colors().fill).fontColor(this.colors().text).enabled(!this.proxyBusy)
-              .onClick(() => this.saveDownloadProxy(false))
+          Text(I18n.t(this.proxyEditing ? (this.proxyOriginalAddress ? '编辑代理配置' : '新增代理配置') : '下载代理'))
+            .fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1)
+          if (!this.proxyEditing) {
+            StoreIconButton({ symbol: $r('sys.symbol.plus'), label: I18n.t('新增代理配置'),
+              active: !this.proxyBusy, action: () => this.editDownloadProxy() })
           }
-          Button(this.proxyBusy ? I18n.t('测速中…') : (this.proxyLatency > 0 ? this.proxyLatency + ' ms' : I18n.t('保存')), { type: ButtonType.Normal })
-            .layoutWeight(1).height(44).borderRadius(12).backgroundColor(this.colors().accent)
-            .fontColor(this.colors().onAccent).enabled(!this.proxyBusy).onClick(() => this.saveDownloadProxy(true))
+          StoreIconButton({ label: I18n.t('关闭'), active: !this.proxyBusy, action: () => this.closeDownloadProxy() })
         }.width('100%')
-      }.width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth,
-        maxHeight: StoreLayout.sheetMaxHeight(this.windowHeight) })
+        Scroll() {
+          Column({ space: 8 }) {
+            if (this.proxyEditing) {
+              this.downloadProxyEditor()
+            } else {
+              this.downloadProxyChoice('')
+              ForEach(this.proxyProfiles.addresses, (address: string) => this.downloadProxyChoice(address),
+                (address: string) => address)
+            }
+            if (this.proxyStatus) {
+              Text(this.proxyStatus).width('100%').fontSize(12).fontColor(this.colors().textSecondary)
+            }
+          }.width('100%')
+        }.width('100%').constraintSize({ maxHeight: Math.max(60, StoreLayout.sheetMaxHeight(this.windowHeight,
+          this.statusInset, this.navigationBottomInset) - 96) }).scrollBar(BarState.Auto)
+      }.width('calc(100% - 40vp)').constraintSize({ maxWidth: StoreLayout.sheetWidth })
         .padding(20).backgroundColor(this.colors().surface).borderRadius(StoreLayout.dialogRadius).clip(true)
     }.width('100%').height('100%').position({ x: 0, y: 0 })
   }
@@ -719,11 +892,12 @@ struct Settings {
           .fontColor(this.colors().text).border({ width: 1, color: this.colors().border, radius: 12 })
           .enabled(!this.privacyBusy).id('settings-privacy-consent').onClick(() => this.changePrivacy())
       }.width('100%').padding({ left: 16, right: 12, top: 12, bottom: 12 })
-    }.width('100%').backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius).clip(true)
+    }.width('100%').backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius).clip(true)
   }
 
   build() {
     Stack({ alignContent: Alignment.Top }) {
+      AppThemeBackground()
       Scroll() {
         Column({ space: 18 }) {
           Column({space:8}){
@@ -739,9 +913,11 @@ struct Settings {
             this.sectionTitle(I18n.t('版本信息'))
             Column({ space: 4 }) {
               this.information(I18n.t('应用'), () => I18n.t('轻启·安装器'))
-              this.information(I18n.t('版本'), () => this.version)
+              Column() {
+                this.information(I18n.t('版本'), () => this.version)
+              }.width('100%').id('settings-version').onClick(() => { this.tapVersion(); })
               this.information(I18n.t('内部编号'), () => this.versionCode)
-            }.width('100%').padding(16).backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+            }.width('100%').padding(16).backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
           }.width('100%')
         }.width('100%').constraintSize({ maxWidth: StoreLayout.frameMaxWidth(this.windowWidth) })
           .padding({ left: StoreLayout.inset(this.windowWidth), right: StoreLayout.inset(this.windowWidth),

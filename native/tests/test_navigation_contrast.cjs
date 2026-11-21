@@ -75,7 +75,7 @@ test('unsupported API 26 navigation keeps the 6.1 readable colors and background
   for(const selected of [false,true])for(const icon of [false,true])assert.equal(page.navigationColor(0,selected,icon),dark?'#FFFFFF':'#000000');
  }
  const source=fs.readFileSync(path.join(root,'pages/Index.ets'),'utf8');
- assert.equal((source.match(/if \(!StoreMaterial\.supported\(this\.materialMode\)\) \{ StoreTabBarBackdrop\(\{ barWidth: this\.fallbackBarWidth\(\) \}\); \}/g)||[]).length,4);
+ assert.match(source, /StoreNavigationSurface\(\{ darkMode: this\.darkMode \}\)[\s\S]*?HdsTabs\(/);
 });
 test('shared material helper returns system resource placeholders without parsing or replacing them', () => {
   const { StoreMaterial, resource } = navigationPage(26, false);
@@ -99,7 +99,8 @@ test('navigation no longer mounts a manual contrast sampler or rewrites colors d
 });
 test('transparent navigation mask retains a native background sampling region', () => {
   const source = fs.readFileSync(path.join(root, 'pages/Index.ets'), 'utf8');
-  const tabs = source.slice(source.indexOf('  navigationTabs() {'), source.indexOf('\n  build() {', source.indexOf('  navigationTabs() {')));
+  const start = source.indexOf('  private navigationTabs() {');
+  const tabs = source.slice(start, source.indexOf('\n  @Builder', start));
   assert.match(tabs, /deviceInfo\.sdkApiVersion >= 26 && StoreMaterial\.supported\(this\.materialMode\)/);
   assert.match(tabs, /\bTabs\(\{[\s\S]*?systemMaterial: StoreMaterial\.dock\(this\.materialMode, this\.darkMode\)/,
     'API 26 navigation explicitly opts into native colorInvert rather than only requesting an HDS material grade');

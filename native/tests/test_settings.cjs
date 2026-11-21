@@ -13,21 +13,30 @@ function load(file, mocks, globals = {}) {
 }
 function appearanceFixture(disk = new Map()) {
   const storage = new Map(), native = [], events = [];
+  const staged = new Map(disk);
   let failing = false;
+  const prefs = { preferences: { getPreferences: async (_ctx, store) => {
+    assert.equal(store, 'qingqi-settings');
+    return { get: async (key, fallback) => staged.get(key) ?? fallback,
+      put: async (key, value) => staged.set(key, value),
+      flush: async () => {
+        if (failing) throw Error('disk full');
+        for (const [key, value] of staged) disk.set(key, value);
+      } };
+  } } };
+  const globals = { AppStorage: { get: key => storage.get(key), setOrCreate: (key, value) => storage.set(key, value) } };
   const { AppearancePreferences } = load('data/AppearancePreferences', {
     '@kit.AbilityKit': { ConfigurationConstant: { ColorMode: {
       COLOR_MODE_NOT_SET: -1, COLOR_MODE_LIGHT: 0, COLOR_MODE_DARK: 1
     } } },
-    '@kit.ArkData': { preferences: { getPreferences: async (_ctx, store) => {
-      assert.equal(store, 'qingqi-settings');
-      return { get: async (key, fallback) => disk.get(key) ?? fallback,
-        put: async (key, value) => disk.set(key, value),
-        flush: async () => { if (failing) throw Error('disk full'); } };
-    } } }
-  }, { AppStorage: { setOrCreate: (key, value) => storage.set(key, value) } });
+    '@kit.ArkData': prefs
+  }, globals);
+  const { AppBackgroundPreferences } = load('data/AppBackgroundPreferences', {
+    '@kit.ArkData': prefs, './AppearancePreferences': { AppearancePreferences }
+  }, globals);
   const context = { getApplicationContext: () => ({ setColorMode: mode => native.push(mode) }),
     eventHub: { emit: name => events.push(name) } };
-  return { service: AppearancePreferences, context, storage, native, events, disk,
+  return { service: AppearancePreferences, background: AppBackgroundPreferences, context, storage, native, events, disk,
     fail: () => { failing = true; } };
 }
 
@@ -50,6 +59,74 @@ function managementFixture(disk = new Map()) {
     fail: value => { failing = value; },
     holdFlush: () => { let release; flushGate = new Promise(resolve => { release = resolve; }); return release; } };
 }
+
+function developerModeFixture(disk = new Map()) {
+  const storage = new Map(), memory = new Map(disk);
+  let failing = false;
+  const { LocalDeveloperMode, localTools } = load('data/LocalTools', {
+    './I18n': { I18n: { t: key => key } },
+    '@kit.ArkData': { preferences: { getPreferences: async () => ({
+      get: async (key, fallback) => memory.get(key) ?? fallback,
+      put: async (key, value) => memory.set(key, value),
+      flush: async () => {
+        if (failing) throw Error('disk full');
+        for (const [key, value] of memory) disk.set(key, value);
+      }
+    }) } }
+  }, { $r: key => key, AppStorage: { get: key => storage.get(key),
+    setOrCreate: (key, value) => storage.set(key, value) } });
+  return { LocalDeveloperMode, localTools, disk, fail: value => { failing = value; } };
+}
+
+test('AppGallery extraction is hidden by default and unlocked on this installation after a durable save', async () => {
+  const first = developerModeFixture();
+  const toolIds = f => Array.from(f.localTools(f.LocalDeveloperMode.enabled()), tool => tool.id);
+  await first.LocalDeveloperMode.restore({});
+  assert.deepEqual(toolIds(first), ['local-install-tool', 'local-editor-tool', 'local-app-list-tool']);
+  first.fail(true);
+  await assert.rejects(first.LocalDeveloperMode.enable({}), /disk full/);
+  await first.LocalDeveloperMode.restore({});
+  assert.equal(toolIds(first).includes('local-grab-tool'), false);
+  first.fail(false);
+  await first.LocalDeveloperMode.enable({});
+  assert.equal(toolIds(first).at(-1), 'local-grab-tool');
+  const restarted = developerModeFixture(first.disk);
+  await restarted.LocalDeveloperMode.restore({});
+  assert.deepEqual(toolIds(restarted), toolIds(first));
+});
+
+test('only six consecutive version taps enable developer mode and concurrent taps share the save', async () => {
+  const source = fs.readFileSync(path.join(root, 'pages/Settings.ets'), 'utf8');
+  const start = source.indexOf('  private async tapVersion(');
+  const end = source.indexOf('  @Builder private information(', start);
+  let now = 10000, calls = 0, enabled = false, finishSave;
+  const toasts = [];
+  const sandbox = { Date: { now: () => now }, getContext: () => ({}),
+    I18n: { t: key => key }, promptAction: { showToast: ({ message }) => toasts.push(message) },
+    LocalDeveloperMode: {
+      enabled: () => enabled,
+      enable: async () => {
+        calls++;
+        await new Promise(resolve => { finishSave = resolve; });
+        enabled = true;
+      }
+    } };
+  vm.runInNewContext(ts.transpileModule('class Settings {' + source.slice(start, end) + '};globalThis.Page=Settings;',
+    { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, sandbox);
+  const page = Object.assign(new sandbox.Page(), { visible: true, versionCode: '2026111005', versionTapCount: 0 });
+  for (let i = 0; i < 5; i++) { await page.tapVersion(); now += 200; }
+  assert.equal(calls, 0);
+  now += 3000;
+  for (let i = 0; i < 5; i++) { await page.tapVersion(); now += 200; }
+  assert.equal(calls, 0, 'an earlier series must expire');
+  const pending = page.tapVersion();
+  await page.tapVersion();
+  assert.equal(calls, 1);
+  finishSave(); await pending;
+  await page.tapVersion();
+  assert.equal(calls, 1);
+  assert.deepEqual(toasts, ['已开启开发者模式']);
+});
 
 test('management section choices survive restart independently', async () => {
   const first = managementFixture();
@@ -196,22 +273,30 @@ test('settings material and page back callbacks merge into one return to the hom
   timers[1](); assert.equal(routes.length, 1, 'destroyed pages cannot route later');
 });
 
-test('appearance selection closes the menu before applying the theme and Back dismisses it first', () => {
-  const source = fs.readFileSync(path.join(root, 'pages/Settings.ets'), 'utf8');
-  const methods = ['selectAppearance', 'back'].map(name => {
-    const at = source.indexOf('  private ' + name + '(');
-    return source.slice(at, source.indexOf('\n  }', at) + 4);
-  }).join('\n');
-  const timers = [], changes = [], sandbox = { StorePageMotion: { prepare() {} }, router: { back() {} },
-    setTimeout: fn => { timers.push(fn); return timers.length; } };
-  vm.runInNewContext(ts.transpileModule(`class Page { ${methods} }; globalThis.Page = Page;`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2020 }
-  }).outputText, sandbox);
-  const ui = new sandbox.Page(); ui.appearanceMenuOpen = true;
-  ui.changeAppearance = mode => changes.push({ mode, open: ui.appearanceMenuOpen });
-  ui.selectAppearance('dark'); assert.deepEqual(changes, [{ mode: 'dark', open: false }]);
-  ui.appearanceMenuOpen = true; ui.back(); assert.equal(ui.appearanceMenuOpen, false); assert.equal(timers.length, 0);
-  ui.back(); assert.equal(timers.length, 1);
+test('theme saves independent card and image overlay opacity with the appearance', async () => {
+  const f = appearanceFixture(new Map([['appearanceMode', 'light']]));
+  await f.service.load(f.context);
+  await f.background.load(f.context);
+  assert.equal(f.background.current().containerOpacity, 100);
+  assert.equal(f.background.current().photoMaskOpacity, 0);
+  await f.background.save(f.context, 'fern', 'cover', '', 'dark', 0, 37);
+  assert.equal(f.native.at(-1), 1);
+  const restarted = appearanceFixture(f.disk);
+  await restarted.service.load(restarted.context);
+  await restarted.background.load(restarted.context);
+  assert.equal(restarted.storage.get('appearanceMode'), 'dark');
+  assert.equal(restarted.background.current().theme, 'fern');
+  assert.equal(restarted.background.current().containerOpacity, 0);
+  assert.equal(restarted.background.current().photoMaskOpacity, 37);
+  restarted.fail();
+  await assert.rejects(restarted.background.save(restarted.context, 'violet', 'cover', '', 'light', 45), /disk full/);
+  assert.equal(restarted.background.current().theme, 'fern');
+  assert.equal(restarted.background.current().containerOpacity, 0);
+  assert.deepEqual(restarted.native, [1]);
+  const { Palette } = load('theme/Palette', {});
+  assert.equal(Palette.containerPaint('#FFFFFF', 63), '#a1FFFFFF');
+  assert.equal(Palette.containerPaint('#80FFFFFF', 50), '#40FFFFFF');
+  assert.equal(Palette.containerPaint('#FFFFFF', 100), '#FFFFFF');
 });
 
 test('installed application market icons are counted and cleared with other caches', async () => {

@@ -631,42 +631,87 @@ test('Discovery and Management calculate the same preview update entirely from o
   await f.registry.select({}, 7, true, []); ui.checkInstalledUpdates();
   assert.equal(ui.updates.length, 0); assert.equal(ui.catalogForJob(ui.installedJobs[0]).id, 7);
 });
-test('header motion clamps overscroll and stops notifications once the search is pinned', () => {
+test('the discovery channel row hides and reveals in both directions away from the top', () => {
   const source = fs.readFileSync(path.join(root, 'components/DiscoverHeader.ets'), 'utf8');
-  const start = source.indexOf('export class DiscoverMotion'); const end = source.indexOf('\n@Component', start);
-  const box = { exports: {} }; vm.runInNewContext(ts.transpileModule(source.slice(start, end).replace(/@Track /g, ''), {
+  const start = source.indexOf('class DiscoverScrollBaseline'); const end = source.indexOf('\n@Component', start);
+  const box = { exports: {}, DiscoverToolbarMotion: {channelHeight:52} }; vm.runInNewContext(ts.transpileModule(source.slice(start, end).replace(/@Track /g, '').replace(/@Observed\s*/g, ''), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2020 }
   }).outputText.replace('export ', '') + '\nglobalThis.Motion = DiscoverMotion;', box);
-  const motion = new box.Motion(); motion.scroll(-100, 88); assert.equal(motion.scrollOffset, 0);
-  motion.scroll(40, 88); assert.equal(motion.scrollOffset, 40);
-  motion.scroll(1000, 88); assert.equal(motion.scrollOffset, 88);
+  const motion = new box.Motion(); motion.scroll(-100, true); assert.equal(motion.scrollOffset, 0);
+  motion.scroll(900, false); assert.equal(motion.scrollOffset, 0, 'restoring a saved position keeps the channel row visible');
+  motion.scroll(940, true); assert.equal(motion.scrollOffset, 40);
+  motion.scroll(1000, true); assert.equal(motion.scrollOffset, 52);
+  motion.scroll(970, true); assert.equal(motion.scrollOffset, 22);
+  motion.scroll(900, true); assert.equal(motion.scrollOffset, 0);
+  motion.scroll(920, true); assert.equal(motion.scrollOffset, 20);
   motion.pull(60); assert.equal(motion.pullOffset, 60); assert.equal(motion.scrollOffset, 0);
   motion.pull(0); motion.reachStart(-50);
-  motion.scroll(38, 88); assert.equal(motion.scrollOffset, 88);
-  motion.reachStart(0); motion.scroll(0, 88); assert.equal(motion.scrollOffset, 0);
+  motion.scroll(38, true); assert.equal(motion.scrollOffset, 52);
+  motion.reachStart(0); motion.scroll(0, true); assert.equal(motion.scrollOffset, 0);
 });
 
-test('returning to the list start reveals the title before refresh and the top action jumps without animation', () => {
+test('reentrant native scroll callbacks only read tracked fields on the observed motion object', () => {
+  const source = fs.readFileSync(path.join(root, 'components/DiscoverHeader.ets'), 'utf8');
+  const first = source.indexOf('class DiscoverScrollBaseline');
+  const last = source.indexOf('\n@Component', first);
+  const model = source.slice(first, last);
+  const tracked = new Set([...model.matchAll(/@Track\s+(?:private\s+)?(\w+)/g)].map(match => match[1]));
+  const box = { exports: {}, DiscoverToolbarMotion: { channelHeight: 52 } };
+  vm.runInNewContext(ts.transpileModule(model.replace(/@Track /g, '').replace(/@Observed\s*/g, ''), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2020 }
+  }).outputText.replace('export ', '') + '\nglobalThis.Motion = DiscoverMotion;', box);
+  const writes = [];
+  // Match ArkUI's optimized UI-read guard during a synchronous List layout callback.
+  const motion = new Proxy(new box.Motion(), {
+    get(target, key, receiver) {
+      if (Object.hasOwn(target, key)) assert.ok(tracked.has(key), `untracked UI read: ${key}`);
+      return Reflect.get(target, key, receiver);
+    },
+    set(target, key, value, receiver) {
+      writes.push(key); return Reflect.set(target, key, value, receiver);
+    }
+  });
+  motion.reachStart(-50);
+  assert.equal(motion.scroll(0, false), 50);
+  motion.scroll(1000, true);
+  assert.equal(motion.showTop, true);
+  motion.pull(20); motion.pull(0); motion.reachStart(0);
+  assert.equal(motion.scroll(NaN, false), 0);
+  assert.ok(writes.every(key => ['scrollOffset', 'pullOffset', 'showTop'].includes(key)),
+    'scroll baseline mutations must not notify UI observers');
+});
+
+test('returning to the list start enables refresh and the top action jumps without animation', () => {
   const component = fs.readFileSync(path.join(root, 'components/DiscoverHeader.ets'), 'utf8');
-  const first = component.indexOf('export class DiscoverMotion'), last = component.indexOf('\n@Component', first);
+  const first = component.indexOf('class DiscoverScrollBaseline'), last = component.indexOf('\n@Component', first);
   const source = fs.readFileSync(path.join(root, 'pages/Index.ets'), 'utf8');
-  const methods = ['discoverScrollOffset', 'syncDiscoverScroll', 'revealDiscoverTop', 'backToDiscoverTop'].map(name => {
+  const methods = ['normalHomeLayout', 'channelScroller', 'discoverScrollOffset', 'trackDiscoverScrollSource', 'consumeDiscoverScrollSource', 'syncDiscoverScroll', 'revealDiscoverTop', 'backToDiscoverTop'].map(name => {
     const start = source.search(new RegExp(`^  private ${name}\\(`, 'm'));
     assert.ok(start >= 0); return source.slice(start, source.indexOf('\n  }', start) + 4);
   });
-  const box = { ForegroundIdle: { interaction() {} }, exports: {}, Edge: { Top: 'top' } };
-  vm.runInNewContext(ts.transpileModule(component.slice(first, last).replace(/@Track /g, '') +
+  const ScrollSource = { DRAG:0, FLING:1, EDGE_EFFECT:2, OTHER_USER_INPUT:3, SCROLL_BAR:4, SCROLL_BAR_FLING:5, SCROLLER:6, SCROLLER_ANIMATION:7 };
+  const box = { ScrollSource, ForegroundIdle: { interaction() {} }, exports: {}, Edge: { Top: 'top' }, DiscoverToolbarMotion: {channelHeight:52} };
+  vm.runInNewContext(ts.transpileModule(component.slice(first, last).replace(/@Track /g, '').replace(/@Observed\s*/g, '') +
     `\nclass Page { ${methods.join('\n')} }; globalThis.Page = Page; globalThis.Motion = DiscoverMotion;`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText, box);
   let offset = -50, jumped;
   const ui = new box.Page(); Object.assign(ui, { discoverMotion: new box.Motion(),
-    discoverLayout:'normal', discoverTitleHeight: 88, discoverCanRefresh: true,
+    showHomeNavigation() {},
+    homeChannel:'discover', discoverLayout:'normal', discoverCanRefresh: true,
     discoverScroller: { currentOffset: () => ({ yOffset: offset }), scrollEdge(...args) { jumped = args; offset = -50; } } });
-  ui.revealDiscoverTop(); offset = 1000; ui.syncDiscoverScroll();
+  ui.revealDiscoverTop();
+  offset = 900;
+  ui.trackDiscoverScrollSource(ScrollSource.SCROLLER);
+  ui.syncDiscoverScroll(ui.consumeDiscoverScrollSource());
+  assert.equal(ui.discoverMotion.scrollOffset, 0);
   assert.equal(ui.discoverCanRefresh, false); assert.equal(ui.discoverMotion.showTop, true);
-  offset = 0; ui.syncDiscoverScroll(); assert.equal(ui.discoverMotion.scrollOffset, 50);
-  assert.equal(ui.discoverCanRefresh, false, 'partially collapsed title cannot start refreshing');
+  offset = 1000;
+  ui.trackDiscoverScrollSource(ScrollSource.DRAG);
+  ui.syncDiscoverScroll(ui.consumeDiscoverScrollSource());
+  assert.equal(ui.discoverMotion.scrollOffset, 52);
+  offset = 0; ui.syncDiscoverScroll(true); assert.equal(ui.discoverMotion.scrollOffset, 0);
+  assert.equal(ui.discoverCanRefresh, false, 'a revealed title away from the start cannot trigger refresh');
   offset = -50; ui.syncDiscoverScroll(); assert.equal(ui.discoverMotion.scrollOffset, 0);
   assert.equal(ui.discoverCanRefresh, true); assert.equal(ui.discoverMotion.showTop, false);
   offset = 1000; ui.syncDiscoverScroll(); ui.backToDiscoverTop();

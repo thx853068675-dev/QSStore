@@ -25,8 +25,9 @@ export class AppearancePreferences {
     AppearancePreferences.apply(context, mode);
   }
 
-  static async save(context: common.UIAbilityContext, mode: AppearanceMode): Promise<void> {
-    const store = await preferences.getPreferences(context, 'qingqi-settings');
+  static async save(context: common.UIAbilityContext, mode: AppearanceMode,
+    stagedSettings?: preferences.Preferences): Promise<void> {
+    const store = stagedSettings ?? await preferences.getPreferences(context, 'qingqi-settings');
     await store.put('appearanceMode', mode);
     await store.flush();
     AppearancePreferences.apply(context, mode);

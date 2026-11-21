@@ -23,6 +23,8 @@ export class WirelessDebugLifecycle {
   private static automaticKey:string='';
   private static automaticAttempts:number=0;
   private static networkSubscription:number=-1;
+  /** Long-lived foreground workflows (e.g. AppGallery extraction) that must keep HDC alive. */
+  private static grabOwners:Set<string>=new Set();
 
   static configure(context: common.UIAbilityContext): void {
     WirelessDebugLifecycle.context = context;
@@ -40,8 +42,19 @@ export class WirelessDebugLifecycle {
   }
 
   private static hasWork(): boolean {
-    return JobScheduler.runningJobIds().length > 0 || InstallTaskState.snapshot().some(
+    return WirelessDebugLifecycle.grabOwners.size > 0 ||
+      JobScheduler.runningJobIds().length > 0 || InstallTaskState.snapshot().some(
       (row: InstallTaskSnapshot) => row.running);
+  }
+
+  /** Mark a continuous workflow as active so backgrounding does not drop the HDC link. */
+  static beginGrab(owner:string):void{
+    WirelessDebugLifecycle.grabOwners.add(owner);
+  }
+
+  static endGrab(owner:string):void{
+    if(!WirelessDebugLifecycle.grabOwners.delete(owner))return;
+    WirelessDebugLifecycle.checkIdle();
   }
 
   static onBackground(): void {

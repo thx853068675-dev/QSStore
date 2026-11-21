@@ -57,7 +57,7 @@ export class PackageEditor {
     context?: common.UIAbilityContext): Promise<string> {
     const previous=row.editedPath;row.editedPath='';
     if(previous){PackageArchive.release(previous);if(fileIo.accessSync(previous))fileIo.unlinkSync(previous);}
-    const label=name.trim();if(label.length>64 || /[\x00-\x1f]/.test(label))throw new Error(I18n.t('应用名称应为 1–64 个字符'));
+    const label=name.trim();if(label.length>80 || /[\x00-\x1f]/.test(label))throw new Error(I18n.t('应用名称应为 1–80 个字符'));
     const bundle=bundleName.trim()||row.identity.bundleName;
     if(bundle.length<7||bundle.length>128||!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(bundle))throw new Error(I18n.t('包名应为 7–128 位字母、数字、下划线及点，且每段以字母开头'));
     if(!label && !iconPath && bundle===row.identity.bundleName)throw new Error(I18n.t('请填写名称、包名或选择图标'));

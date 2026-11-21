@@ -43,7 +43,7 @@ export class MultiDeviceInstall {
       } else {
         job = await store.enqueue(source.appId, source.assetName, source.catalogSourceUrl || source.sourceUrl,
           source.catalogSha256, source.mirrorUrls, source.versionName, source.catalogBundleName,
-          source.catalogVersionCode, source.releaseTag, source.releaseName, true, '', target);
+          source.catalogVersionCode, source.releaseTag, source.releaseName, true, '', target, source.catalogDisplayName);
       }
       if(JobScheduler.isRunning(job.id)){result.push(job);continue;}
       job.batchId=batch;

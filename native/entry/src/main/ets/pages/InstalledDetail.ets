@@ -1,3 +1,5 @@
+import { AppBackground } from '../data/AppBackgroundPreferences';
+import { AppThemeBackground } from '../components/AppThemeBackground';
 import { displayVersion } from '../data/DisplayVersion';
 import { router, promptAction } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
@@ -12,7 +14,7 @@ import { InstalledAppRegistry } from '../jobs/InstalledAppRegistry';
 import { JobStore } from '../jobs/JobStore';
 import { InstalledSigningExpiry } from '../jobs/InstalledSigningExpiry';
 import { Palette } from '../theme/Palette';
-import { StoreImmersiveIconButton,StoreLayout,StoreTopFade } from '../theme/StoreDesign';
+import { StoreImmersiveAction,StoreImmersiveIconButton,StoreLayout,StoreTopFade } from '../theme/StoreDesign';
 import { StorePageMotion } from '../theme/StorePageMotion';
 import { StoreMaterial } from '../theme/StoreMaterial';
 import { I18n } from '../data/I18n';
@@ -20,6 +22,7 @@ import { I18n } from '../data/I18n';
 @Entry
 @Component
 struct InstalledDetail {
+  @StorageProp('appBackground') private themeState: AppBackground = new AppBackground();
   @StorageProp('materialMode') private materialMode:string='adaptive';
   @StorageProp('darkMode') darkMode:boolean=false;
   @StorageProp('statusBarInset') statusBarInset:number=0;
@@ -32,9 +35,7 @@ struct InstalledDetail {
   @State private searchText:string='';
   @State private query:string='';
   @State private informationRevision:number=0;
-  @StorageProp('routeTransitioning') private routeTransitioning:boolean=false;
   @State private headerVisible:boolean=false;
-  @State private searchWidth:number=0;
   @State private pixels:image.PixelMap|null=null;
   @State private busy:boolean=false;
   @State private notice:string='';
@@ -50,6 +51,7 @@ struct InstalledDetail {
   private ownedPixels?:image.PixelMap;
   private searchDebounce:InspectionSearch=new InspectionSearch((query:string)=>{this.query=query;this.applySearch();if(query)this.scroller.scrollTo({xOffset:0,yOffset:0});});
   private colors():Palette{return Palette.forMode(this.darkMode);}
+  private cardSurface(): string { return Palette.containerPaint(this.colors().surface, this.themeState.containerOpacity); }
   pageTransition() {
     PageTransitionEnter(StorePageMotion.options(RouteType.Push)).slide(SlideEffect.Right).opacity(1).scale({ x: 1, y: 1 })
     PageTransitionEnter(StorePageMotion.stationary(RouteType.Pop)).translate({ x: 0 }).opacity(1).scale({ x: 1, y: 1 })
@@ -151,7 +153,7 @@ struct InstalledDetail {
         }.width('100%').alignItems(VerticalAlign.Top);
       },(field:InspectionField)=>field.key)
     }.width('100%').alignItems(HorizontalAlign.Start).padding(18)
-      .backgroundColor(this.colors().surface).borderRadius(StoreLayout.cardRadius)
+      .backgroundColor(this.cardSurface()).borderRadius(StoreLayout.cardRadius)
   }
   @Builder private searchInput(){
     // Popup content is measured in a vertical container; flex weight here would stretch its height.
@@ -167,29 +169,30 @@ struct InstalledDetail {
         .onChange((value:string,preview?:PreviewText)=>this.search(value,preview))
     }.width('100%').height(44).constraintSize({minHeight:44,maxHeight:44})
   }
+  @Builder private searchControl(immersive:boolean){
+    Stack(){this.searchInput();}.width('100%').height(44).borderRadius(22).clip(true)
+      .backgroundBlurStyle(immersive?BlurStyle.NONE:StoreMaterial.blurStyle(this.materialMode),
+        {colorMode:this.darkMode?ThemeColorMode.DARK:ThemeColorMode.LIGHT})
+      .backgroundColor(immersive?Color.Transparent:StoreMaterial.fallbackFill(this.darkMode))
+      .border({width:immersive?0:0.5,color:this.colors().border,radius:22})
+      .shadow(immersive?undefined:ShadowStyle.OUTER_DEFAULT_SM)
+  }
   @Builder private informationHeader(){
     Stack({alignContent:Alignment.Top}){
       StoreTopFade({statusInset:this.statusBarInset})
       Row({space:10}){
         StoreImmersiveIconButton({symbol:$r('sys.symbol.chevron_left'),label:I18n.t('返回'),controlId:'installed-info-back',visible:this.headerVisible,action:()=>this.back(),backAction:()=>this.back()});
-        if(StoreMaterial.supported(this.materialMode)){
-          Column(){}.height(44).layoutWeight(1).onSizeChange((_old:SizeOptions,size:SizeOptions)=>{const width=Number(size.width);if(Number.isFinite(width)&&width>0&&Math.abs(width-this.searchWidth)>0.5)this.searchWidth=width;})
-            .bindPopup(this.headerVisible&&!this.routeTransitioning&&this.searchWidth>0,{builder:this.searchInput,width:this.searchWidth,radius:22,
-              placement:Placement.Bottom,targetSpace:0,offset:{x:0,y:-44},enableArrow:false,autoCancel:false,focusable:true,mask:false,
-              onWillDismiss:(action:DismissPopupAction)=>{if(action.reason===DismissReason.PRESS_BACK)this.back();},
-              systemMaterial:StoreMaterial.glass(this.materialMode,this.darkMode)})
-        }else{
-          Stack(){this.searchInput();}.height(44).layoutWeight(1).borderRadius(22).clip(true)
-            .backgroundBlurStyle(StoreMaterial.blurStyle(this.materialMode),{colorMode:this.darkMode?ThemeColorMode.DARK:ThemeColorMode.LIGHT})
-            .backgroundColor(StoreMaterial.fallbackFill(this.darkMode))
-            .border({width:0.5,color:this.colors().border,radius:22}).shadow(ShadowStyle.OUTER_DEFAULT_SM)
-        }
+        StoreImmersiveAction({visible:this.headerVisible,controlHeight:44,controlRadius:22,
+          anchorAtStart:true,followsTarget:true,popupFocusable:true,colored:false,contentDrawsFallback:true,
+          backAction:()=>this.back(),content:(immersive:boolean):void=>this.searchControl(immersive)})
+          .height(44).layoutWeight(1)
         StoreImmersiveIconButton({symbol:$r('sys.symbol.arrow_clockwise'),label:I18n.t('刷新应用信息'),controlId:'installed-info-refresh',loading:this.busy,visible:this.headerVisible,action:()=>this.read(),backAction:()=>this.back()});
       }.width('100%').alignItems(VerticalAlign.Center).constraintSize({maxWidth:StoreLayout.frameMaxWidth(this.windowWidth)}).padding({left:StoreLayout.inset(this.windowWidth),right:StoreLayout.inset(this.windowWidth),top:this.statusBarInset+6,bottom:8})
     }.width('100%').height(this.statusBarInset+58).position({x:0,y:0})
   }
   build(){
     Stack({alignContent:Alignment.Top}){
+      AppThemeBackground()
       Scroll(this.scroller){Column({space:16}){
         if(!this.query){
         Column({space:12}){
@@ -199,7 +202,7 @@ struct InstalledDetail {
           Text(this.renewalExpiry||InstalledSigningExpiry.label(0,0,
             InstalledAppRegistry.installationTime(this.info.bundleName,this.info.versionCode)||this.info.updatedAt))
             .fontSize(11).fontColor(this.colors().textTertiary);
-        }.width('100%').padding(22).backgroundColor(this.colors().surface).borderRadius(22)
+        }.width('100%').padding(22).backgroundColor(this.cardSurface()).borderRadius(22)
         }
         if(this.notice){Text(this.notice).fontSize(12).fontColor(this.colors().textSecondary).width('100%');}
         if(this.query){Text(this.matches.length?I18n.t('找到 ')+this.matches.reduce((count:number,section:InspectionSection)=>count+section.fields.length,0)+I18n.t(' 项'):I18n.t('未找到匹配信息')).fontSize(12).fontColor(this.colors().textSecondary).width('100%');}

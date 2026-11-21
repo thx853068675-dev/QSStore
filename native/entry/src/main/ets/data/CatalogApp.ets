@@ -3,10 +3,19 @@ import { HapAsset } from './ReleaseInfo';
 export class CatalogApp {
   id: number = 0;
   displayName: string = '';
+  /** Explicit publisher name, independent from the repository or installed label. */
+  customDisplayName: string = '';
   repo: string = '';
   secondaryRepo: string = '';
   summary: string = '';
+  description: string = '';
+  screenshots: string[] = [];
+  claimedByMe: boolean = false;
   category: string = '';
+  /** Authoritative server classification; never infer it from a name or category. */
+  overseas: boolean = false;
+  /** Account library metadata must not create public discovery categories. */
+  personalOnly: boolean = false;
   publisherName: string = '';
   stars: number = 0;
   updatedAt: string = '';
@@ -31,9 +40,14 @@ export class CatalogApp {
 
   static copy(app: CatalogApp): CatalogApp {
     const copy = new CatalogApp();
-    copy.id = app.id; copy.displayName = app.displayName; copy.repo = app.repo;
+    copy.id = app.id; copy.displayName = app.displayName; copy.customDisplayName = app.customDisplayName ?? '';
+    copy.repo = app.repo;
     copy.secondaryRepo = app.secondaryRepo;
     copy.summary = app.summary; copy.category = app.category; copy.publisherName = app.publisherName;
+    copy.description = app.description; copy.screenshots = app.screenshots;
+    copy.claimedByMe = app.claimedByMe;
+    copy.overseas = app.overseas;
+    copy.personalOnly = app.personalOnly;
     copy.stars = app.stars; copy.updatedAt = app.updatedAt;
     copy.createdAt = app.createdAt; copy.latestPublishedAt=app.latestPublishedAt??'';
     copy.iconUrl = app.iconUrl; copy.iconRev = app.iconRev;
@@ -47,10 +61,18 @@ export class CatalogApp {
     const app = new CatalogApp();
     app.id = Number(row['id'] ?? 0);
     app.displayName = String(row['display_name'] ?? row['name'] ?? '');
+    if (typeof row['custom_display_name'] === 'string') app.customDisplayName = String(row['custom_display_name']).trim();
     app.repo = String(row['repo'] ?? '');
     app.secondaryRepo = String(row['secondary_repo'] ?? '');
     app.summary = String(row['summary'] ?? '');
+    app.description = String(row['description'] ?? '');
+    app.claimedByMe = row['claimed_by_me'] === true;
+    const screenshots = row['screenshots'] as string[] | undefined;
+    app.screenshots = Array.isArray(screenshots) ? screenshots.filter((digest: string) =>
+      typeof digest === 'string' && /^[a-f0-9]{24}$/.test(digest)).slice(0, 6) : [];
     app.category = String(row['category'] ?? '');
+    app.overseas = row['distribution_region'] === 'overseas';
+    app.personalOnly = row['personal_access'] === true;
     app.publisherName = String(row['publisher_name'] ?? '');
     app.stars = Number(row['stars'] ?? 0);
     app.updatedAt = String(row['updated_at'] ?? '');
